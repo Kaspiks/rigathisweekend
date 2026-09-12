@@ -89,7 +89,7 @@ The first version targets a **WhatsApp group**, using WAHA. Create a group and, 
 
 The same adapter accepts a channel ID ending in `@newsletter`, but channel support depends on the chosen WAHA engine/version. Group delivery is the initial path to validate. WAHA is an unofficial WhatsApp integration: sessions can disconnect and account restrictions are possible. No WhatsApp account is paired automatically. Use a dedicated project account where practical.
 
-WAHA's image is configurable. Before a production rollout, pin `WAHA_IMAGE` to the digest of the version you tested; its initial tag is floating. Its current image is x86-only, so Compose explicitly requests `linux/amd64`. Docker Desktop uses emulation on an ARM Mac; it runs natively on an x86 Hetzner VPS.
+WAHA's image is pinned to an immutable digest and is configurable with `WAHA_IMAGE`. Startup is checked locally; account pairing and real delivery still require your account. Its current image is x86-only, so Compose explicitly requests `linux/amd64`. Docker Desktop uses emulation on an ARM Mac; it runs natively on an x86 Hetzner VPS.
 
 ## Research: choose one owner
 

@@ -155,7 +155,7 @@ services:
       retries: 15
   waha:
     profiles: [whatsapp]
-    image: ${WAHA_IMAGE:-devlikeapro/waha:latest}
+    image: ${WAHA_IMAGE:-devlikeapro/waha@sha256:527ff3d634925adb26d596883d7b3ca502c080f737af3c2af2be0c973c511533}
     platform: linux/amd64
     restart: unless-stopped
     ports: ["127.0.0.1:3001:3000"]
