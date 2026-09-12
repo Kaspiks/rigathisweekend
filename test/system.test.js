@@ -29,6 +29,11 @@ test('DST scheduling stays at Riga 09:00 on the clock change',()=>{
   assert.equal(jobs[0].due,'2026-10-23T06:00:00.000Z');
   assert.equal(jobs[2].due,'2026-10-25T07:00:00.000Z');
 });
+test('Oversized Instagram copy is rejected before an edition is stored',async t=>{
+  const store=await setup(t);const input=fixture();
+  input.events=Array.from({length:8},(_,i)=>({...input.events[0],title:String(i)+'x'.repeat(99),venue:'v'.repeat(90),price:'p'.repeat(60)}));
+  assert.throws(()=>store.submit(input),/2,200/);assert.equal(store.list().length,0);
+});
 test('Submissions and approvals deduplicate; competing editions cannot both publish',async t=>{
   const store=await setup(t),e=store.submit(fixture());assert.equal(store.submit(fixture()).id,e.id);
   store.approve(e.id);store.approve(e.id);assert.equal(store.jobs(e.id).length,3);

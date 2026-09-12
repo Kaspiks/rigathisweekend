@@ -33,6 +33,8 @@ export function validateSubmission(input) {
     seen.add(key);
   }
   data.events.sort((a,b) => Date.parse(a.startsAt) - Date.parse(b.startsAt) || a.title.localeCompare(b.title));
+  // Reject oversized copy before persistence so a bad import cannot break the review page.
+  caption(data);
   return data;
 }
 export const digest = data => createHash('sha256').update(JSON.stringify(data)).digest('hex').slice(0,24);
