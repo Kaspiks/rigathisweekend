@@ -1,0 +1,6 @@
+{$APP_DOMAIN} {
+  reverse_proxy app:3100
+}
+{$POSTIZ_DOMAIN} {
+  reverse_proxy postiz:5000
+}

@@ -1,0 +1,17 @@
+name: Docker tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate disposable test configuration
+        run: sh scripts/bootstrap.sh
+      - name: Validate Compose
+        run: docker compose --profile whatsapp --profile production --profile test config --quiet
+      - name: Build test image
+        run: docker compose --profile test build test
+      - name: Run isolated tests
+        run: docker compose --profile test run --rm test

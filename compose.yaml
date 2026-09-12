@@ -1,0 +1,200 @@
+name: riga-weekend
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    environment: &app_environment
+      HOST: 0.0.0.0
+      DATA_DIR: /app/data
+      POSTIZ_API_URL: http://postiz:5000/api/public/v1
+      WAHA_URL: http://waha:3000
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Run sh scripts/bootstrap.sh}
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3100}
+      LIVE_PUBLISH: ${LIVE_PUBLISH:-false}
+      AUTO_APPROVE: ${AUTO_APPROVE:-false}
+      RESEARCH_SCHEDULE_ENABLED: ${RESEARCH_SCHEDULE_ENABLED:-false}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      POSTIZ_API_KEY: ${POSTIZ_API_KEY:-}
+      INSTAGRAM_INTEGRATION_ID: ${INSTAGRAM_INTEGRATION_ID:-}
+      INSTAGRAM_PROVIDER: ${INSTAGRAM_PROVIDER:-instagram-standalone}
+      WAHA_API_KEY: ${WAHA_API_KEY:-}
+      WAHA_SESSION: ${WAHA_SESSION:-default}
+      WAHA_CHAT_ID: ${WAHA_CHAT_ID:-}
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    ports: ["127.0.0.1:3100:3100"]
+    volumes: ["riga-data:/app/data"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3100/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  worker:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    command: ["node", "src/cli.js", "worker"]
+    environment: *app_environment
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    volumes: ["riga-data:/app/data"]
+    stop_grace_period: 3m
+    depends_on:
+      app: {condition: service_healthy}
+  postiz:
+    image: ${POSTIZ_IMAGE:-ghcr.io/gitroomhq/postiz-app:v2.23.0}
+    restart: unless-stopped
+    ports: ["127.0.0.1:4007:5000"]
+    environment:
+      MAIN_URL: ${POSTIZ_PUBLIC_URL:-http://localhost:4007}
+      FRONTEND_URL: ${POSTIZ_PUBLIC_URL:-http://localhost:4007}
+      NEXT_PUBLIC_BACKEND_URL: ${POSTIZ_PUBLIC_URL:-http://localhost:4007}/api
+      BACKEND_INTERNAL_URL: http://localhost:3000
+      JWT_SECRET: ${POSTIZ_JWT_SECRET:?Run node scripts/setup.mjs}
+      DATABASE_URL: postgresql://postiz:${POSTGRES_PASSWORD:?Required}@postiz-postgres:5432/postiz
+      REDIS_URL: redis://postiz-redis:6379
+      TEMPORAL_ADDRESS: temporal:7233
+      IS_GENERAL: 'true'
+      RUN_CRON: 'true'
+      DISABLE_REGISTRATION: ${DISABLE_REGISTRATION:-true}
+      STORAGE_PROVIDER: local
+      UPLOAD_DIRECTORY: /uploads
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: /uploads
+      INSTAGRAM_APP_ID: ${INSTAGRAM_APP_ID:-}
+      INSTAGRAM_APP_SECRET: ${INSTAGRAM_APP_SECRET:-}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-}
+      API_LIMIT: 30
+    volumes: ["postiz-config:/config", "postiz-uploads:/uploads"]
+    depends_on:
+      postiz-postgres: {condition: service_healthy}
+      postiz-redis: {condition: service_healthy}
+      temporal: {condition: service_healthy}
+  postiz-postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postiz
+      POSTGRES_DB: postiz
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Required}
+    volumes: ["postiz-db:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postiz -d postiz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  postiz-redis:
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    volumes: ["postiz-redis:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  temporal-postgresql:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${TEMPORAL_PASSWORD:?Required}
+    volumes: ["temporal-db:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  temporal-elasticsearch:
+    image: elasticsearch:7.17.27
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      ES_JAVA_OPTS: -Xms256m -Xmx256m
+      xpack.security.enabled: 'false'
+      cluster.routing.allocation.disk.watermark.low: 512mb
+      cluster.routing.allocation.disk.watermark.high: 256mb
+      cluster.routing.allocation.disk.watermark.flood_stage: 128mb
+    volumes: ["temporal-search:/usr/share/elasticsearch/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+  temporal:
+    image: temporalio/auto-setup:1.28.1
+    restart: unless-stopped
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: ${TEMPORAL_PASSWORD:?Required}
+      POSTGRES_SEEDS: temporal-postgresql
+      ENABLE_ES: 'true'
+      ES_SEEDS: temporal-elasticsearch
+      ES_VERSION: v7
+      TEMPORAL_NAMESPACE: default
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/production.yaml
+    volumes: ["./deploy/temporal.yaml:/etc/temporal/config/dynamicconfig/production.yaml:ro"]
+    depends_on:
+      temporal-postgresql: {condition: service_healthy}
+      temporal-elasticsearch: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+  waha:
+    profiles: [whatsapp]
+    image: ${WAHA_IMAGE:-devlikeapro/waha:latest}
+    platform: linux/amd64
+    restart: unless-stopped
+    ports: ["127.0.0.1:3001:3000"]
+    environment:
+      WAHA_API_KEY: ${WAHA_API_KEY:?Required}
+      WAHA_DASHBOARD_USERNAME: admin
+      WAHA_DASHBOARD_PASSWORD: ${WAHA_DASHBOARD_PASSWORD:?Required}
+      WHATSAPP_SWAGGER_USERNAME: admin
+      WHATSAPP_SWAGGER_PASSWORD: ${WAHA_DASHBOARD_PASSWORD:?Required}
+      WHATSAPP_DEFAULT_ENGINE: WEBJS
+    volumes: ["waha-sessions:/app/.sessions"]
+  caddy:
+    profiles: [production]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-events.example.com}
+      POSTIZ_DOMAIN: ${POSTIZ_DOMAIN:-social.example.com}
+    volumes: ["./deploy/Caddyfile:/etc/caddy/Caddyfile:ro", "caddy-data:/data", "caddy-config:/config"]
+    depends_on: [app,postiz]
+  test:
+    profiles: [test]
+    build:
+      context: .
+      target: test
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+volumes:
+  riga-data:
+  postiz-config:
+  postiz-uploads:
+  postiz-db:
+  postiz-redis:
+  temporal-db:
+  temporal-search:
+  waha-sessions:
+  caddy-data:
+  caddy-config:
