@@ -2,6 +2,7 @@ import { DateTime } from 'luxon';
 import { request } from './providers.js';
 import { validateSubmission, weekendFor, ZONE } from './domain.js';
 import { renderEdition } from './render.js';
+import { captionLinker } from './shortlinks.js';
 
 export async function research(weekend=weekendFor(),env=process.env,fetcher=fetch) {
   if(!env.OPENAI_API_KEY||!env.OPENAI_MODEL) throw new Error('Set OPENAI_API_KEY and OPENAI_MODEL, or submit events through MCP');
@@ -22,7 +23,7 @@ export async function research(weekend=weekendFor(),env=process.env,fetcher=fetc
 }
 export async function researchInto(store,weekend,env=process.env,fetcher=fetch) {
   const result=await research(weekend,env,fetcher);
-  const e=store.submit(result.data); await renderEdition(e,store.dir);
+  const e=store.submit(result.data); await renderEdition(e,store.dir,fetch,{link:captionLinker(store,env)});
   const {writeFile}=await import('node:fs/promises');
   await writeFile(`${store.dir}/media/${e.id}/evidence.json`,JSON.stringify(result.evidence,null,2));
   return e;

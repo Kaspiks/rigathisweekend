@@ -1,0 +1,27 @@
+{
+  "name": "riga-weekend-remotion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remotion compositions for Instagram stories. Rendered in its own container so the app image stays without Chrome.",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts EnvelopeStory out/envelope-story.mp4",
+    "still": "remotion still src/index.ts EnvelopeStory out/still.png",
+    "bundle": "remotion bundle src/index.ts --out-dir build",
+    "serve": "node server.mjs"
+  },
+  "dependencies": {
+    "@fontsource/cormorant-garamond": "5.3.0",
+    "@fontsource/great-vibes": "5.3.0",
+    "@remotion/bundler": "4.0.524",
+    "@remotion/cli": "4.0.524",
+    "@remotion/renderer": "4.0.524",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "remotion": "4.0.524"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "typescript": "^5.5.0"
+  }
+}

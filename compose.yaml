@@ -20,9 +20,13 @@ services:
       POSTIZ_API_KEY: ${POSTIZ_API_KEY:-}
       INSTAGRAM_INTEGRATION_ID: ${INSTAGRAM_INTEGRATION_ID:-}
       INSTAGRAM_PROVIDER: ${INSTAGRAM_PROVIDER:-instagram-standalone}
+      POSTIZ_PUBLIC_URL: ${POSTIZ_PUBLIC_URL:-}
+      SHORT_LINK_BASE: ${SHORT_LINK_BASE:-}
+      EJUZ_API_KEY: ${EJUZ_API_KEY:-}
       WAHA_API_KEY: ${WAHA_API_KEY:-}
       WAHA_SESSION: ${WAHA_SESSION:-default}
       WAHA_CHAT_ID: ${WAHA_CHAT_ID:-}
+      RENDER_URL: ${RENDER_URL:-http://render:3200}
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
     cap_drop: [ALL]
@@ -30,6 +34,7 @@ services:
     init: true
     ports: ["127.0.0.1:3100:3100"]
     volumes: ["riga-data:/app/data"]
+    networks: [default, render]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3100/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -74,7 +79,9 @@ services:
       INSTAGRAM_APP_SECRET: ${INSTAGRAM_APP_SECRET:-}
       FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-}
       FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-}
-      API_LIMIT: 30
+      # Requests per hour through Postiz's API, uploads included. A full weekend is ~70 posts plus ~150 image
+      # uploads, and a throttle block outlasts any later increase, so this sits far above that.
+      API_LIMIT: 1000
     volumes: ["postiz-config:/config", "postiz-uploads:/uploads"]
     depends_on:
       postiz-postgres: {condition: service_healthy}
@@ -187,6 +194,23 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     network_mode: none
+  # Story video renderer (Remotion: Node + headless Chrome), kept out of the app image. The app calls
+  # POST http://render:3200/render when you press "Render story video"; it writes grid-<date>.mp4 next
+  # to the grid in the shared data volume. Its network is internal: it reaches the app, not the internet.
+  render:
+    build: ./remotion
+    restart: unless-stopped
+    init: true
+    shm_size: 1gb
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      DATA_DIR: /data
+    volumes: ["riga-data:/data"]
+    networks: [render]
+networks:
+  render:
+    internal: true
 volumes:
   riga-data:
   postiz-config:

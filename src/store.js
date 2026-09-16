@@ -1,7 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
+import { randomInt } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { digest, validateSubmission, plannedJobs } from './domain.js';
+import { digest, validateSubmission, plannedJobs, eventsByDay, validatePublication } from './domain.js';
+import { GRID_KINDS } from './providers.js';
 import { DateTime } from 'luxon';
 
 export class Store {
@@ -10,27 +12,76 @@ export class Store {
     this.db = new DatabaseSync(join(dir,'riga.sqlite'));
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS editions(id TEXT PRIMARY KEY, weekend TEXT NOT NULL, data TEXT NOT NULL, demo INTEGER NOT NULL, approved INTEGER DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP);
-      CREATE UNIQUE INDEX IF NOT EXISTS one_approved_weekend ON editions(weekend) WHERE approved=1 AND demo=0;
+      CREATE TABLE IF NOT EXISTS day_locks(date TEXT PRIMARY KEY, edition TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS ejuz_calls(at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS short_links(code TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, created TEXT NOT NULL, clicks INTEGER NOT NULL DEFAULT 0, last_click TEXT);
       CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, edition TEXT NOT NULL, target TEXT NOT NULL, due TEXT NOT NULL, status TEXT DEFAULT 'queued', result TEXT, UNIQUE(edition,target));
-      CREATE TABLE IF NOT EXISTS runs(weekend TEXT PRIMARY KEY, status TEXT NOT NULL, detail TEXT);`);
+      CREATE TABLE IF NOT EXISTS runs(weekend TEXT PRIMARY KEY, status TEXT NOT NULL, detail TEXT);
+      CREATE TABLE IF NOT EXISTS grids(edition TEXT NOT NULL, date TEXT NOT NULL, picks TEXT NOT NULL, kicker TEXT NOT NULL, category TEXT NOT NULL, hold_seconds REAL NOT NULL DEFAULT 6, status TEXT NOT NULL DEFAULT 'built', error TEXT, updated TEXT NOT NULL, PRIMARY KEY(edition,date));`);
+    // Instagram posts are per day, so the approval rule moved from one edition per weekend
+    // to one per weekend day. Editions approved under the old rule keep their days.
+    this.db.exec('DROP INDEX IF EXISTS one_approved_weekend');
+    try {this.db.exec('ALTER TABLE editions ADD COLUMN selected TEXT');} catch {} // added with per-event selection
+    try {this.db.exec('ALTER TABLE editions ADD COLUMN stories TEXT');} catch {} // added with opt-in stories
+    try {this.db.exec('ALTER TABLE jobs ADD COLUMN publish_at TEXT');} catch {} // when Postiz should publish it
+    try {this.db.exec('ALTER TABLE jobs ADD COLUMN finished_at TEXT');} catch {}
+    try {this.db.exec("ALTER TABLE grids ADD COLUMN style TEXT NOT NULL DEFAULT 'ticket'");} catch {} // added with the ticket opener
+    for(const column of ['ejuz TEXT','ejuz_error TEXT','ejuz_tried TEXT','ejuz_clicks INTEGER NOT NULL DEFAULT 0','ejuz_display TEXT'])
+      try {this.db.exec(`ALTER TABLE short_links ADD COLUMN ${column}`);} catch {} // ej.uz links alongside the app's own
+    if(!this.db.prepare('SELECT count(*) n FROM day_locks').get().n)
+      for(const row of this.db.prepare('SELECT id,data FROM editions WHERE approved=1 AND demo=0').all())
+        for(const day of eventsByDay(JSON.parse(row.data)))
+          this.db.prepare('INSERT OR IGNORE INTO day_locks(date,edition) VALUES(?,?)').run(day.date,row.id);
   }
   submit(input, demo=false) {
     const data=validateSubmission(input); const id=digest({data,demo});
     this.db.prepare('INSERT OR IGNORE INTO editions(id,weekend,data,demo) VALUES(?,?,?,?)').run(id,data.weekend,JSON.stringify(data),+demo);
     return this.get(id);
   }
-  get(id) { const row=this.db.prepare('SELECT * FROM editions WHERE id=?').get(id); if(!row) throw new Error('Edition not found'); return {...row,data:JSON.parse(row.data)}; }
+  get(id) { const row=this.db.prepare('SELECT * FROM editions WHERE id=?').get(id); if(!row) throw new Error('Edition not found'); return {...row,data:JSON.parse(row.data),selected:row.selected?JSON.parse(row.selected):null,stories:row.stories?JSON.parse(row.stories):[]}; }
   list() { return this.db.prepare('SELECT id FROM editions ORDER BY created DESC, rowid DESC').all().map(r=>this.get(r.id)); }
   jobs(id) { return this.db.prepare('SELECT * FROM jobs WHERE edition=? ORDER BY id').all(id); }
-  approve(id, now=DateTime.now()) {
+  // `selected` lists the events to publish (omit for all); `stories` lists which of those also get a story draft.
+  // Every check approval makes, without writing anything. Used before creating short links, so a
+  // selection that would be refused never produces links nobody publishes.
+  planApproval(id, now=DateTime.now(), selected=null, stories=[]) {
     const e=this.get(id);
     if(e.demo) throw new Error('Demo editions cannot be published');
     if(DateTime.fromISO(e.weekend,{zone:'Europe/Riga'}).plus({days:3}) <= now) throw new Error('Weekend has ended');
-    if(e.data.events.some(x=>Date.parse(x.startsAt)<=now.toMillis())) throw new Error('Edition contains past events; submit an updated edition');
+    let picks=null;
+    if(selected!=null) {
+      picks=[...new Set(selected.map(Number))].sort((a,b)=>a-b);
+      if(picks.some(i=>!Number.isInteger(i)||i<0||i>=e.data.events.length)) throw new Error('Selection refers to an event that is not in this edition');
+    }
+    const pool=new Set(picks??e.data.events.map((_,i)=>i));
+    const storyPicks=[...new Set((stories||[]).map(Number))].sort((a,b)=>a-b);
+    if(storyPicks.some(i=>!pool.has(i))) throw new Error('A story was ticked for an event that is not being published');
+    const publishing=validatePublication(e.data,picks);
+    // Only the events you chose have to still be in the future; skipping a started one is the point of selecting.
+    if(publishing.some(d=>d.items.some(x=>Date.parse(x.event.startsAt)<=now.toMillis()))) throw new Error('Selection contains events that already started; deselect them or submit an updated edition');
+    for(const date of new Set(publishing.map(p=>p.date))) {
+      const owner=this.db.prepare('SELECT edition FROM day_locks WHERE date=?').get(date)?.edition;
+      if(owner&&owner!==id) throw new Error(`Another approved edition already covers ${date}; submit an updated edition for the remaining days`);
+    }
+    return {e,picks,storyPicks,publishing,urls:[...pool].map(i=>e.data.events[i].sourceUrl)};
+  }
+  approve(id, now=DateTime.now(), selected=null, stories=[]) {
+    if(this.get(id).approved) return this.jobs(id); // already queued; a second call must not change what was published
+    const {e,picks,storyPicks,publishing}=this.planApproval(id,now,selected,stories);
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      this.db.prepare('UPDATE editions SET selected=?, stories=? WHERE id=?').run(picks?JSON.stringify(picks):null,JSON.stringify(storyPicks),id);
+      // One approved edition per weekend day: a later edition may cover a day nothing has claimed,
+      // but two editions can never publish the same day twice.
+      for(const day of [...new Map(publishing.map(p=>[p.date,p])).values()]) {
+        this.db.prepare('INSERT OR IGNORE INTO day_locks(date,edition) VALUES(?,?)').run(day.date,id);
+        if(this.db.prepare('SELECT edition FROM day_locks WHERE date=?').get(day.date).edition!==id)
+          throw new Error(`Another approved edition already covers ${day.date}; submit an updated edition for the remaining days`);
+      }
       this.db.prepare('UPDATE editions SET approved=1 WHERE id=?').run(id);
-      for(const j of plannedJobs(e.data,now)) this.db.prepare('INSERT OR IGNORE INTO jobs(edition,target,due) VALUES(?,?,?)').run(id,j.target,j.due);
+      // Every Instagram item is handed to Postiz at once (due now), carrying the time Postiz should publish it.
+      const handover=now.toUTC().toISO();
+      for(const j of plannedJobs(e.data,now,picks,storyPicks)) this.db.prepare('INSERT OR IGNORE INTO jobs(edition,target,due,publish_at) VALUES(?,?,?,?)').run(id,j.target,handover,j.due);
       this.db.exec('COMMIT');
     } catch(err) {this.db.exec('ROLLBACK');throw err;}
     return this.jobs(id);
@@ -38,12 +89,112 @@ export class Store {
   claim(now=new Date().toISOString()) {
     return this.db.prepare("UPDATE jobs SET status='processing' WHERE id=(SELECT id FROM jobs WHERE status='queued' AND due<=? ORDER BY due,id LIMIT 1) AND status='queued' RETURNING *").get(now);
   }
-  finish(id,status,result) {this.db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(status,JSON.stringify(result),id);}
+  finish(id,status,result) {this.db.prepare('UPDATE jobs SET status=?,result=?,finished_at=? WHERE id=?').run(status,JSON.stringify(result),new Date().toISOString(),id);}
+  requeue(id,minutes,note) {this.db.prepare("UPDATE jobs SET status='queued',due=?,result=? WHERE id=?").run(new Date(Date.now()+minutes*60000).toISOString(),JSON.stringify({note}),id);}
+  // The WhatsApp digest goes out only when you press its button, using the events chosen at approval.
+  // Sending again is allowed, but only when asked for explicitly.
+  queueWhatsApp(id, resend=false, now=new Date()) {
+    const e=this.get(id);
+    if(e.demo) throw new Error('Demo editions cannot be sent');
+    if(!e.approved) throw new Error('Approve the edition first: the digest lists the events you chose');
+    const previous=this.db.prepare("SELECT * FROM jobs WHERE edition=? AND (target='whatsapp' OR target LIKE 'whatsapp#%') ORDER BY id DESC").all(id);
+    const last=previous[0];
+    if(last&&['queued','processing'].includes(last.status)) return last;
+    if(last&&['uncertain','blocked'].includes(last.status)) throw new Error('The last WhatsApp send needs checking first: use Retry or Confirm on it below');
+    if(last?.status==='sent'&&!resend) {const err=new Error(`The digest was already sent${last.finished_at?` at ${new Date(last.finished_at).toLocaleString('en-GB',{timeZone:'Europe/Riga'})}`:''}`);err.alreadySent=true;throw err;}
+    const target=previous.length?`whatsapp#${previous.length+1}`:'whatsapp';
+    this.db.prepare('INSERT INTO jobs(edition,target,due,publish_at) VALUES(?,?,?,?)').run(id,target,now.toISOString(),now.toISOString());
+    return this.db.prepare('SELECT * FROM jobs WHERE edition=? AND target=?').get(id,target);
+  }
+  // A rendered story video, handed to Postiz as a draft when you press its button. One job per kind
+  // per day; sending again is allowed but has to be asked for, like the WhatsApp digest.
+  queueGridVideo(edition,date,kind,resend=false,now=new Date()) {
+    const e=this.get(edition);
+    if(e.demo) throw new Error('Demo editions cannot be published');
+    const grid=this.grid(edition,date);
+    if(!grid) throw new Error('Build the grid first');
+    if(grid.status!=='ready') throw new Error('Render the story video first');
+    const prefix=GRID_KINDS[kind]; if(!prefix) throw new Error(`Unknown story kind ${kind}`);
+    const previous=this.db.prepare('SELECT * FROM jobs WHERE edition=? AND (target=? OR target LIKE ?) ORDER BY id DESC').all(edition,`${prefix}:${date}`,`${prefix}:${date}#%`);
+    const last=previous[0];
+    if(last&&['queued','processing'].includes(last.status)) return last;
+    if(last&&['uncertain','blocked'].includes(last.status)) throw new Error('The last send of this video needs checking first: use Retry or Confirm on it below');
+    if(last?.status==='sent'&&!resend) {const err=new Error('This video is already in Postiz as a draft');err.alreadySent=true;throw err;}
+    const target=previous.length?`${prefix}:${date}#${previous.length+1}`:`${prefix}:${date}`;
+    this.db.prepare('INSERT INTO jobs(edition,target,due,publish_at) VALUES(?,?,?,?)').run(edition,target,now.toISOString(),now.toISOString());
+    return this.db.prepare('SELECT * FROM jobs WHERE edition=? AND target=?').get(edition,target);
+  }
   recover() {this.db.prepare("UPDATE jobs SET status='uncertain',result=? WHERE status='processing'").run(JSON.stringify({error:'Worker interrupted. Check provider before retrying.'}));}
   resolve(id,action) {
     const status=action==='retry'?'queued':'sent';
     const r=this.db.prepare("UPDATE jobs SET status=?,result=NULL WHERE id=? AND status IN ('uncertain','blocked')").run(status,id);
     if(!r.changes) throw new Error('Only blocked or uncertain jobs can be resolved');
   }
+  // One short code per organiser URL, reused across editions. Codes avoid look-alike characters
+  // (0/o, 1/l/i) and always contain a digit, so they can never collide with a route like /media.
+  shortCode(url) {
+    const known=this.db.prepare('SELECT code FROM short_links WHERE url=?').get(url); if(known) return known.code;
+    const letters='abcdefghjkmnpqrstuvwxyz', digits='23456789', all=letters+digits;
+    for(let attempt=0;attempt<30;attempt++) {
+      const chars=Array.from({length:5},()=>all[randomInt(all.length)]);
+      chars[randomInt(5)]=digits[randomInt(digits.length)];
+      const code=chars.join('');
+      if(this.db.prepare('INSERT OR IGNORE INTO short_links(code,url,created) VALUES(?,?,?)').run(code,url,new Date().toISOString()).changes) return code;
+      const raced=this.db.prepare('SELECT code FROM short_links WHERE url=?').get(url); if(raced) return raced.code;
+    }
+    throw new Error('Could not allocate a short link');
+  }
+  linker(base) {return url=>`${base}/${this.shortCode(url)}`;}
+  follow(code) {
+    const row=this.db.prepare('SELECT url FROM short_links WHERE code=?').get(code); if(!row) return null;
+    this.db.prepare('UPDATE short_links SET clicks=clicks+1,last_click=? WHERE code=?').run(new Date().toISOString(),code);
+    return row.url;
+  }
+  clicks(url) {return this.db.prepare('SELECT code,clicks,last_click FROM short_links WHERE url=?').get(url)||null;}
+  linkRow(url) {return this.db.prepare('SELECT * FROM short_links WHERE url=?').get(url)||null;}
+  setEjuz(url,smurl,error,display=null) {this.db.prepare('UPDATE short_links SET ejuz=coalesce(?,ejuz), ejuz_display=coalesce(?,ejuz_display), ejuz_error=?, ejuz_tried=? WHERE url=?').run(smurl,display,error,new Date().toISOString(),url);}
+  clearEjuz(url) {this.db.prepare('UPDATE short_links SET ejuz=NULL, ejuz_display=NULL, ejuz_error=NULL, ejuz_tried=NULL, ejuz_clicks=0 WHERE url=?').run(url);}
+  // Every link-creation request to ej.uz, so the limits its developer set can be respected across runs.
+  logEjuzCall(at=new Date()) {this.db.prepare('INSERT INTO ejuz_calls(at) VALUES(?)').run(at.toISOString());this.db.prepare('DELETE FROM ejuz_calls WHERE at<?').run(new Date(at-2*86400000).toISOString());}
+  ejuzCallsSince(ms,now=Date.now()) {return this.db.prepare('SELECT count(*) n FROM ejuz_calls WHERE at>=?').get(new Date(now-ms).toISOString()).n;}
+  setEjuzClicks(url,total) {this.db.prepare('UPDATE short_links SET ejuz_clicks=? WHERE url=?').run(total,url);}
+  // Correct a single field of a candidate event. Approved editions are already in Postiz, so they are left alone.
+  updateEvent(id,index,fields) {
+    const e=this.get(id);
+    if(e.approved) throw new Error('This edition is approved and already in Postiz, so it can no longer be changed here');
+    if(!Number.isInteger(index)||!e.data.events[index]) throw new Error('That event is not in this edition');
+    for(const [k,v] of Object.entries(fields)) {if(v==null||(Array.isArray(v)&&!v.length)) delete e.data.events[index][k]; else e.data.events[index][k]=v;}
+    this.db.prepare('UPDATE editions SET data=? WHERE id=?').run(JSON.stringify(e.data),id);
+    return this.get(id);
+  }
+  // Story grids, one per edition day: the cards you picked, the envelope label, and the render state.
+  grid(edition,date) {
+    const row=this.db.prepare('SELECT * FROM grids WHERE edition=? AND date=?').get(edition,date);
+    return row?{date:row.date,picks:JSON.parse(row.picks),kicker:row.kicker,category:row.category,holdSeconds:row.hold_seconds,style:row.style,status:row.status,error:row.error,updated:row.updated}:null;
+  }
+  grids(edition) {return this.db.prepare('SELECT date FROM grids WHERE edition=? ORDER BY date').all(edition).map(r=>this.grid(edition,r.date));}
+  saveGrid(edition,date,{picks,kicker,category,holdSeconds,style='ticket'}) {
+    if(this.grid(edition,date)?.status==='rendering') throw new Error('This story is rendering; wait for it to finish before changing the grid');
+    this.db.prepare(`INSERT INTO grids(edition,date,picks,kicker,category,hold_seconds,style,status,error,updated) VALUES(?,?,?,?,?,?,?,'built',NULL,?)
+      ON CONFLICT(edition,date) DO UPDATE SET picks=excluded.picks,kicker=excluded.kicker,category=excluded.category,hold_seconds=excluded.hold_seconds,style=excluded.style,status='built',error=NULL,updated=excluded.updated`)
+      .run(edition,date,JSON.stringify(picks),kicker,category,holdSeconds,style,new Date().toISOString());
+    return this.grid(edition,date);
+  }
+  // Claims the render atomically, so two clicks cannot start two renders of the same story.
+  startGridRender(edition,date) {
+    const r=this.db.prepare("UPDATE grids SET status='rendering',error=NULL,updated=? WHERE edition=? AND date=? AND status!='rendering'").run(new Date().toISOString(),edition,date);
+    if(!r.changes) throw new Error(this.grid(edition,date)?'This story is already rendering':'Build the grid first');
+    return this.grid(edition,date);
+  }
+  // The app runs renders, so only its start-up clears them: a render cut short by a restart never reports back.
+  recoverGrids() {this.db.prepare("UPDATE grids SET status='failed', error='Rendering was interrupted; render again' WHERE status='rendering'").run();}
+  finishGridRender(edition,date,error=null) {this.db.prepare('UPDATE grids SET status=?,error=?,updated=? WHERE edition=? AND date=?').run(error?'failed':'ready',error,new Date().toISOString(),edition,date);}
   close(){this.db.close();}
+}
+
+// Where short links point: SHORT_LINK_BASE (a bare host such as kurejam.lv) once you own a short
+// domain, otherwise the dashboard's own host, which already serves them.
+export function shortBase(env=process.env) {
+  if(env.SHORT_LINK_BASE) return env.SHORT_LINK_BASE.replace(/^https?:\/\//,'').replace(/\/+$/,'');
+  try {return new URL(env.APP_ORIGIN||'http://localhost:3100').host;} catch {return 'localhost:3100';}
 }
