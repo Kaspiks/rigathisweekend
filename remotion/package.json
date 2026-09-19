@@ -13,15 +13,19 @@
   "dependencies": {
     "@fontsource/cormorant-garamond": "5.3.0",
     "@fontsource/great-vibes": "5.3.0",
+    "@react-three/fiber": "9.7.0",
     "@remotion/bundler": "4.0.524",
     "@remotion/cli": "4.0.524",
     "@remotion/renderer": "4.0.524",
-    "react": "19.3.0",
-    "react-dom": "19.3.0",
-    "remotion": "4.0.524"
+    "@remotion/three": "4.0.524",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "remotion": "4.0.524",
+    "three": "0.180.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
+    "@types/three": "^0.180.0",
     "typescript": "^5.5.0"
   }
 }

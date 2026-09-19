@@ -1,7 +1,7 @@
 // Small copies of rendered slides for the review page. The dashboard showed full 1080-wide JPEGs for
 // every event of every edition, which is tens of megabytes a visit; these are ~40× smaller and cached.
 import sharp from 'sharp';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -14,7 +14,8 @@ export async function ensureThumb(dir, editionId, file) {
   const source = join(dir, 'media', editionId, file);
   if (!existsSync(source)) throw Object.assign(new Error('No such image'), { code: 'ENOENT' });
   const out = join(dir, 'thumbs', editionId, `${file.replace(/\.(jpg|png)$/, '')}.jpg`);
-  if (existsSync(out)) return out;
+  // A slide redrawn since (a new photo, a new colour theme) gets a new thumbnail too.
+  if (existsSync(out) && statSync(out).mtimeMs >= statSync(source).mtimeMs) return out;
   await mkdir(join(dir, 'thumbs', editionId), { recursive: true });
   const tmp = `${out}.${process.pid}.tmp`;
   await sharp(source).resize(THUMB_W).jpeg({ quality: 72, progressive: true }).toFile(tmp);

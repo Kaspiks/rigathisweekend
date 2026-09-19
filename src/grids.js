@@ -6,14 +6,14 @@ import { join } from 'node:path';
 import { readdir, rm } from 'node:fs/promises';
 import { DateTime } from 'luxon';
 import { z } from 'zod';
-import { eventsByDay, ZONE } from './domain.js';
+import { eventsByDay, eventDate, ZONE } from './domain.js';
 import { cardPhoto, drawCard } from './render.js';
+import { themeFor, themeKey } from './themes.js';
 
 export const GRID_MAX = 6, GRID_W = 1080, GRID_H = 1920, GUTTER = 12;
 // The bottom strip is left clear for the story's footer bar (the ticket stub lands and becomes it).
 export const BAR_H = 190;
 const CARDS_H = GRID_H - BAR_H;
-const INK = '#17352d';
 
 export const GridRequest = z.object({
   events: z.array(z.number().int().min(0)).min(1).max(GRID_MAX),
@@ -67,12 +67,14 @@ export function gridLayout(count) {
 }
 
 // One tile per event per cell shape: a 2×3 grid and a single full-sheet card need different ones.
-export const tilePath = (dir, editionId, index, height) => join(dir, 'media', editionId, `tile-${index}-${height}.jpg`);
+// The version moves when the tile's design changes, and the colour theme is in the name, so old ones are never reused.
+const TILE_VERSION = 2;
+export const tilePath = (dir, editionId, index, height, theme = 'forest') => join(dir, 'media', editionId, `tile${TILE_VERSION}-${index}-${height}${theme === 'forest' ? '' : `-${theme}`}.jpg`);
 // Every tile of one event, whatever cell shape it was drawn for.
 export async function dropTiles(dir, editionId, index) {
   const folder = join(dir, 'media', editionId);
   const files = await readdir(folder).catch(() => []);
-  await Promise.all(files.filter(f => f.startsWith(`tile-${index}-`)).map(f => rm(join(folder, f), { force: true })));
+  await Promise.all(files.filter(f => /^tile\d*-/.test(f) && f.split('-')[1] === String(index)).map(f => rm(join(folder, f), { force: true })));
 }
 
 export const gridFiles = (dir, editionId, date) => ({
@@ -80,15 +82,16 @@ export const gridFiles = (dir, editionId, date) => ({
   mp4: join(dir, 'media', editionId, `grid-${date}.mp4`),
 });
 
-// Grid tiles are the event's card without the carousel number: in a grid every card is visible at once,
-// so "3 of 5" would be meaningless. They are also drawn at the shape of the cell they go in, so the venue
+// Grid tiles are the event's card without the carousel number, and with the clock time alone: in a grid
+// every card of one day is on screen at once, so "3 of 5" and the date would both be noise. They are also drawn at the shape of the cell they go in, so the venue
 // line at the foot of a card is never cropped away. Drawn on demand and kept next to the other media.
 async function gridTile(dir, edition, index, cell) {
   const height = Math.round((GRID_W * cell.height) / cell.width);
-  const tile = tilePath(dir, edition.id, index, height);
+  const event = edition.data.events[index], date = eventDate(event);
+  const tile = tilePath(dir, edition.id, index, height, themeKey(edition, date));
   if (existsSync(tile)) return tile;
   if (!existsSync(join(dir, 'media', edition.id, `feed-${index}.jpg`))) throw new Error(`The card for event ${index + 1} has not been rendered yet`);
-  await drawCard(tile, { event: edition.data.events[index], weekend: edition.weekend, demo: edition.demo, height, photo: await cardPhoto(dir, edition.id, index) });
+  await drawCard(tile, { event, weekend: edition.weekend, demo: edition.demo, height, timeOnly: true, photo: await cardPhoto(dir, edition.id, index), theme: themeFor(edition, date) });
   return tile;
 }
 
@@ -100,6 +103,6 @@ export async function buildGrid(dir, edition, date, picks) {
     return { input: await sharp(card).resize(Math.round(width), Math.round(height), { fit: 'cover' }).toBuffer(), left: Math.round(left), top: Math.round(top) };
   }));
   const { png } = gridFiles(dir, edition.id, date);
-  await sharp({ create: { width: GRID_W, height: GRID_H, channels: 3, background: INK } }).composite(tiles).png().toFile(png);
+  await sharp({ create: { width: GRID_W, height: GRID_H, channels: 3, background: themeFor(edition, date).ink } }).composite(tiles).png().toFile(png);
   return png;
 }

@@ -199,9 +199,14 @@ test('Grid tiles are the cards without the carousel number, drawn to fit their c
   const { cardSvg } = await import('../src/render.js');
   const fs = await import('node:fs');
 
-  // The number badge is what separates a carousel slide from a grid tile.
-  assert.match(cardSvg(e.data.events[0], 2, 9, e.weekend), /OF 9/);
-  assert.doesNotMatch(cardSvg(e.data.events[0], 0, 0, e.weekend), /OF /);
+  // A carousel slide is numbered and dated; a grid tile is neither, because the grid shows one day at once.
+  const slide = cardSvg(e.data.events[0], 2, 9, e.weekend);
+  const tile = cardSvg(e.data.events[0], 0, 0, e.weekend, false, false, null, null, true);
+  assert.match(slide, /OF 9/);
+  assert.doesNotMatch(tile, /OF /);
+  assert.match(slide, /Sat, 24 Oct · 10:00/);
+  assert.match(tile, />10:00</, 'the tile keeps the clock time');
+  assert.doesNotMatch(tile, /Oct/, 'and drops the weekday and date');
 
   const cell = gridLayout(2)[0], cellHeight = Math.round((GRID_W * cell.height) / cell.width);
   assert.equal(existsSync(tilePath(dir, e.id, 0, cellHeight)), false);

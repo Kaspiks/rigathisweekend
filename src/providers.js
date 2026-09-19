@@ -78,10 +78,30 @@ export async function deliver(job,edition,dir,env=process.env,fetcher=fetch,link
   return {postiz:type==='draft'?'draft':'scheduled',publishAt:date,postId:result[0].postId,posts:result};
 }
 // A Reel caption lists the day's events with their links, the same short links the carousels use.
+// A standalone clip, uploaded straight to Postiz as a draft. It takes the same route as a grid video
+// but carries no edition, so it cannot use deliver(): everything that function reads - the day's
+// events, the caption builder, the job row - assumes one exists.
+export async function deliverAnimation(dir,animation,kind,env=process.env,fetcher=fetch) {
+  preflight('instagram_reel:standalone',env);
+  const base=env.POSTIZ_API_URL.replace(/\/$/,''); const headers={Authorization:env.POSTIZ_API_KEY};
+  const filename=`${animation.id}.mp4`;
+  const file=await readFile(join(dir,'media','animations',filename));
+  const body=new FormData(); body.append('file',new Blob([file],{type:'video/mp4'}),filename);
+  const uploaded=await request(`${base}/upload`,{method:'POST',headers,body},fetcher);
+  if(!uploaded.id||!uploaded.path) throw new Error('Postiz upload returned no media ID/path for the video');
+  // A draft, like every other path here: it lands in Postiz for you to look at and schedule.
+  const payload={type:'draft',date:new Date(Date.now()+MIN_LEAD_MINUTES*60000).toISOString(),shortLink:false,tags:[],
+    posts:[{integration:{id:env.INSTAGRAM_INTEGRATION_ID},value:[{content:kind==='reel'?(animation.caption||''):'',image:[{id:uploaded.id,path:uploaded.path}]}],
+      settings:{__type:env.INSTAGRAM_PROVIDER||'instagram-standalone',post_type:kind==='story'?'story':'post'}}]};
+  const result=await request(`${base}/posts`,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(payload)},fetcher);
+  if(!Array.isArray(result)||!result[0]?.postId) throw new Error('Postiz returned no post ID; verify delivery');
+  return {postiz:'draft',kind,postId:result[0].postId,at:new Date().toISOString()};
+}
+
 export function gridCaption(edition,date,link=null) {
   const items=eventsByDay(edition.data,edition.selected).find(d=>d.date===date)?.items||[];
   const lines=items.map(({event:e},i)=>`${i+1}. ${e.title}\n${eventTime(e)} · ${e.venue} · ${e.price}${link?`\n${link(e.sourceUrl)}`:''}`);
-  return [`${dayName(date)} in Rīga.`,'',...lines,'','Save this for the weekend. Check organisers for updates.','#Riga #RigaEvents #Rīga']
+  return [`${edition.data.headline?`${edition.data.headline} · `:''}${dayName(date)} in Rīga.`,'',...lines,'','Save this for the weekend. Check organisers for updates.','#Riga #RigaEvents #Rīga']
     .join('\n').slice(0,2200).split('\n').map(s=>`<p>${escapeHtml(s)}</p>`).join('');
 }
 // Instagram gets one carousel per day: a date cover, then that day's events in order.

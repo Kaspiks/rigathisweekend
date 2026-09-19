@@ -3,7 +3,7 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 async function api(path,body){const r=await fetch(path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw Error(data.error||'Request failed');api.headers=r.headers;return data;}
 async function action(fn){try{$('#status').textContent='Working…';$('#status').className='';await fn();await load();$('#status').textContent='Done.';}catch(e){$('#status').textContent=e.message;$('#status').className='error';}}
 const riga=t=>t?new Date(t).toLocaleString('en-GB',{timeZone:'Europe/Riga',weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'';
-let stamp=Date.now(), postizUrl=null, ejuz=false, renderConfigured=false, showPast=false;
+let stamp=Date.now(), postizUrl=null, ejuz=false, renderConfigured=false, showPast=false, themes=[];
 const gridInfo=new Map(), openGrids=new Set();
 const media=(e,file)=>`/media/${e.id}/${file}?v=${stamp}`;
 // Thumbnails keep the review page light; every one links to the full-size image.
@@ -126,13 +126,20 @@ function gridSection(e){
   </details>`;
 }
 
+// The day's colour theme. One per day, so every part of a split day changes together; fixed once approved.
+function themePicker(e,d){
+  const current=themes.find(t=>t.key===d.theme);
+  if(e.approved) return current?`<span class="theme-now">Colours: ${esc(current.name)}</span>`:'';
+  if(d.part>1) return '';
+  return `<div class="themes" role="group" aria-label="Colours for ${esc(d.name)}">${themes.map(t=>`<button class="swatch swatch-${esc(t.key)}" data-theme="${esc(t.key)}" data-theme-edition="${e.id}" data-theme-date="${d.date}" title="${esc(t.name)}" aria-label="${esc(t.name)}" aria-pressed="${t.key===d.theme}"></button>`).join('')}<span class="theme-now">${esc(current?.name||'')}</span></div>`;
+}
 function edition(e){
   const missing=e.data.events.length-new Set([...e.uploads,...e.organiserPhotos]).size;
   const state=e.demo?'Demo content · fictional events':e.approved?'Approved · Instagram is in Postiz, WhatsApp is sent on demand':'Ready for your review';
-  const posts=e.posts.map(d=>`<section class="day"><h4>${esc(d.name)} · ${d.indexes.length} ${d.indexes.length===1?'event':'events'} · one Instagram post</h4><div class="cards"><a class="cover" href="${media(e,`cover-${d.date}-${d.part}.jpg`)}" target="_blank" rel="noopener"><img ${lazy} src="${thumb(e,`cover-${d.date}-${d.part}.jpg`)}" alt="${esc(d.name)} cover slide"></a>${d.indexes.map(i=>`<a href="${media(e,`feed-${i}.jpg`)}" target="_blank" rel="noopener"><img ${lazy} src="${thumb(e,`feed-${i}.jpg`)}" alt="Slide for event ${i+1}"></a>`).join('')}</div><details><summary>Caption for this post</summary><pre>${esc(d.caption)}</pre></details></section>`).join('');
+  const posts=e.posts.map(d=>`<section class="day"><div class="day-head"><h4>${esc(d.name)} · ${d.indexes.length} ${d.indexes.length===1?'event':'events'} · one Instagram post</h4>${themePicker(e,d)}</div><div class="cards"><a class="cover" href="${media(e,`cover-${d.date}-${d.part}.jpg`)}" target="_blank" rel="noopener"><img ${lazy} src="${thumb(e,`cover-${d.date}-${d.part}.jpg`)}" alt="${esc(d.name)} cover slide"></a>${d.indexes.map(i=>`<a href="${media(e,`feed-${i}.jpg`)}" target="_blank" rel="noopener"><img ${lazy} src="${thumb(e,`feed-${i}.jpg`)}" alt="Slide for event ${i+1}"></a>`).join('')}</div><details><summary>Caption for this post</summary><pre>${esc(d.caption)}</pre></details></section>`).join('');
   const rows=e.data.events.map((x,i)=>`<li><label><input type="checkbox" data-edition="${e.id}" value="${i}"${(!e.approved||!e.selected||e.selected.includes(i))?' checked':''}${e.approved||e.demo?' disabled':''}><span><strong>${esc(x.title)}</strong><br>${esc(new Date(x.startsAt).toLocaleString('en-GB',{timeZone:'Europe/Riga',dateStyle:'medium',timeStyle:'short'}))} · ${esc(x.venue)} · ${esc(x.price)}<br>${esc(x.summary)}<br><a href="${esc(x.sourceUrl)}" target="_blank" rel="noopener noreferrer">Open source</a>${e.shortLinks?.[i]?` · <span class="short">${esc(e.shortLinks[i].url)} · ${e.shortLinks[i].clicks} ${e.shortLinks[i].clicks===1?'click':'clicks'}</span>`:''}</span></label>${e.demo?'':alsoRow(e,i)+photoRow(e,i)}</li>`).join('');
   return `<article class="edition">
-    <div class="edition-head"><div><h3>Weekend of ${esc(e.weekend)}</h3><p>${state} · ${e.data.events.length} picks</p></div>${!e.demo&&!e.approved?`<button data-approve="${e.id}">Approve & send to Postiz</button>`:''}</div>
+    <div class="edition-head"><div>${e.headline?`<span class="tag special">Special post</span>`:''}<h3>${e.headline?`${esc(e.headline)} · `:''}Weekend of ${esc(e.weekend)}</h3><p>${state} · ${e.data.events.length} picks</p></div>${!e.demo&&!e.approved?`<button data-approve="${e.id}">Approve & send to Postiz</button>`:''}</div>
     ${publishing(e)}
     ${posts}
     ${gridSection(e)}
@@ -140,7 +147,8 @@ function edition(e){
     <details ${e.approved||e.demo?'':'open'}><summary>${e.approved?'Events in this edition':'Choose what to publish'} · ${e.data.events.length} found${e.demo?'':` · ${missing} without a photo`}</summary>
       ${e.approved||e.demo?'':`<p class="hint">Untick events to leave them out. Tick Story to also get a story draft in Postiz for that event. Tick the other days an exhibition, festival or repeated show is also on, so its day tag shows them. Photos must be final before approving, because they go to Postiz then.${ejuz?' Caption links become ej.uz links when you approve.':''}</p>`}
       <ol class="event-list picks">${rows}</ol>
-      ${e.approved||e.demo?'':`<div class="toolbar"><button class="secondary" data-all="${e.id}">Select all</button><button class="secondary" data-none="${e.id}">Clear</button></div>`}
+      ${e.approved||e.demo?'':`<div class="toolbar"><button class="secondary" data-all="${e.id}">Select all</button><button class="secondary" data-none="${e.id}">Clear</button><button class="secondary" data-special="${e.id}">Make a special post from the ticked events…</button></div>
+      <p class="hint">A special post has your own heading (such as Researchers’ Night) on its cover, above the date, and goes out as a separate carousel at noon, alongside the regular post for that day. It appears as its own edition below, for you to approve. Untick those events here if they should not also be in the regular post.</p>`}
     </details>
     <div class="copy"><details><summary>WhatsApp digest preview</summary><pre>${esc(e.whatsapp)}</pre></details></div>
   </article>`;
@@ -150,11 +158,11 @@ async function load(){
   stamp=Date.now();
   const [status,editions]=await Promise.all([api('/api/status'),api(`/api/editions${showPast?'?scope=all':''}`)]);
   const past=Number(api.headers?.get('X-Past-Editions')||0);
-  postizUrl=status.postizUrl; ejuz=status.ejuz; renderConfigured=status.renderConfigured;
+  postizUrl=status.postizUrl; ejuz=status.ejuz; renderConfigured=status.renderConfigured; themes=status.themes||[];
   $('#mode').textContent=status.live?'LIVE DELIVERY ENABLED':'PREVIEW MODE';
   $('#runs').textContent=status.runs.length?status.runs.map(r=>`${r.weekend} · ${r.status} · ${r.detail||''}`).join('\n'):'No scheduled research runs yet.';
   // Only the newest edition is open: older ones stay collapsed so their images are never fetched.
-  $('#editions').innerHTML=editions.length?editions.map((e,i)=>i===0?edition(e):`<details class="older" data-open-key="edition-${e.id}"${openGrids.has(`edition-${e.id}`)?' open':''}><summary>Weekend of ${esc(e.weekend)} · ${e.data.events.length} picks${e.demo?' · demo':e.approved?' · approved':''}</summary>${edition(e)}</details>`).join(''):'<p class="empty">No editions yet. Find events, import your research, or run <code>docker compose run --rm app node src/cli.js demo</code> to see a sample.</p>';
+  $('#editions').innerHTML=editions.length?editions.map((e,i)=>i===0?edition(e):`<details class="older" data-open-key="edition-${e.id}"${openGrids.has(`edition-${e.id}`)?' open':''}><summary>${e.headline?`${esc(e.headline)} · `:''}Weekend of ${esc(e.weekend)} · ${e.data.events.length} picks${e.demo?' · demo':e.approved?' · approved':''}</summary>${edition(e)}</details>`).join(''):'<p class="empty">No editions yet. Find events, import your research, or run <code>docker compose run --rm app node src/cli.js demo</code> to see a sample.</p>';
   // Weekends that are over are kept on the server but not listed, so the page stays light.
   if(past||showPast) $('#editions').insertAdjacentHTML('beforeend',`<p class="empty past-note">${showPast?'Showing past weekends too.':`${past} past ${past===1?'weekend is':'weekends are'} hidden.`} <button class="secondary small" id="past">${showPast?'Hide past weekends':'Show past weekends'}</button></p>`);
   if(editions.some(e=>e.grids?.some(g=>g.saved?.status==='rendering'))) watchRenders();
@@ -185,6 +193,20 @@ document.addEventListener('click',ev=>{
     input.click();return;
   }
   if(b.dataset.unphoto){action(async()=>{const r=await fetch(`/api/editions/${b.dataset.unphoto}/events/${b.dataset.index}/photo`,{method:'DELETE'});const d=await r.json();if(!r.ok)throw Error(d.error||'Could not remove the photo');});return;}
+  if(b.dataset.theme){
+    const {themeEdition:id,themeDate:date,theme}=b.dataset;
+    action(()=>api(`/api/editions/${id}/themes/${date}`,{theme}));
+    return;
+  }
+  if(b.dataset.special){
+    const id=b.dataset.special;
+    const picks=[...document.querySelectorAll(`input[data-edition="${id}"]:checked`)].map(x=>Number(x.value));
+    if(!picks.length){$('#status').textContent='Tick the events that go in the special post.';$('#status').className='error';return;}
+    const headline=(prompt(`Heading for the special post with ${picks.length} event${picks.length===1?'':'s'} (3–40 characters), for example: Researchers’ Night`)||'').trim();
+    if(!headline) return;
+    action(async()=>{const e=await api(`/api/editions/${id}/special`,{headline,events:picks});openGrids.add(`edition-${e.id}`);});
+    return;
+  }
   if(b.dataset.all||b.dataset.none){const on=!!b.dataset.all;document.querySelectorAll(`input[data-edition="${b.dataset.all||b.dataset.none}"]`).forEach(x=>{x.checked=on;});return;}
   if(b.dataset.approve){
     const id=b.dataset.approve;
@@ -246,3 +268,64 @@ document.addEventListener('change',ev=>{
   action(()=>api(`/api/editions/${id}/events/${index}/also-on`,{alsoOn:dates}));
 });
 load().catch(e=>{$('#status').textContent=e.message;});
+
+// ---- Animations -------------------------------------------------------------------------------
+// A separate panel with its own status line and its own poll loop: a clip render has nothing to do
+// with an edition, and sharing load() would redraw every grid tick on the other tab while it runs.
+const animStatus=(msg,bad)=>{const el=$('#anim-status');el.textContent=msg||'';el.className=bad?'error':'';};
+async function animAction(fn){try{animStatus('Working…');await fn();await loadAnimations();animStatus('Done.');}catch(e){animStatus(e.message,true);}}
+function animationCard(a){
+  const src=`/media/animations/${a.id}.mp4?v=${stamp}`;
+  const state=a.status==='ready'?'Ready':a.status==='rendering'?'Rendering…':a.status==='failed'?`Failed — ${a.error||'unknown error'}`:'Not rendered yet';
+  const ready=a.status==='ready';
+  return `<article class="anim">
+    <div class="anim-head"><h3>${esc(a.name)}</h3><span class="tag">${esc(a.composition)}</span><span class="job-state">${esc(state)}</span></div>
+    ${ready?`<video class="grid-video" src="${src}" controls preload="metadata" playsinline></video>`:''}
+    ${a.caption?`<div class="copy"><details><summary>Caption</summary><pre>${esc(a.caption)}</pre></details></div>`:''}
+    ${a.postiz?`<p class="hint">Sent to Postiz as a ${esc(a.postiz.kind)} draft${postizUrl?` — <a href="${esc(postizUrl)}" target="_blank" rel="noopener">open Postiz</a>`:''}. Nothing publishes until you schedule it there.</p>`:''}
+    <div class="grid-send">
+      <button data-anim-render="${esc(a.id)}"${a.status==='rendering'?' disabled':''}>${ready?'Render again':'Render'}</button>
+      <button class="secondary" data-anim-postiz="${esc(a.id)}" data-kind="story"${ready?'':' disabled'}>Send as Story</button>
+      <button class="secondary" data-anim-postiz="${esc(a.id)}" data-kind="reel"${ready?'':' disabled'}>Send as Reel</button>
+      <button class="secondary small" data-anim-delete="${esc(a.id)}">Delete</button>
+    </div>
+  </article>`;
+}
+async function loadAnimations(){
+  stamp=Date.now();
+  const list=await api('/api/animations');
+  if(!renderConfigured) animStatus('The render service is not configured (RENDER_URL); clips cannot be rendered here.',true);
+  $('#animations').innerHTML=list.length?list.map(animationCard).join(''):'<p class="empty">No animations yet. Add one above — the composition must match an ID registered in <code>remotion/src/Root.tsx</code>, such as <code>PressStory</code>.</p>';
+  if(list.some(a=>a.status==='rendering')) watchAnimations();
+}
+let animWatch=null;
+function watchAnimations(){
+  if(animWatch) return;
+  animWatch=setInterval(async()=>{
+    try{const l=await api('/api/animations');if(!l.some(a=>a.status==='rendering')){clearInterval(animWatch);animWatch=null;await loadAnimations();}}catch{}
+  },4000);
+}
+function showPanel(name){
+  for(const p of ['editions','animations']){
+    document.getElementById(`panel-${p}`).hidden=p!==name;
+    document.getElementById(`tab-btn-${p}`).setAttribute('aria-selected',String(p===name));
+  }
+  if(name==='animations') loadAnimations().catch(e=>animStatus(e.message,true));
+}
+document.querySelectorAll('.tab').forEach(b=>{b.onclick=()=>showPanel(b.dataset.panel);});
+$('#anim-new').addEventListener('submit',ev=>{
+  ev.preventDefault();
+  animAction(async()=>{
+    await api('/api/animations',{name:$('#anim-name').value.trim(),composition:$('#anim-comp').value.trim(),caption:$('#anim-caption').value,holdSeconds:Number($('#anim-hold').value)||5});
+    $('#anim-name').value=''; $('#anim-caption').value='';
+  });
+});
+document.addEventListener('click',ev=>{
+  const b=ev.target.closest('button'); if(!b) return;
+  if(b.dataset.animRender) return void animAction(()=>api(`/api/animations/${b.dataset.animRender}/render`,{}));
+  if(b.dataset.animPostiz) return void animAction(()=>api(`/api/animations/${b.dataset.animPostiz}/postiz`,{kind:b.dataset.kind}));
+  if(b.dataset.animDelete){
+    if(!confirm('Delete this animation and its rendered file?')) return;
+    return void animAction(async()=>{const r=await fetch(`/api/animations/${b.dataset.animDelete}`,{method:'DELETE'});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||'Delete failed');});
+  }
+});

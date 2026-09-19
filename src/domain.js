@@ -20,6 +20,9 @@ export const Event = z.object({
 });
 export const Submission = z.object({
   weekend: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  // A special post (Researchers' Night, a festival day): your own heading, drawn on each cover above the
+  // date and opening each caption. It is published alongside the regular post for the same day.
+  headline: z.string().trim().min(3).max(40).optional(),
   // A submission is a candidate list to choose from, so it is deliberately generous.
   // What one post can actually show is enforced at approval instead.
   events: z.array(Event).min(1).max(60),
@@ -48,6 +51,8 @@ export function validateSubmission(input) {
 export const digest = data => createHash('sha256').update(JSON.stringify(data)).digest('hex').slice(0,24);
 export const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export function eventTime(e) { return DateTime.fromISO(e.startsAt).setZone(ZONE).setLocale('en').toFormat('ccc, dd LLL · HH:mm'); }
+// The grid puts every card of one day on screen at once, so its tiles carry the clock time alone.
+export const eventClock = e => DateTime.fromISO(e.startsAt).setZone(ZONE).setLocale('en').toFormat('HH:mm');
 export const languageTag = e => (e.languages?.length ? e.languages.join(' · ') : null);
 export const weekendDays = weekend => [0, 1, 2].map(n => DateTime.fromISO(weekend, { zone: ZONE }).plus({ days: n }).toISODate());
 // Valid "also on" days are other days of the same Friday–Sunday, never the event's own day.
@@ -93,8 +98,9 @@ export function eventsOn(data, date, selected = null) {
   if (!day) throw new Error(`No events on ${date}`);
   return day;
 }
+export const isSpecial = data => !!data.headline;
 export function whatsappText(data, selected = null) {
-  return `RĪGA THIS WEEKEND · ${data.weekend}\n\n` + chosen(data, selected).map(({event: e}, i) => `${i+1}. ${e.title}\n${eventTime(e)}\n${e.venue} · ${e.price}${languageTag(e) ? ` · ${languageTag(e)}` : ''}\n${e.summary}\n${e.sourceUrl}`).join('\n\n') + '\n\nCheck the organiser’s page for changes before heading out.';
+  return `${data.headline ? `${data.headline.toUpperCase()} · RĪGA` : 'RĪGA THIS WEEKEND'} · ${data.weekend}\n\n` + chosen(data, selected).map(({event: e}, i) => `${i+1}. ${e.title}\n${eventTime(e)}\n${e.venue} · ${e.price}${languageTag(e) ? ` · ${languageTag(e)}` : ''}\n${e.summary}\n${e.sourceUrl}`).join('\n\n') + '\n\nCheck the organiser’s page for changes before heading out.';
 }
 // Instagram caps captions at 2,200 characters, so organiser links degrade to bare hostnames,
 // and then drop out entirely, rather than making an otherwise valid edition unpublishable.
@@ -134,18 +140,21 @@ function buildCaption(head, events, shorten = null) {
 }
 // The whole-weekend caption is the longest one an edition can produce, so validating it
 // on submit also guarantees every per-day caption fits.
-export const caption = data => buildCaption('Your Riga weekend, sorted.\n\n', data.events);
+export const caption = data => buildCaption(`${data.headline ? `${data.headline} · ` : ''}Your Riga weekend, sorted.\n\n`, data.events);
+const captionHead = (data, post) => `${data.headline ? `${data.headline} · ` : ''}${postName(post)} in Rīga.\n\n`;
 // `shorten` turns an organiser URL into its short link; omit it to print full links.
-export const postCaption = (data, post, shorten = null) => buildCaption(`${postName(post)} in Rīga.\n\n`, post.items.map(i => i.event), shorten);
+export const postCaption = (data, post, shorten = null) => buildCaption(captionHead(data, post), post.items.map(i => i.event), shorten);
 // Reviewing a long candidate list must never fail. Publishing still uses the strict caption,
 // so an unpublishable post is reported on the review page rather than blocking the import.
 export function postCaptionPreview(data, post, shorten = null) {
   try { return postCaption(data, post, shorten); }
-  catch (err) { return `${postName(post)} in Rīga.\n\n[${post.items.length} events. ${err.message}. Untick some before approving.]`; }
+  catch (err) { return `${captionHead(data, post)}[${post.items.length} events. ${err.message}. Untick some before approving.]`; }
 }
 // Meta's content publishing API caps a carousel at 10 slides and the date cover takes one,
 // so a busy day is split across several posts rather than forcing events to be dropped.
 export const SLIDES_PER_POST = 9, POST_GAP_MINUTES = 30, LEAD_MINUTES = 60;
+// Regular posts go out from 09:00; a special post goes out at noon, so it does not land on top of the day's own post.
+export const POST_HOUR = 9, SPECIAL_POST_HOUR = 12;
 export function postsFor(data, selected = null) {
   const posts = [];
   for (const day of eventsByDay(data, selected)) {
@@ -174,14 +183,15 @@ export function validatePublication(data, selected = null) {
 // WhatsApp is not planned here; it is sent when you press its button.
 export function plannedJobs(data, now = DateTime.now(), selected = null, stories = []) {
   const at = t => DateTime.max(t, now).toUTC().toISO();
-  const nine = date => DateTime.fromISO(date, { zone: ZONE }).set({ hour: 9 });
+  const nine = date => DateTime.fromISO(date, { zone: ZONE }).set({ hour: POST_HOUR });
+  const opening = date => DateTime.fromISO(date, { zone: ZONE }).set({ hour: data.headline ? SPECIAL_POST_HOUR : POST_HOUR });
   const before = (t, events) => DateTime.min(t, ...events.map(e => DateTime.fromISO(e.startsAt).setZone(ZONE).minus({ minutes: LEAD_MINUTES })));
   const wanted = new Set(stories || []);
   return [
     // Parts of a busy day go out half an hour apart from 09:00, and always at least an hour before
     // their own first event: a post is never published once one of its events has begun.
     ...postsFor(data, selected).map(p => {
-      const spaced = nine(p.date).plus({ minutes: (p.part - 1) * POST_GAP_MINUTES });
+      const spaced = opening(p.date).plus({ minutes: (p.part - 1) * POST_GAP_MINUTES });
       const first = DateTime.min(...p.items.map(x => DateTime.fromISO(x.event.startsAt).setZone(ZONE))).minus({ minutes: LEAD_MINUTES });
       return {target:postTarget(p), due:at(DateTime.min(spaced, first))};
     }),

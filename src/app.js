@@ -10,17 +10,18 @@ import { renderEdition, uploadPath } from './render.js';
 import { ensureThumb } from './thumbs.js';
 import sharp from 'sharp';
 import { existsSync } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, copyFile, readdir } from 'node:fs/promises';
 import { researchInto } from './research.js';
 import { prepareLinks, captionLinker, linkSummary } from './shortlinks.js';
-import { request, gridVideo } from './providers.js';
+import { request, gridVideo, deliverAnimation } from './providers.js';
 import { createOAuthProvider } from './oauth.js';
+import { THEMES, THEME_KEYS, themeKey } from './themes.js';
 
 function equal(a,b) {const aa=Buffer.from(a||''),bb=Buffer.from(b||'');return aa.length===bb.length&&timingSafeEqual(aa,bb);}
 export function createApp(store,env=process.env,{fetcher=fetch}={}) {
   if(!env.ADMIN_TOKEN||env.ADMIN_TOKEN.length<24) throw new Error('ADMIN_TOKEN must be at least 24 characters');
   const app=express(); app.disable('x-powered-by'); app.set('trust proxy',1);
-  store.recoverGrids();
+  store.recoverGrids(); store.recoverAnimations();
   app.locals.renders=new Set(); // in-flight story renders, so tests (and shutdown) can wait for them
   app.get('/healthz',(_req,res)=>res.json({ok:true}));
   // Short links are public: anyone reading a caption can follow one. A code only ever maps to an
@@ -71,7 +72,7 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
   app.post('/mcp',async(req,res)=>{
     const server=new McpServer({name:'riga-weekend',version:'0.1.0'});
     const result=data=>({content:[{type:'text',text:JSON.stringify(data)}]});
-    server.registerTool('submit_weekend_events',{description:'Submit source-verified Riga events for a Friday–Sunday weekend. Generates Instagram images and a WhatsApp digest. Saves for review; does not publish.',inputSchema:Submission.shape},async input=>result(await submit(input)));
+    server.registerTool('submit_weekend_events',{description:'Submit source-verified Riga events for a Friday–Sunday weekend. Generates Instagram images and a WhatsApp digest. Saves for review; does not publish. Set headline (e.g. "Researchers\' Night") for a special post that publishes alongside the regular day posts.',inputSchema:Submission.shape},async input=>result(await submit(input)));
     server.registerTool('list_weekend_editions',{description:'List prepared editions and delivery status.',inputSchema:{}},async()=>result(store.list().map(e=>({...e,jobs:store.jobs(e.id)}))));
     server.registerTool('approve_weekend_edition',{description:'Approve a reviewed edition and queue Instagram and WhatsApp publication. Requires explicit user authorization to publish. Live dispatch also requires server LIVE_PUBLISH=true.',inputSchema:{id:z.string().regex(/^[a-f0-9]{24}$/)},annotations:{readOnlyHint:false,destructiveHint:true}},async({id})=>result(store.approve(id)));
     const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
@@ -79,7 +80,7 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
     await server.connect(transport); await transport.handleRequest(req,res,req.body);
   });
   app.all('/mcp',(_req,res)=>res.status(405).send('Use POST'));
-  app.get('/api/status',(_req,res)=>res.json({live:env.LIVE_PUBLISH==='true',postizUrl:env.POSTIZ_PUBLIC_URL||null,ejuz:!!env.EJUZ_API_KEY,researchEnabled:env.RESEARCH_SCHEDULE_ENABLED==='true',weekend:weekendFor(),postizConfigured:!!env.POSTIZ_API_KEY,whatsappConfigured:!!env.WAHA_CHAT_ID,researchConfigured:!!env.OPENAI_API_KEY,renderConfigured:!!env.RENDER_URL,runs:store.db.prepare('SELECT * FROM runs ORDER BY weekend DESC').all()}));
+  app.get('/api/status',(_req,res)=>res.json({live:env.LIVE_PUBLISH==='true',postizUrl:env.POSTIZ_PUBLIC_URL||null,ejuz:!!env.EJUZ_API_KEY,researchEnabled:env.RESEARCH_SCHEDULE_ENABLED==='true',weekend:weekendFor(),postizConfigured:!!env.POSTIZ_API_KEY,whatsappConfigured:!!env.WAHA_CHAT_ID,researchConfigured:!!env.OPENAI_API_KEY,themes:THEME_KEYS.map(key=>({key,...THEMES[key]})),renderConfigured:!!env.RENDER_URL,runs:store.db.prepare('SELECT * FROM runs ORDER BY weekend DESC').all()}));
   // Past weekends stay on disk but are not listed: the page stays small and the current weekend is
   // what you work on. ?scope=all brings them back when you need to look something up.
   app.get('/api/editions',(req,res)=>{
@@ -89,7 +90,8 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
     weekendDays:weekendDays(e.weekend),eventDates:e.data.events.map(eventDate),
     uploads:e.data.events.map((_,i)=>i).filter(i=>existsSync(uploadPath(store.dir,e.id,i))),
     organiserPhotos:e.data.events.map((_,i)=>i).filter(i=>existsSync(resolve(store.dir,'media',e.id,`photo-${i}.jpg`))),
-    posts:postsFor(e.data,e.selected).map(p=>({date:p.date,part:p.part,parts:p.parts,name:postName(p),indexes:p.items.map(x=>x.index),caption:postCaptionPreview(e.data,p,link)})),
+    headline:e.data.headline||null,
+    posts:postsFor(e.data,e.selected).map(p=>({date:p.date,part:p.part,parts:p.parts,name:postName(p),theme:themeKey(e,p.date),indexes:p.items.map(x=>x.index),caption:postCaptionPreview(e.data,p,link)})),
     shortLinks:e.demo?{}:Object.fromEntries(e.data.events.map((x,i)=>[i,linkSummary(store,x.sourceUrl,env)])),
     grids:gridsFor(e)})));
   });
@@ -127,6 +129,48 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
     app.locals.renders.add(job); job.finally(()=>app.locals.renders.delete(job));
     res.status(202).json(store.grid(e.id,date));
   });
+  // Standalone animations. Deliberately outside the edition flow: a one-off clip has no weekend, no
+  // day to lock and no events to caption from, and forcing it through that machinery would mean
+  // inventing an edition for it just to satisfy the foreign keys.
+  const AnimationBody=z.object({
+    name:z.string().trim().min(1).max(60),
+    composition:z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_-]{0,40}$/,'Composition must be a Remotion composition ID'),
+    caption:z.string().max(2200).default(''),
+    holdSeconds:z.number().min(1).max(30).default(5),
+  });
+  const animationFile=id=>resolve(store.dir,'media','animations',`${id}.mp4`);
+  app.get('/api/animations',(_req,res)=>res.json(store.animations()));
+  app.post('/api/animations',(req,res)=>res.status(201).json(store.saveAnimation(AnimationBody.parse(req.body||{}))));
+  app.post('/api/animations/:id',(req,res)=>res.json(store.saveAnimation({id:store.animation(req.params.id).id,...AnimationBody.parse(req.body||{})})));
+  app.delete('/api/animations/:id',async(req,res)=>{
+    const a=store.animation(req.params.id);
+    await rm(animationFile(a.id),{force:true});
+    store.deleteAnimation(a.id); res.json({ok:true});
+  });
+  app.post('/api/animations/:id/render',async(req,res)=>{
+    if(!env.RENDER_URL) throw new Error('The render service is not configured (RENDER_URL)');
+    const a=store.startAnimationRender(store.animation(req.params.id).id);
+    const job=(async()=>{
+      try {
+        const r=await fetcher(`${env.RENDER_URL.replace(/\/$/,'')}/animation`,{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(15*60000),
+          body:JSON.stringify({id:a.id,composition:a.composition,holdSeconds:a.holdSeconds})});
+        const out=await r.json().catch(()=>({}));
+        store.finishAnimationRender(a.id,r.ok?null:(out.error||`Render service returned HTTP ${r.status}`));
+      } catch(err) {store.finishAnimationRender(a.id,err.name==='TimeoutError'?'Rendering took too long':`Render service unreachable: ${err.message}`);}
+    })();
+    app.locals.renders.add(job); job.finally(()=>app.locals.renders.delete(job));
+    res.status(202).json(a);
+  });
+  // Uploads to Postiz as a DRAFT and stops there, exactly like the grid videos: nothing is published
+  // from this app, you schedule it in Postiz once you have watched it back.
+  app.post('/api/animations/:id/postiz',async(req,res)=>{
+    const kind=z.enum(['reel','story']).parse(req.body?.kind);
+    const a=store.animation(req.params.id);
+    if(a.status!=='ready') throw new Error('Render the animation before sending it to Postiz');
+    if(!existsSync(animationFile(a.id))) throw new Error('The rendered file is missing; render it again');
+    res.json(store.setAnimationPostiz(a.id,await deliverAnimation(store.dir,a,kind,env,fetcher)));
+  });
+
   // Approving with a list of event indexes publishes only those; the covers, captions and
   // WhatsApp digest are redrawn to match before any job can run.
   app.post('/api/editions/:id/approve',async(req,res)=>{
@@ -148,6 +192,33 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
     const updated=store.updateEvent(e.id,i,{alsoOn:dates});
     await renderEdition(updated,store.dir,fetch,{link});
     res.json({alsoOn:dates});
+  });
+  // The colour theme of one day: its cover, slides, stories and grid are redrawn in it.
+  app.post('/api/editions/:id/themes/:date',async(req,res)=>{
+    const theme=z.enum(THEME_KEYS).parse(req.body?.theme);
+    const e=store.setTheme(req.params.id,req.params.date,theme);
+    await renderEdition(e,store.dir,fetch,{link});
+    res.json({date:req.params.date,theme});
+  });
+  // A special post: some of an edition's events under your own heading (Researchers' Night), as a separate
+  // edition that publishes alongside the regular post for the same day. Photos come along with the events.
+  const SpecialBody=z.object({headline:z.string().trim().min(3).max(40),events:z.array(z.number().int().min(0)).min(1).max(60)});
+  app.post('/api/editions/:id/special',async(req,res)=>{
+    const from=store.get(req.params.id), body=SpecialBody.parse(req.body||{});
+    const picks=[...new Set(body.events)].sort((a,b)=>a-b);
+    if(picks.some(i=>!from.data.events[i])) throw new Error('That event is not in this edition');
+    const events=picks.map(i=>structuredClone(from.data.events[i]));
+    const e=store.submit({weekend:from.weekend,headline:body.headline,events},!!from.demo);
+    // Submission sorts the events by time, so each photo is matched to its event rather than to its position.
+    const src=resolve(store.dir,'media',from.id), dest=resolve(store.dir,'media',e.id); await mkdir(dest,{recursive:true});
+    const names=new Set(await readdir(src).catch(()=>[]));
+    for(const i of picks) {
+      const j=e.data.events.findIndex(x=>x.title===from.data.events[i].title&&x.startsAt===from.data.events[i].startsAt&&x.venue===from.data.events[i].venue);
+      for(const [a,b] of [[`upload-${i}.jpg`,`upload-${j}.jpg`],[`photo-${i}.jpg`,`photo-${j}.jpg`],[`photo-${i}.label`,`photo-${j}.label`],[`photo-${i}.none`,`photo-${j}.none`]])
+        if(names.has(a)) await copyFile(resolve(src,a),resolve(dest,b));
+    }
+    await renderEdition(e,store.dir,fetch,{link});
+    res.status(201).json(store.get(e.id));
   });
   // The WhatsApp digest is sent only when you ask, never on a schedule.
   app.post('/api/editions/:id/whatsapp',(req,res)=>{

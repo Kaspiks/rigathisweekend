@@ -3,7 +3,7 @@
 // Only one render runs at a time; the app shows a second request as busy.
 import http from 'node:http';
 import { createReadStream } from 'node:fs';
-import { rename, stat } from 'node:fs/promises';
+import { mkdir, rename, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { renderMedia, selectComposition } from '@remotion/renderer';
 
@@ -11,6 +11,7 @@ const PORT = Number(process.env.PORT || 3200);
 const DATA = resolve(process.env.DATA_DIR || '/data');
 const SERVE_URL = resolve('build');
 const EDITION = /^[a-f0-9]{24}$/, DATE = /^\d{4}-\d{2}-\d{2}$/;
+const ANIM = /^[a-f0-9]{12}$/, COMPOSITION = /^[A-Za-z][A-Za-z0-9_-]{0,40}$/;
 let busy = false;
 
 const send = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -40,6 +41,26 @@ async function render({ style = 'ticket', edition, date, day, dateLabel, number,
   return { file: `grid-${date}.mp4`, style, seconds: composition.durationInFrames / composition.fps };
 }
 
+// A standalone clip: any composition in the bundle, rendered on its own. Unlike /render it needs no
+// edition and no grid PNG - nothing is composited in, so there is no precondition to check. Props not
+// given here fall back to the composition's defaultProps, which is what makes an empty body useful.
+async function animation({ id, composition, holdSeconds, props = {} }) {
+  if (!ANIM.test(id || '')) throw Object.assign(new Error('Invalid animation id'), { status: 400 });
+  if (!COMPOSITION.test(composition || '')) throw Object.assign(new Error('Invalid composition name'), { status: 400 });
+  const dir = join(DATA, 'media', 'animations');
+  await mkdir(dir, { recursive: true });
+  const inputProps = { ...props, holdSeconds: Math.min(30, Math.max(1, Number(holdSeconds) || 5)) };
+  let comp;
+  try { comp = await selectComposition({ serveUrl: SERVE_URL, id: composition, inputProps }); }
+  catch { throw Object.assign(new Error(`No composition named ${composition} in the bundle`), { status: 400 }); }
+  const out = join(dir, `${id}.mp4`), tmp = `${out}.part.mp4`;
+  // WebGL compositions (three.js) need a GL backend; the container has no GPU, so SwiftShader via ANGLE.
+  const chromiumOptions = ['AutumnStory', 'BaroqueStory', 'MosaicStory'].includes(comp.id) ? { gl: 'swangle' } : undefined;
+  await renderMedia({ composition: comp, serveUrl: SERVE_URL, codec: 'h264', crf: 18, inputProps, chromiumOptions, outputLocation: tmp, overwrite: true, logLevel: 'error' });
+  await rename(tmp, out);
+  return { file: `${id}.mp4`, composition, seconds: comp.durationInFrames / comp.fps };
+}
+
 http.createServer(async (req, res) => {
   try {
     const grid = req.method === 'GET' && req.url.match(/^\/grid\/([a-f0-9]{24})\/(\d{4}-\d{2}-\d{2})\.png$/);
@@ -50,6 +71,11 @@ http.createServer(async (req, res) => {
       return createReadStream(file).pipe(res);
     }
     if (req.method === 'GET' && req.url === '/healthz') return send(res, 200, { ok: true, busy });
+    if (req.method === 'POST' && req.url === '/animation') {
+      if (busy) return send(res, 409, { error: 'Another story is rendering; try again in a minute' });
+      busy = true;
+      try { return send(res, 200, await animation(await readJson(req))); } finally { busy = false; }
+    }
     if (req.method === 'POST' && req.url === '/render') {
       if (busy) return send(res, 409, { error: 'Another story is rendering; try again in a minute' });
       busy = true;

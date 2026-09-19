@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { digest, validateSubmission, plannedJobs, eventsByDay, validatePublication } from './domain.js';
 import { GRID_KINDS } from './providers.js';
+import { THEMES } from './themes.js';
 import { DateTime } from 'luxon';
 
 export class Store {
@@ -17,12 +18,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS short_links(code TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, created TEXT NOT NULL, clicks INTEGER NOT NULL DEFAULT 0, last_click TEXT);
       CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, edition TEXT NOT NULL, target TEXT NOT NULL, due TEXT NOT NULL, status TEXT DEFAULT 'queued', result TEXT, UNIQUE(edition,target));
       CREATE TABLE IF NOT EXISTS runs(weekend TEXT PRIMARY KEY, status TEXT NOT NULL, detail TEXT);
+      CREATE TABLE IF NOT EXISTS animations(id TEXT PRIMARY KEY, name TEXT NOT NULL, composition TEXT NOT NULL, caption TEXT NOT NULL DEFAULT '', hold_seconds REAL NOT NULL DEFAULT 5, status TEXT NOT NULL DEFAULT 'new', error TEXT, postiz TEXT, updated TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS grids(edition TEXT NOT NULL, date TEXT NOT NULL, picks TEXT NOT NULL, kicker TEXT NOT NULL, category TEXT NOT NULL, hold_seconds REAL NOT NULL DEFAULT 6, status TEXT NOT NULL DEFAULT 'built', error TEXT, updated TEXT NOT NULL, PRIMARY KEY(edition,date));`);
     // Instagram posts are per day, so the approval rule moved from one edition per weekend
     // to one per weekend day. Editions approved under the old rule keep their days.
     this.db.exec('DROP INDEX IF EXISTS one_approved_weekend');
     try {this.db.exec('ALTER TABLE editions ADD COLUMN selected TEXT');} catch {} // added with per-event selection
     try {this.db.exec('ALTER TABLE editions ADD COLUMN stories TEXT');} catch {} // added with opt-in stories
+    try {this.db.exec('ALTER TABLE editions ADD COLUMN themes TEXT');} catch {} // added with per-day colour themes
     try {this.db.exec('ALTER TABLE jobs ADD COLUMN publish_at TEXT');} catch {} // when Postiz should publish it
     try {this.db.exec('ALTER TABLE jobs ADD COLUMN finished_at TEXT');} catch {}
     try {this.db.exec("ALTER TABLE grids ADD COLUMN style TEXT NOT NULL DEFAULT 'ticket'");} catch {} // added with the ticket opener
@@ -30,7 +33,7 @@ export class Store {
       try {this.db.exec(`ALTER TABLE short_links ADD COLUMN ${column}`);} catch {} // ej.uz links alongside the app's own
     if(!this.db.prepare('SELECT count(*) n FROM day_locks').get().n)
       for(const row of this.db.prepare('SELECT id,data FROM editions WHERE approved=1 AND demo=0').all())
-        for(const day of eventsByDay(JSON.parse(row.data)))
+        if(!JSON.parse(row.data).headline) for(const day of eventsByDay(JSON.parse(row.data)))
           this.db.prepare('INSERT OR IGNORE INTO day_locks(date,edition) VALUES(?,?)').run(day.date,row.id);
   }
   submit(input, demo=false) {
@@ -38,7 +41,7 @@ export class Store {
     this.db.prepare('INSERT OR IGNORE INTO editions(id,weekend,data,demo) VALUES(?,?,?,?)').run(id,data.weekend,JSON.stringify(data),+demo);
     return this.get(id);
   }
-  get(id) { const row=this.db.prepare('SELECT * FROM editions WHERE id=?').get(id); if(!row) throw new Error('Edition not found'); return {...row,data:JSON.parse(row.data),selected:row.selected?JSON.parse(row.selected):null,stories:row.stories?JSON.parse(row.stories):[]}; }
+  get(id) { const row=this.db.prepare('SELECT * FROM editions WHERE id=?').get(id); if(!row) throw new Error('Edition not found'); return {...row,data:JSON.parse(row.data),selected:row.selected?JSON.parse(row.selected):null,stories:row.stories?JSON.parse(row.stories):[],themes:row.themes?JSON.parse(row.themes):{}}; }
   list() { return this.db.prepare('SELECT id FROM editions ORDER BY created DESC, rowid DESC').all().map(r=>this.get(r.id)); }
   jobs(id) { return this.db.prepare('SELECT * FROM jobs WHERE edition=? ORDER BY id').all(id); }
   // `selected` lists the events to publish (omit for all); `stories` lists which of those also get a story draft.
@@ -59,7 +62,8 @@ export class Store {
     const publishing=validatePublication(e.data,picks);
     // Only the events you chose have to still be in the future; skipping a started one is the point of selecting.
     if(publishing.some(d=>d.items.some(x=>Date.parse(x.event.startsAt)<=now.toMillis()))) throw new Error('Selection contains events that already started; deselect them or submit an updated edition');
-    for(const date of new Set(publishing.map(p=>p.date))) {
+    // A special post (one with a headline) sits alongside the day's regular post, so it neither needs nor takes the day.
+    if(!e.data.headline) for(const date of new Set(publishing.map(p=>p.date))) {
       const owner=this.db.prepare('SELECT edition FROM day_locks WHERE date=?').get(date)?.edition;
       if(owner&&owner!==id) throw new Error(`Another approved edition already covers ${date}; submit an updated edition for the remaining days`);
     }
@@ -73,7 +77,7 @@ export class Store {
       this.db.prepare('UPDATE editions SET selected=?, stories=? WHERE id=?').run(picks?JSON.stringify(picks):null,JSON.stringify(storyPicks),id);
       // One approved edition per weekend day: a later edition may cover a day nothing has claimed,
       // but two editions can never publish the same day twice.
-      for(const day of [...new Map(publishing.map(p=>[p.date,p])).values()]) {
+      if(!e.data.headline) for(const day of [...new Map(publishing.map(p=>[p.date,p])).values()]) {
         this.db.prepare('INSERT OR IGNORE INTO day_locks(date,edition) VALUES(?,?)').run(day.date,id);
         if(this.db.prepare('SELECT edition FROM day_locks WHERE date=?').get(day.date).edition!==id)
           throw new Error(`Another approved edition already covers ${day.date}; submit an updated edition for the remaining days`);
@@ -167,6 +171,15 @@ export class Store {
     this.db.prepare('UPDATE editions SET data=? WHERE id=?').run(JSON.stringify(e.data),id);
     return this.get(id);
   }
+  // The colour theme of one day of an edition. Images go to Postiz at approval, so the colours are fixed from then on.
+  setTheme(id,date,theme) {
+    const e=this.get(id);
+    if(e.approved) throw new Error('This edition is approved and its images are already in Postiz, so its colours can no longer be changed here');
+    if(!THEMES[theme]) throw new Error(`Unknown colour theme ${theme}`);
+    if(!eventsByDay(e.data).some(d=>d.date===date)) throw new Error(`No events on ${date} in this edition`);
+    this.db.prepare('UPDATE editions SET themes=? WHERE id=?').run(JSON.stringify({...e.themes,[date]:theme}),id);
+    return this.get(id);
+  }
   // Story grids, one per edition day: the cards you picked, the envelope label, and the render state.
   grid(edition,date) {
     const row=this.db.prepare('SELECT * FROM grids WHERE edition=? AND date=?').get(edition,date);
@@ -189,6 +202,33 @@ export class Store {
   // The app runs renders, so only its start-up clears them: a render cut short by a restart never reports back.
   recoverGrids() {this.db.prepare("UPDATE grids SET status='failed', error='Rendering was interrupted; render again' WHERE status='rendering'").run();}
   finishGridRender(edition,date,error=null) {this.db.prepare('UPDATE grids SET status=?,error=?,updated=? WHERE edition=? AND date=?').run(error?'failed':'ready',error,new Date().toISOString(),edition,date);}
+  // Standalone animations: a Remotion composition rendered on its own, with no edition, no weekend and
+  // no day lock behind it. The grid flow exists to stop two editions publishing the same day twice;
+  // a one-off clip has nothing to collide with, so it deliberately sits outside all of that.
+  #animation(row) {
+    return row?{id:row.id,name:row.name,composition:row.composition,caption:row.caption,holdSeconds:row.hold_seconds,
+      status:row.status,error:row.error,postiz:row.postiz?JSON.parse(row.postiz):null,updated:row.updated}:null;
+  }
+  animations() {return this.db.prepare('SELECT * FROM animations ORDER BY updated DESC').all().map(r=>this.#animation(r));}
+  animation(id) {const a=this.#animation(this.db.prepare('SELECT * FROM animations WHERE id=?').get(id)); if(!a) throw new Error('Animation not found'); return a;}
+  saveAnimation({id,name,composition,caption='',holdSeconds=5}) {
+    const key=id||[...Array(12)].map(()=>randomInt(16).toString(16)).join('');
+    if(id&&this.animation(id).status==='rendering') throw new Error('This animation is rendering; wait for it to finish before changing it');
+    this.db.prepare(`INSERT INTO animations(id,name,composition,caption,hold_seconds,status,error,updated) VALUES(?,?,?,?,?,'new',NULL,?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name,composition=excluded.composition,caption=excluded.caption,hold_seconds=excluded.hold_seconds,updated=excluded.updated`)
+      .run(key,name,composition,caption,holdSeconds,new Date().toISOString());
+    return this.animation(key);
+  }
+  // Claims the render atomically, so two clicks cannot start two renders of the same clip.
+  startAnimationRender(id) {
+    const r=this.db.prepare("UPDATE animations SET status='rendering',error=NULL,updated=? WHERE id=? AND status!='rendering'").run(new Date().toISOString(),id);
+    if(!r.changes) throw new Error('This animation is already rendering');
+    return this.animation(id);
+  }
+  finishAnimationRender(id,error=null) {this.db.prepare('UPDATE animations SET status=?,error=?,updated=? WHERE id=?').run(error?'failed':'ready',error,new Date().toISOString(),id); return this.animation(id);}
+  recoverAnimations() {this.db.prepare("UPDATE animations SET status='failed', error='Rendering was interrupted; render again' WHERE status='rendering'").run();}
+  setAnimationPostiz(id,info) {this.db.prepare('UPDATE animations SET postiz=?,updated=? WHERE id=?').run(JSON.stringify(info),new Date().toISOString(),id); return this.animation(id);}
+  deleteAnimation(id) {this.animation(id); this.db.prepare('DELETE FROM animations WHERE id=?').run(id);}
   close(){this.db.close();}
 }
 
