@@ -102,6 +102,68 @@ const Sequence = z.object({
   motion: z.enum(['none', 'bob', 'sway']).default('none').describe('bob: gentle up and down, like hovering'),
 }).strict();
 
+// Graphics: shapes ChatGPT draws and animates itself, as data. Each element is a path, circle, ellipse,
+// rectangle, line or line of text in the graphic's own coordinates (its viewBox), and any of its
+// position, rotation, scale, opacity and stroke draw-on can be keyframed. Saved graphics are reused by name.
+const PATH_D = /^[MmLlHhVvCcSsQqTtAaZz0-9eE.,\s+-]+$/;
+const Num = () => z.number().min(-100000).max(100000);
+const Track = () => z.array(z.object({ frame: z.number().int().min(0).max(100000).describe('Frames from the start of the layer (or of the loop)'), value: Num() }).strict()).min(1).max(200);
+const Keys = () => z.object({
+  x: Track().optional(), y: Track().optional(),
+  rotate: Track().optional().describe('Degrees, around `origin`'),
+  scale: Track().optional(), scaleX: Track().optional(), scaleY: Track().optional(),
+  opacity: Track().optional().describe('0–1'),
+  draw: Track().optional().describe('0–1: how much of the outline is drawn, for strokes that draw themselves on'),
+}).strict();
+const Element = () => z.object({
+  shape: z.enum(['path', 'circle', 'ellipse', 'rect', 'line', 'text']),
+  d: z.string().max(4000).regex(PATH_D).optional().describe('SVG path data, for shape path'),
+  cx: Num().optional(), cy: Num().optional(), r: Num().optional(), rx: Num().optional(), ry: Num().optional(),
+  x: Num().optional(), y: Num().optional(), width: Num().optional(), height: Num().optional(), x2: Num().optional(), y2: Num().optional(),
+  text: z.string().max(80).optional(), font: z.enum(['serif', 'script']).optional(), fontSize: z.number().min(1).max(2000).optional(),
+  anchor: z.enum(['start', 'middle', 'end']).optional(),
+  fill: z.union([Color(), z.literal('none')]).optional(), stroke: Color().optional(), strokeWidth: z.number().min(0).max(500).optional(),
+  opacity: z.number().min(0).max(1).optional(),
+  origin: z.object({ x: Num(), y: Num() }).strict().optional().describe('Pivot for rotate and scale, e.g. where a wing joins the body'),
+  keys: Keys().optional(),
+  ease: z.enum(['linear', 'smooth', 'in', 'out', 'back', 'bounce']).default('smooth').describe('Easing between keyframes'),
+  repeat: z.object({
+    count: z.number().int().min(2).max(60), delay: z.number().int().min(0).max(300).default(0).describe('Frames each copy starts after the previous one'),
+    dx: Num().default(0), dy: Num().default(0), rotate: Num().default(0), scale: z.number().min(0.1).max(10).default(1),
+  }).strict().optional().describe('Copies of this element, each shifted and delayed: particles, confetti, a row of dots'),
+}).strict();
+const GraphicFields = () => ({
+  viewBox: z.object({ width: z.number().min(1).max(10000), height: z.number().min(1).max(10000) }).strict().optional().describe('The graphic\'s own coordinate space (default 100×100)'),
+  loop: z.number().int().min(0).max(900).optional().describe('Repeat every element\'s keyframes every N frames (0 or absent: play once)'),
+  elements: z.array(Element()).min(1).max(120).optional(),
+});
+export const GraphicDef = z.object({ ...GraphicFields(), elements: z.array(Element()).min(1).max(120) }).strict();
+const Graphic = z.object({
+  type: z.literal('graphic'), ...Span(),
+  use: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).optional().describe('Name of a saved graphic (list_graphics), instead of elements'),
+  ...GraphicFields(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(),
+  size: z.number().int().min(10).max(4000).default(300).describe('Width in pixels on a 1080-wide frame'),
+  opacity: Unit().default(1),
+  enter: z.enum(['pop', 'fade', 'none']).default('fade'),
+  exit: z.enum(['pop', 'fade', 'none']).default('fade'),
+}).strict();
+
+// What a graphic needs beyond its schema: each shape has the fields it draws from.
+const NEEDS = { path: ['d'], circle: ['r'], ellipse: ['rx', 'ry'], rect: ['width', 'height'], line: ['x2', 'y2'], text: ['text'] };
+export function graphicErrors(def, where) {
+  const errors = [];
+  for (const [i, el] of def.elements.entries()) {
+    const missing = NEEDS[el.shape].filter(k => el[k] == null);
+    if (missing.length) errors.push(`${where}: elements.${i} (${el.shape}) needs ${missing.join(' and ')}`);
+    for (const [prop, track] of Object.entries(el.keys || {})) {
+      track.sort((a, b) => a.frame - b.frame);
+      if (track.some((k, n) => n && k.frame === track[n - 1].frame)) errors.push(`${where}: elements.${i}.keys.${prop} has two keys on one frame`);
+    }
+  }
+  return errors;
+}
+
 const Zoom = z.object({
   type: z.literal('zoom'), ...Span(),
   scale: z.number().min(1).max(4).describe('1.5 fills the frame with the middle two thirds'),
@@ -111,7 +173,7 @@ const Zoom = z.object({
 const Shake = z.object({ type: z.literal('shake'), ...Span(), strength: Unit().default(0.4) }).strict();
 const Flash = z.object({ type: z.literal('flash'), ...Span(), color: Color().default('white') }).strict();
 
-export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Zoom, Shake, Flash]);
+export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Graphic, Zoom, Shake, Flash]);
 
 const Play = z.object({
   from: Frame().describe('First SOURCE frame'), to: Frame().describe('SOURCE frame to stop before'),
@@ -163,7 +225,7 @@ const pos = s => typeof s === 'string' ? `anchor '${s}'` : null;
 // copy's info ({frames, width, height}); `assets` maps asset names to {width, height}. Returns the
 // normalised spec (defaults filled in, so a stored version renders the same later), the plan the
 // renderer follows and the output↔source mapping to show back.
-export function planEdit(input, footage, assets = {}) {
+export function planEdit(input, footage, assets = {}, graphics = {}) {
   const spec = EditSpec.parse(input);
   const errors = [], warnings = [];
   const last = footage.frames - 1;
@@ -225,7 +287,18 @@ export function planEdit(input, footage, assets = {}) {
       if (layer.path[0].frame > layer.from || layer.path.at(-1).frame < layer.to - 1) warnings.push(`${where}: the path does not cover the whole layer, so it waits at its first or last point`);
       if (layer.at != null) warnings.push(`${where}: has both a path and 'at'; the path is used`);
     }
-    if ((layer.type === 'image' && layer.place === 'screen' || layer.type === 'sequence' || layer.type === 'sticker') && layer.at == null && !layer.path) layer.at = { x: 0.5, y: 0.5 };
+    if ((layer.type === 'image' && layer.place === 'screen' || ['sequence', 'sticker', 'graphic'].includes(layer.type)) && layer.at == null && !layer.path) layer.at = { x: 0.5, y: 0.5 };
+    if (layer.type === 'graphic') {
+      // A saved graphic is copied in, so this version keeps rendering the same even if the library changes.
+      if (layer.use && layer.elements) { errors.push(`${where}: give either use or elements, not both`); continue; }
+      if (layer.use) {
+        const def = graphics[layer.use];
+        if (!def) { errors.push(`${where}: no saved graphic called '${layer.use}' (see list_graphics)`); continue; }
+        Object.assign(layer, { viewBox: layer.viewBox ?? def.viewBox, loop: layer.loop ?? def.loop, elements: structuredClone(def.elements) });
+      }
+      if (!layer.elements) { errors.push(`${where}: needs elements, or use with a saved graphic's name`); continue; }
+      errors.push(...graphicErrors(layer, where));
+    }
     if (layer.type === 'sequence') {
       const sheet = assets[layer.asset];
       if (!sheet) { errors.push(`${where}: no sprite sheet called '${layer.asset}' has been uploaded for this footage`); continue; }
@@ -333,6 +406,21 @@ steam and a callout, then carries on. Layer times are OUTPUT frames: the freeze 
   The last key lands exactly on the "rim" anchor. "facing":"path" turns it to face the way it flies (draw it facing right).
 - A bird that lands: a flapping sequence along a path ending on the rim, then an image of it perched at "rim"
   starting on the landing frame (sequence exit "none", out 0; perched image enter "none" or "pop").
+
+## Graphics: draw and animate your own shapes
+A graphic is shapes in its own coordinates (viewBox, default 100×100) with keyframed properties. Keys count
+frames from the layer's start; with "loop": N they repeat every N frames. Rotation and scale turn around "origin".
+A bird with flapping wings (looping every 8 frames), flown along a path:
+{"type":"graphic","from":90,"to":150,"size":260,"facing":"path","loop":8,
+ "path":[{"frame":90,"x":0.1,"y":0.2},{"frame":149,"at":"rim"}],
+ "elements":[
+  {"shape":"path","d":"M50,52 Q30,20 8,30 Q30,45 50,56Z","fill":"#2f6fdb","origin":{"x":50,"y":54},
+   "keys":{"rotate":[{"frame":0,"value":-25},{"frame":4,"value":30},{"frame":8,"value":-25}]}},
+  {"shape":"ellipse","cx":55,"cy":58,"rx":22,"ry":11,"fill":"#3d86f5","stroke":"ink","strokeWidth":2},
+  {"shape":"circle","cx":76,"cy":50,"r":8,"fill":"#3d86f5","stroke":"ink","strokeWidth":2},
+  {"shape":"path","d":"M83,48 L92,51 L83,54Z","fill":"gold"}]}
+Confetti: one small rect with "repeat":{"count":30,"delay":2,"dx":9,"rotate":40} and keys on y and rotate.
+save_graphic stores a graphic by name so later edits use {"type":"graphic","use":"bird"}; list_graphics shows them.
 
 ## Tips
 - Layers are drawn in list order, later on top. Illustrate layers are the exception: they redraw the footage itself,

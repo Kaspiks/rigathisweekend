@@ -193,6 +193,7 @@ test('save_edit advertises a compatible MCP input schema', async t => {
     saveEdit: (_id, spec, note) => (saved = { version: 1, spec, note }),
     edit: () => saved,
     edits: () => [{ version: 1 }],
+    graphics: () => ({}),
   };
   const app = { locals: { renders: new Set() }, get() {}, post() {}, patch() {}, delete() {} };
   const server = new McpServer({ name: 'schema-check', version: '1' });
@@ -388,4 +389,29 @@ test('A wide sprite sheet keeps its frame size when stored', async t => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const sheet = await sharp({ create: { width: 3200, height: 300, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png().toBuffer();
   assert.deepEqual(await saveAsset(sheet, join(dir, 'bird-flap.png')), { width: 3200, height: 300 });
+});
+
+test('ChatGPT can define its own animated graphics and save them to reuse by name', needsFfmpeg, async t => {
+  const { dir, upload, settle, mcp, store } = await setup(t);
+  const { id } = await upload(await readFile(await rampClip(dir))).then(json); await settle();
+  const client = await mcp();
+  const wing = { shape: 'path', d: 'M50,52 Q30,20 8,30 Q30,45 50,56Z', fill: '#2f6fdb', origin: { x: 50, y: 54 }, keys: { rotate: [{ frame: 4, value: 30 }, { frame: 0, value: -25 }, { frame: 8, value: -25 }] } };
+  const bad = await client.callTool({ name: 'save_graphic', arguments: { name: 'bird', graphic: { elements: [{ shape: 'circle', cx: 5 }] } } });
+  assert.ok(bad.isError); assert.match(bad.content[0].text, /circle\) needs r/);
+  const saved = await client.callTool({ name: 'save_graphic', arguments: { name: 'bird', note: 'flapping bird', graphic: { loop: 8, elements: [wing, { shape: 'ellipse', cx: 55, cy: 58, rx: 22, ry: 11, fill: 'sky' }] } } });
+  assert.ok(!saved.isError, saved.content?.[0]?.text);
+  const listed = dataOf(await client.callTool({ name: 'list_graphics', arguments: {} }));
+  assert.deepEqual(listed.map(g => [g.name, g.note, g.definition.elements.length]), [['bird', 'flapping bird', 2]]);
+  const edit = { layers: [{ type: 'graphic', from: 0, to: 40, use: 'bird', facing: 'path', path: [{ frame: 0, x: 0.1, y: 0.1 }, { frame: 39, x: 0.9, y: 0.5 }] }] };
+  const ok = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit } });
+  assert.ok(!ok.isError, ok.content?.[0]?.text);
+  // The saved edit carries its own copy, so changing the library later does not change this version.
+  store.saveGraphic('bird', { elements: [{ shape: 'rect', width: 1, height: 1 }] });
+  const stored = store.edit(id).spec.layers[0];
+  assert.equal(stored.elements.length, 2);
+  assert.deepEqual(stored.elements[0].keys.rotate.map(k => k.frame), [0, 4, 8], 'keyframes are put in order');
+  const missing = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers: [{ type: 'graphic', from: 0, to: 10, use: 'owl' }] } } });
+  assert.ok(missing.isError); assert.match(missing.content[0].text, /no saved graphic called 'owl'/);
+  const script = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers: [{ type: 'graphic', from: 0, to: 10, elements: [{ shape: 'path', d: 'M0,0 L1,1 <script>' }] }] } } });
+  assert.ok(script.isError, 'path data can only be path data');
 });

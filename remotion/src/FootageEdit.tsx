@@ -11,6 +11,7 @@ import { AbsoluteFill, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRe
 import { BoilFilter, IllustrationFilter } from './edit/filters';
 import type { FootageEditProps, IllustrateLayer, ImageLayer, Layer, SequenceLayer } from './edit/model';
 import { PALETTE, baseScale, cameraAt, colour, footageRect, heading, layerPoint, motionStyle, phase, screenPlace } from './edit/model';
+import { GraphicView } from './edit/Graphics';
 import { Sticker } from './edit/Stickers';
 import { DEFAULT_AT, TextBox } from './edit/Texts';
 
@@ -132,6 +133,10 @@ export const FootageEdit = (props: FootageEditProps) => {
           case 'image': {
             const p = at(l, { x: 0.5, y: 0.5 });
             return <Picture key={i} layer={l} props={props} rect={rect} x={p.x} y={p.y} frame={frame} boilId="boil-img" turn={heading(props, cam, base, frame, l)} />;
+          }
+          case 'graphic': {
+            const p = at(l, { x: 0.5, y: 0.5 });
+            return <GraphicView key={i} layer={l} x={p.x} y={p.y} frame={frame} turn={turned(heading(props, cam, base, frame, l))} />;
           }
           case 'sequence': {
             const p = at(l, { x: 0.5, y: 0.5 });

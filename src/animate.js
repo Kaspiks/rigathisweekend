@@ -9,7 +9,7 @@ import { mkdir, readdir, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import sharp from 'sharp';
 import { z } from 'zod';
-import { GUIDE, McpEditSpec, fromMcpEdit, toMcpEdit, planEdit, previewFrames, sourceFrameAt } from './edits.js';
+import { GUIDE, GraphicDef, McpEditSpec, fromMcpEdit, graphicErrors, toMcpEdit, planEdit, previewFrames, sourceFrameAt } from './edits.js';
 import {
   ASSET_NAME, FOOTAGE_ID, FPS, cleanName, contactSheet, describe, footageFiles, frameWithGrid, grabFrame, limits,
   newFootageId, probe, receive, sampleSheet, saveAsset, secondsOf, spread, transcode, writePoster,
@@ -111,7 +111,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const f = store.footage(job.footage);
       if (f.status !== 'ready') throw new Error('The footage is not ready');
       const work = f.info.work, assets = await withAssets(f.id);
-      const { spec, plan } = planEdit(store.edit(f.id, job.version).spec, work, assets);
+      const { spec, plan } = planEdit(store.edit(f.id, job.version).spec, work, assets, store.graphics());
       const body = JSON.stringify({ footage: f.id, render: job.id, kind: job.kind, ...job.request,
         props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames } } });
       let out;
@@ -187,7 +187,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   async function videoRequest(f, version, quality, from, to) {
     if (!renderUrl()) throw fail('The render service is not configured (RENDER_URL)', 409);
     const edit = store.edit(f.id, version);
-    const { plan } = planEdit(edit.spec, f.info.work, await withAssets(f.id));
+    const { plan } = planEdit(edit.spec, f.info.work, await withAssets(f.id), store.graphics());
     const last = plan.durationInFrames - 1;
     const range = from != null || to != null ? [Math.min(last, from ?? 0), Math.min(last, to ?? last)] : null;
     if (range && range[1] < range[0]) throw fail('`to` must not be before `from`');
@@ -314,7 +314,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       inputSchema: { footage: Id, version: z.number().int().min(1).optional() }, annotations: read,
     }, async ({ footage, version }) => {
       const f = ready(footage), edit = store.edit(f.id, version ?? null);
-      const { timeline, plan, warnings } = planEdit(edit.spec, f.info.work, await withAssets(f.id));
+      const { timeline, plan, warnings } = planEdit(edit.spec, f.info.work, await withAssets(f.id), store.graphics());
       return text({ footage: f.id, version: edit.version, note: edit.note, edit: toMcpEdit(edit.spec), durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, warnings, versions: store.edits(f.id) });
     });
 
@@ -323,7 +323,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       inputSchema: { footage: Id, edit: McpEditSpec, note: z.string().trim().max(200).optional().describe('What changed, for the version list') }, annotations: write,
     }, async ({ footage, edit, note }) => {
       const f = ready(footage);
-      const { spec, plan, timeline, warnings } = planEdit(fromMcpEdit(edit), f.info.work, await withAssets(f.id));
+      const { spec, plan, timeline, warnings } = planEdit(fromMcpEdit(edit), f.info.work, await withAssets(f.id), store.graphics());
       const saved = store.saveEdit(f.id, spec, note || null);
       return text({ footage: f.id, version: saved.version, format: spec.format, size: [plan.width, plan.height], fps: FPS, durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, warnings, next: 'preview_edit to check frames, then render_edit' });
     });
@@ -338,7 +338,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async ({ footage, version, frames, scale }) => {
       if (!renderUrl()) throw fail('The render service is not configured (RENDER_URL)');
       const f = ready(footage), edit = store.edit(f.id, version ?? null);
-      const { plan, spec } = planEdit(edit.spec, f.info.work, await withAssets(f.id));
+      const { plan, spec } = planEdit(edit.spec, f.info.work, await withAssets(f.id), store.graphics());
       const list = frames ? [...new Set(frames)].sort((a, b) => a - b) : previewFrames(plan, spec.layers, 8);
       const outside = list.find(x => x > plan.durationInFrames - 1);
       if (outside != null) throw fail(`Frame ${outside} is past the end of the edit (its last frame is ${plan.durationInFrames - 1})`);
@@ -366,6 +366,21 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const ahead = store.db.prepare("SELECT count(*) n FROM footage_renders WHERE status IN ('queued','rendering') AND id<?").get(job.id).n;
       return text({ ...renderSummary(job), ahead, note: 'Poll get_render with this render id every 20–30 s. Expect roughly a minute per 10 s of video at full size, more while the footage is redrawn as a drawing or when other renders are waiting.' });
     });
+
+    server.registerTool('save_graphic', {
+      description: 'Save a graphic (shapes with keyframed animation, see get_edit_guide) under a name, for any edit to use with {"type":"graphic","use":"<name>"}. Saving an existing name replaces it; edits already saved keep their copy. Try it in an edit with preview_edit before relying on it.',
+      inputSchema: { name: AssetName, graphic: GraphicDef, note: z.string().trim().max(200).optional().describe('What it is, for list_graphics') }, annotations: write,
+    }, async ({ name, graphic, note }) => {
+      const errors = graphicErrors(graphic, name);
+      if (errors.length) throw fail(errors.join('; '));
+      store.saveGraphic(name, graphic, note || null);
+      return text({ saved: name, elements: graphic.elements.length, use: `{"type":"graphic","use":"${name}","from":…,"to":…,"at":…}` });
+    });
+
+    server.registerTool('list_graphics', {
+      description: 'Saved graphics that edits can reuse by name, with their definitions.',
+      inputSchema: {}, annotations: read,
+    }, async () => text(store.graphicList()));
 
     server.registerTool('create_upload_link', {
       description: 'A one-time link for sending a picture you made (in your sandbox, or generated) to a clip as a named asset, for edits to use. Upload the raw file with PUT or POST as the request body, e.g. curl --fail -T /path/picture.png "<url>". Works once, for 30 minutes. PNG keeps transparency; JPEG and WebP work too.',
