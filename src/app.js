@@ -4,8 +4,8 @@ import { resolve, dirname } from 'node:path';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { Submission, whatsappText, postCaptionPreview, weekendFor, postsFor, postName, checkAlsoOn, weekendDays, eventDate, eventsByDay, eventTime, dayName, weekendOver } from './domain.js';
-import { GridRequest, buildGrid, checkPicks, dayEvents, gridDay, gridFiles, suggestPicks, ticketText, dropTiles } from './grids.js';
+import { WEEKEND_GRID, Submission, whatsappText, postCaptionPreview, weekendFor, postsFor, postName, checkAlsoOn, weekendDays, tagDays, eventDate, eventsByDay, eventTime, dayName, weekendOver } from './domain.js';
+import { GridRequest, buildGrid, checkPicks, dayEvents, gridDay, gridFiles, suggestPicks, gridText, dropTiles, pinEvents } from './grids.js';
 import { renderEdition, uploadPath } from './render.js';
 import { ensureThumb } from './thumbs.js';
 import sharp from 'sharp';
@@ -15,7 +15,7 @@ import { researchInto } from './research.js';
 import { prepareLinks, captionLinker, linkSummary } from './shortlinks.js';
 import { request, gridVideo, deliverAnimation } from './providers.js';
 import { createOAuthProvider } from './oauth.js';
-import { THEMES, THEME_KEYS, themeKey } from './themes.js';
+import { THEMES, FAMILY_KEYS, TONES, TONE_KEYS, themeKey, weekFamily, dayTone, themeCss } from './themes.js';
 
 function equal(a,b) {const aa=Buffer.from(a||''),bb=Buffer.from(b||'');return aa.length===bb.length&&timingSafeEqual(aa,bb);}
 export function createApp(store,env=process.env,{fetcher=fetch}={}) {
@@ -35,13 +35,36 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
   });
   const link=captionLinker(store,env);
   const hasPhoto=(e,i)=>existsSync(uploadPath(store.dir,e.id,i))||existsSync(resolve(store.dir,'media',e.id,`photo-${i}.jpg`));
-  const gridsFor=e=>eventsByDay(e.data,e.approved?e.selected:null).map(({date,items})=>{
-    const files=gridFiles(store.dir,e.id,date);
-    return {date,day:gridDay(date),name:dayName(date),suggested:suggestPicks(e,date,i=>hasPhoto(e,i)),
-      events:items.map(({event,index})=>({index,title:event.title,time:eventTime(event)})),
+  // Why an event may not go in this day's grid: it is already in a grid somewhere. A card that is in THIS
+  // day's own saved grid is fine, or you could never rebuild that day. Returns the reason to show beside the
+  // card, or null when it is free to use. Events left out of an approved edition need no reason here: they
+  // are not among its published events at all, so they never reach the picker.
+  const blockedIn=(e,date)=>{
+    const usage=store.gridUsage();
+    return index=>{
+      const event=e.data.events[index];
+      // The whole-weekend grid is a round-up of the same weekend, so it may repeat the day stories' cards and
+      // they may repeat it; only day grids exclude each other, and every grid excludes earlier weekends' stories.
+      const elsewhere=(usage.get(event.sourceUrl)||[]).filter(u=>!(u.edition===e.id&&(u.date===date||u.date===WEEKEND_GRID||date===WEEKEND_GRID)));
+      if(elsewhere.length) {const u=elsewhere[0];return u.edition===e.id?(u.date===WEEKEND_GRID?'already in the whole-weekend story':`already in ${dayName(u.date)}'s story`):`already in a story for the weekend of ${u.weekend}`;}
+      return null;
+    };
+  };
+  // One grid per day, and when the edition spans more than one day, a whole-weekend grid after them that
+  // can take cards from any day.
+  const gridsFor=e=>{
+    const days=eventsByDay(e.data,e.approved?e.selected:null);
+    const slots=days.map(({date,items})=>({date,items,name:dayName(date)}));
+    if(days.length>1) slots.push({date:WEEKEND_GRID,items:days.flatMap(d=>d.items),name:'The whole weekend'});
+    return slots.map(gridSlot(e));
+  };
+  const gridSlot=e=>({date,items,name})=>{
+    const files=gridFiles(store.dir,e.id,date), blocked=blockedIn(e,date);
+    return {date,day:gridDay(date),name,suggested:suggestPicks(e,date,i=>hasPhoto(e,i),i=>!!blocked(i)),
+      events:items.map(({event,index})=>({index,title:event.title,time:eventTime(event),blocked:blocked(index)})),
       saved:store.grid(e.id,date),collage:existsSync(files.png),video:existsSync(files.mp4),
       posts:store.jobs(e.id).filter(j=>gridVideo(j.target)?.date===date).map(j=>({...j,kind:gridVideo(j.target).kind}))};
-  });
+  };
   // OAuth endpoints are public by design: /.well-known/*, /authorize, /token, /register, /revoke, /oauth/login.
   const oauth=createOAuthProvider(store,env); app.use(oauth.router);
   app.use(async(req,res,next)=>{
@@ -80,28 +103,29 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
     await server.connect(transport); await transport.handleRequest(req,res,req.body);
   });
   app.all('/mcp',(_req,res)=>res.status(405).send('Use POST'));
-  app.get('/api/status',(_req,res)=>res.json({live:env.LIVE_PUBLISH==='true',postizUrl:env.POSTIZ_PUBLIC_URL||null,ejuz:!!env.EJUZ_API_KEY,researchEnabled:env.RESEARCH_SCHEDULE_ENABLED==='true',weekend:weekendFor(),postizConfigured:!!env.POSTIZ_API_KEY,whatsappConfigured:!!env.WAHA_CHAT_ID,researchConfigured:!!env.OPENAI_API_KEY,themes:THEME_KEYS.map(key=>({key,...THEMES[key]})),renderConfigured:!!env.RENDER_URL,runs:store.db.prepare('SELECT * FROM runs ORDER BY weekend DESC').all()}));
+  app.get('/themes.css',(_req,res)=>res.type('css').send(themeCss()));
+  app.get('/api/status',(_req,res)=>res.json({live:env.LIVE_PUBLISH==='true',postizUrl:env.POSTIZ_PUBLIC_URL||null,ejuz:!!env.EJUZ_API_KEY,researchEnabled:env.RESEARCH_SCHEDULE_ENABLED==='true',weekend:weekendFor(),postizConfigured:!!env.POSTIZ_API_KEY,whatsappConfigured:!!env.WAHA_CHAT_ID,researchConfigured:!!env.OPENAI_API_KEY,families:FAMILY_KEYS.map(key=>({key,name:THEMES[`${key}-mid`].familyName})),tones:TONE_KEYS.map(key=>({key,name:TONES[key].name})),renderConfigured:!!env.RENDER_URL,runs:store.db.prepare('SELECT * FROM runs ORDER BY weekend DESC').all()}));
   // Past weekends stay on disk but are not listed: the page stays small and the current weekend is
   // what you work on. ?scope=all brings them back when you need to look something up.
   app.get('/api/editions',(req,res)=>{
     const all=store.list(), show=req.query.scope==='all'?all:all.filter(e=>!weekendOver(e.weekend));
     res.set('X-Past-Editions',String(all.length-show.length));
     res.json(show.map(e=>({...e,jobs:store.jobs(e.id),whatsapp:whatsappText(e.data,e.selected),
-    weekendDays:weekendDays(e.weekend),eventDates:e.data.events.map(eventDate),
+    weekendDays:weekendDays(e.weekend),tagDays:tagDays(e.weekend),eventDates:e.data.events.map(eventDate),
     uploads:e.data.events.map((_,i)=>i).filter(i=>existsSync(uploadPath(store.dir,e.id,i))),
     organiserPhotos:e.data.events.map((_,i)=>i).filter(i=>existsSync(resolve(store.dir,'media',e.id,`photo-${i}.jpg`))),
-    headline:e.data.headline||null,
-    posts:postsFor(e.data,e.selected).map(p=>({date:p.date,part:p.part,parts:p.parts,name:postName(p),theme:themeKey(e,p.date),indexes:p.items.map(x=>x.index),caption:postCaptionPreview(e.data,p,link)})),
+    headline:e.data.headline||null,palette:weekFamily(e),paletteChosen:!!e.themes.palette,
+    posts:postsFor(e.data,e.selected).map(p=>({date:p.date,part:p.part,parts:p.parts,name:postName(p),theme:themeKey(e,p.date),tone:dayTone(e,p.date),indexes:p.items.map(x=>x.index),caption:postCaptionPreview(e.data,p,link)})),
     shortLinks:e.demo?{}:Object.fromEntries(e.data.events.map((x,i)=>[i,linkSummary(store,x.sourceUrl,env)])),
     grids:gridsFor(e)})));
   });
   app.post('/api/editions',async(req,res)=>res.status(201).json(await submit(req.body)));
   // Story grids: one per day of the edition. You pick the cards (a suggestion is offered), build the
   // sheet here, and only a separate press renders the video, in the render service.
-  const gridDate=(e,date)=>{if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||!dayEvents(e,date).length) throw new Error(`No events on ${date} in this edition`);return date;};
+  const gridDate=(e,date)=>{if((date!==WEEKEND_GRID&&!/^\d{4}-\d{2}-\d{2}$/.test(date))||!dayEvents(e,date).length) throw new Error(`No events on ${date} in this edition`);return date;};
   app.post('/api/editions/:id/grids/:date',async(req,res)=>{
     const e=store.get(req.params.id), date=gridDate(e,req.params.date), body=GridRequest.parse(req.body||{});
-    const picks=checkPicks(e,date,body.events);
+    const picks=checkPicks(e,date,body.events,blockedIn(e,date));
     if(store.grid(e.id,date)?.status==='rendering') throw new Error('This story is rendering; wait for it to finish before changing the grid');
     await buildGrid(store.dir,e,date,picks);
     await rm(gridFiles(store.dir,e.id,date).mp4,{force:true}); // the old video no longer matches the grid
@@ -121,7 +145,8 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
     const job=(async()=>{
       try {
         const r=await fetcher(`${env.RENDER_URL.replace(/\/$/,'')}/render`,{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(15*60000),
-          body:JSON.stringify({style:grid.style,edition:e.id,date,day:gridDay(date),...ticketText(date),count:grid.picks.length,kicker:grid.kicker,category:grid.category,holdSeconds:grid.holdSeconds})});
+          body:JSON.stringify({style:grid.style,edition:e.id,date,day:gridDay(date),...gridText(e,date),count:grid.picks.length,kicker:grid.kicker,category:grid.category,holdSeconds:grid.holdSeconds,
+            ...(grid.style==='pinboard'?{events:pinEvents(e,grid.picks)}:{})})});
         const out=await r.json().catch(()=>({}));
         store.finishGridRender(e.id,date,r.ok?null:(out.error||`Render service returned HTTP ${r.status}`));
       } catch(err) {store.finishGridRender(e.id,date,err.name==='TimeoutError'?'Rendering took too long':`Render service unreachable: ${err.message}`);}
@@ -188,17 +213,23 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
   app.post('/api/editions/:id/events/:index/also-on',async(req,res)=>{
     const e=store.get(req.params.id), i=Number(req.params.index);
     if(!e.data.events[i]) throw new Error('That event is not in this edition');
-    const dates=checkAlsoOn(e.weekend,e.data.events[i],z.array(z.string()).max(2).parse(req.body?.alsoOn??[]));
+    const dates=checkAlsoOn(e.weekend,e.data.events[i],z.array(z.string()).max(6).parse(req.body?.alsoOn??[]));
     const updated=store.updateEvent(e.id,i,{alsoOn:dates});
+    await dropTiles(store.dir,e.id,i); // grid tiles carry the day tag too
     await renderEdition(updated,store.dir,fetch,{link});
     res.json({alsoOn:dates});
   });
-  // The colour theme of one day: its cover, slides, stories and grid are redrawn in it.
+  // Colours. The week's family changes every day's images; a day's tone only that day's cover, slides,
+  // stories and grid tiles, which is why it redraws just the one day.
+  app.post('/api/editions/:id/palette',async(req,res)=>{
+    const palette=z.enum(FAMILY_KEYS).parse(req.body?.palette);
+    await renderEdition(store.setPalette(req.params.id,palette),store.dir,fetch,{link});
+    res.json({palette});
+  });
   app.post('/api/editions/:id/themes/:date',async(req,res)=>{
-    const theme=z.enum(THEME_KEYS).parse(req.body?.theme);
-    const e=store.setTheme(req.params.id,req.params.date,theme);
-    await renderEdition(e,store.dir,fetch,{link});
-    res.json({date:req.params.date,theme});
+    const tone=z.enum(TONE_KEYS).parse(req.body?.tone);
+    await renderEdition(store.setTone(req.params.id,req.params.date,tone),store.dir,fetch,{link,date:req.params.date});
+    res.json({date:req.params.date,tone});
   });
   // A special post: some of an edition's events under your own heading (Researchers' Night), as a separate
   // edition that publishes alongside the regular post for the same day. Photos come along with the events.
@@ -208,7 +239,9 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
     const picks=[...new Set(body.events)].sort((a,b)=>a-b);
     if(picks.some(i=>!from.data.events[i])) throw new Error('That event is not in this edition');
     const events=picks.map(i=>structuredClone(from.data.events[i]));
-    const e=store.submit({weekend:from.weekend,headline:body.headline,events},!!from.demo);
+    let e=store.submit({weekend:from.weekend,headline:body.headline,events},!!from.demo);
+    // Same week, same colour family: a family you chose for the regular edition carries over.
+    if(from.themes.palette&&!e.approved&&!e.themes.palette) e=store.setPalette(e.id,from.themes.palette);
     // Submission sorts the events by time, so each photo is matched to its event rather than to its position.
     const src=resolve(store.dir,'media',from.id), dest=resolve(store.dir,'media',e.id); await mkdir(dest,{recursive:true});
     const names=new Set(await readdir(src).catch(()=>[]));

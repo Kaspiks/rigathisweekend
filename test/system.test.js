@@ -667,7 +667,7 @@ test('Every cover carries the several-days note, and slides show a day tag besid
   assert.doesNotMatch(caption,/Also on/);assert.match(caption,/Open Friday, Saturday and Sunday/);
   assert.doesNotMatch(whatsappText(e.data),/also on/i);
   assert.throws(()=>store.submit({weekend:'2099-10-23',events:[{...concert,alsoOn:['2099-10-24']}]}),/cannot repeat the event's own day/);
-  assert.throws(()=>store.submit({weekend:'2099-10-23',events:[{...concert,alsoOn:['2099-10-30']}]}),/another day of this weekend/);
+  assert.throws(()=>store.submit({weekend:'2099-10-23',events:[{...concert,alsoOn:['2099-10-30']}]}),/another day of this week, Monday to Sunday/);
 });
 test('A Postiz rate limit is retried automatically instead of needing a manual check',async t=>{
   const store=await setup(t), e=store.submit(fixture());await renderEdition(e,store.dir,async()=>{throw new Error('offline');});
@@ -789,24 +789,36 @@ test('A special post has its own heading, shares the day with the regular post a
   assert.throws(()=>store.approve(store.submit({weekend:'2099-10-23',events:[{...friday,title:'Another regular'}]}).id),/already covers 2099-10-23/,'regular posts still get one per day');
   assert.throws(()=>store.submit({weekend:'2099-10-23',headline:'x'.repeat(41),events:[friday]}),/headline/);
 });
-test('Each day has a colour theme you can change until the edition is approved',async t=>{
-  const {THEMES,themeKey}=await import('../src/themes.js');
+test('Each week has a colour family and each day a tone of it, both yours to change until approval',async t=>{
+  const {THEMES,themeKey,weekFamily,dayTone,FAMILY_KEYS}=await import('../src/themes.js');
   const {coverSvg,cardSvg}=await import('../src/render.js');
   const {postsFor}=await import('../src/domain.js');
   const store=await setup(t), base=fixture().events[0];
   const e=store.submit({weekend:'2099-10-23',events:[{...base,startsAt:'2099-10-23T18:00:00+03:00'},{...base,title:'Saturday thing'},{...base,title:'Sunday thing',startsAt:'2099-10-25T18:00:00+03:00'}]});
-  const days=['2099-10-23','2099-10-24','2099-10-25'];
-  assert.equal(new Set(days.map(d=>themeKey(e,d))).size,3,'Friday, Saturday and Sunday differ by default');
-  assert.equal(themeKey({data:{headline:'Researchers’ Night'}},'2099-10-23'),'ember','a special post stands apart');
-  const plum=store.setTheme(e.id,'2099-10-24','plum');
-  assert.equal(themeKey(plum,'2099-10-24'),'plum');
-  assert.equal(themeKey(plum,'2099-10-23'),themeKey(e,'2099-10-23'),'the other days keep theirs');
-  assert.match(coverSvg(postsFor(plum.data)[1],'2099-10-23',false,THEMES.plum),new RegExp(`fill="${THEMES.plum.ink}"`));
-  assert.match(cardSvg(base,0,1,'2099-10-23',false,false,null,null,false,THEMES.plum),new RegExp(`fill="${THEMES.plum.accent}"`));
-  assert.throws(()=>store.setTheme(e.id,'2099-10-24','neon'),/Unknown colour theme/);
-  assert.throws(()=>store.setTheme(e.id,'2099-10-26','plum'),/No events/);
+  const days=['2099-10-23','2099-10-24','2099-10-25'], family=weekFamily(e);
+  assert.deepEqual(days.map(d=>themeKey(e,d)),[`${family}-light`,`${family}-mid`,`${family}-deep`],'one family for the week, a tone per day');
+  assert.equal(new Set(days.map(d=>THEMES[themeKey(e,d)].accent)).size,1,'the accent ties the week together');
+  assert.equal(new Set(days.map(d=>THEMES[themeKey(e,d)].ink)).size,3,'the background tells the days apart');
+  assert.notEqual(weekFamily({weekend:'2099-10-30'}),family,'the next week gets another family');
+  assert.equal(dayTone({weekend:'2099-10-23',data:{headline:'Researchers’ Night'}},'2099-10-23'),'night','a special post takes the darkest tone of its week');
+  assert.equal(weekFamily({weekend:'2099-10-23',data:{headline:'x'}}),family,'and the same family');
+  assert.ok(FAMILY_KEYS.length>=6);
+  const plum=store.setPalette(e.id,'plum');
+  assert.deepEqual(days.map(d=>themeKey(plum,d)),['plum-light','plum-mid','plum-deep']);
+  const deep=store.setTone(e.id,'2099-10-24','night');
+  assert.equal(themeKey(deep,'2099-10-24'),'plum-night');
+  assert.equal(themeKey(deep,'2099-10-23'),'plum-light','the other days keep theirs');
+  assert.match(coverSvg(postsFor(deep.data)[1],'2099-10-23',false,THEMES['plum-night']),new RegExp(`fill="${THEMES['plum-night'].ink}"`));
+  assert.match(cardSvg(base,0,1,'2099-10-23',false,false,null,null,false,THEMES['plum-light']),new RegExp(`fill="${THEMES['plum-light'].accent}"`));
+  assert.equal(THEMES['forest-mid'].ink,'#17352d','the forest mid tone is the original look');
+  assert.throws(()=>store.setPalette(e.id,'neon'),/Unknown colour family/);
+  assert.throws(()=>store.setTone(e.id,'2099-10-24','neon'),/Unknown tone/);
+  assert.throws(()=>store.setTone(e.id,'2099-10-26','mid'),/No events/);
+  store.db.prepare('UPDATE editions SET themes=? WHERE id=?').run('{"2099-10-23":"ember"}',e.id);
+  assert.equal(themeKey(store.get(e.id),'2099-10-23'),`${family}-light`,'picks from the first colour version fall back to the defaults');
   store.approve(e.id);
-  assert.throws(()=>store.setTheme(e.id,'2099-10-24','teal'),/already in Postiz/);
+  assert.throws(()=>store.setPalette(e.id,'teal'),/already in Postiz/);
+  assert.throws(()=>store.setTone(e.id,'2099-10-24','mid'),/already in Postiz/);
 });
 test('Ticked events become a special post from the review page, photos included',async t=>{
   const store=await setup(t),token='s'.repeat(32);const app=createApp(store,{ADMIN_TOKEN:token});
@@ -824,8 +836,40 @@ test('Ticked events become a special post from the review page, photos included'
   assert.deepEqual(special.data.events.map(x=>x.title),['Lab night','Late']);
   assert.ok((await readFile(join(store.dir,'media',special.id,'upload-1.jpg'))).length,'your photo follows its event to its new position');
   const row=(await (await fetch(base+'/api/editions',{headers:auth})).json()).find(x=>x.id===special.id);
-  assert.equal(row.headline,'Researchers’ Night');assert.equal(row.posts[0].theme,'ember');
-  const set=await fetch(`${base}/api/editions/${special.id}/themes/2099-10-23`,{method:'POST',headers:auth,body:JSON.stringify({theme:'teal'})});
-  assert.equal(set.status,200);assert.equal(store.get(special.id).themes['2099-10-23'],'teal');
-  assert.equal((await fetch(`${base}/api/editions/${special.id}/themes/2099-10-23`,{method:'POST',headers:auth,body:JSON.stringify({theme:'neon'})})).status,400);
+  assert.equal(row.headline,'Researchers’ Night');assert.equal(row.posts[0].tone,'night');
+  const post=(path,body)=>fetch(`${base}/api/editions/${special.id}/${path}`,{method:'POST',headers:auth,body:JSON.stringify(body)});
+  assert.equal((await post('themes/2099-10-23',{tone:'light'})).status,200);assert.equal(store.get(special.id).themes.days['2099-10-23'],'light');
+  assert.equal((await post('palette',{palette:'teal'})).status,200);assert.equal(store.get(special.id).themes.palette,'teal');
+  assert.equal((await post('themes/2099-10-23',{tone:'neon'})).status,400);
+  assert.equal((await post('palette',{palette:'neon'})).status,400);
+  const css=await (await fetch(base+'/themes.css',{headers:auth})).text();
+  assert.match(css,/\.swatch-teal-light\{background:linear-gradient/);assert.match(css,/\.swatch-family-teal\{/);
+  // A family chosen for the regular edition carries over to a special post made from it.
+  store.setPalette(e.id,'rust');
+  const again=await (await fetch(`${base}/api/editions/${e.id}/special`,{method:'POST',headers:auth,body:JSON.stringify({headline:'Late labs',events:[1]})})).json();
+  assert.equal(again.themes.palette,'rust');
+});
+test('Changing a day\'s colours redraws only that day',async t=>{
+  const {statSync}=await import('node:fs');
+  const store=await setup(t), base=fixture().events[0];
+  const e=store.submit({weekend:'2099-10-23',events:[{...base,startsAt:'2099-10-23T18:00:00+03:00'},{...base,title:'Saturday thing'}]});
+  await renderEdition(e,store.dir,async()=>{throw new Error('offline');});
+  const file=n=>join(store.dir,'media',e.id,n), before=n=>statSync(file(n)).mtimeMs;
+  const sat=before('feed-1.jpg'), fri=before('feed-0.jpg'), cover=before('cover-2099-10-23-1.jpg');
+  await new Promise(r=>setTimeout(r,20));
+  await renderEdition(store.setTone(e.id,'2099-10-23','night'),store.dir,async()=>{throw new Error('offline');},{date:'2099-10-23'});
+  assert.ok(before('feed-0.jpg')>fri&&before('cover-2099-10-23-1.jpg')>cover,'Friday is redrawn');
+  assert.equal(before('feed-1.jpg'),sat,'Saturday is left alone');
+});
+test('Day tags can name any day of the week, while the event is still posted only on its own day',async t=>{
+  const {dayTag,postsFor,checkAlsoOn}=await import('../src/domain.js');
+  const store=await setup(t), base={...fixture().events[0],startsAt:'2099-10-23T10:00:00+03:00'};
+  const e=store.submit({weekend:'2099-10-23',events:[{...base,title:'Expo',alsoOn:['2099-10-22']},{...base,title:'Long show',alsoOn:['2099-10-21','2099-10-22','2099-10-24','2099-10-25']},{...base,title:'Odd days',alsoOn:['2099-10-19','2099-10-21','2099-10-25']}]});
+  assert.deepEqual(e.data.events.map(dayTag),['THU · FRI','WED–SUN','MON · WED · FRI · SUN'],'a run of four or more days becomes a range');
+  assert.deepEqual(postsFor(e.data).map(p=>p.date),['2099-10-23'],'no post on Thursday or any other extra day');
+  assert.throws(()=>checkAlsoOn('2099-10-23',base,['2099-10-18']),/Monday to Sunday/,'the Sunday before is another week');
+  assert.throws(()=>checkAlsoOn('2099-10-23',base,['2099-10-26']),/Monday to Sunday/,'so is the Monday after');
+  const {cardSvg}=await import('../src/render.js');
+  const all=cardSvg({...base,alsoOn:['2099-10-19','2099-10-20','2099-10-21','2099-10-22','2099-10-24','2099-10-25']},0,1,'2099-10-23');
+  assert.match(all,/>MON–SUN</,'a whole week fits in the corner');
 });

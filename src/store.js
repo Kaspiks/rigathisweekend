@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { digest, validateSubmission, plannedJobs, eventsByDay, validatePublication } from './domain.js';
 import { GRID_KINDS } from './providers.js';
-import { THEMES } from './themes.js';
+import { FAMILY_KEYS, TONES } from './themes.js';
 import { DateTime } from 'luxon';
 
 export class Store {
@@ -25,7 +25,7 @@ export class Store {
     this.db.exec('DROP INDEX IF EXISTS one_approved_weekend');
     try {this.db.exec('ALTER TABLE editions ADD COLUMN selected TEXT');} catch {} // added with per-event selection
     try {this.db.exec('ALTER TABLE editions ADD COLUMN stories TEXT');} catch {} // added with opt-in stories
-    try {this.db.exec('ALTER TABLE editions ADD COLUMN themes TEXT');} catch {} // added with per-day colour themes
+    try {this.db.exec('ALTER TABLE editions ADD COLUMN themes TEXT');} catch {} // colours: {palette, days:{date:tone}}
     try {this.db.exec('ALTER TABLE jobs ADD COLUMN publish_at TEXT');} catch {} // when Postiz should publish it
     try {this.db.exec('ALTER TABLE jobs ADD COLUMN finished_at TEXT');} catch {}
     try {this.db.exec("ALTER TABLE grids ADD COLUMN style TEXT NOT NULL DEFAULT 'ticket'");} catch {} // added with the ticket opener
@@ -41,7 +41,7 @@ export class Store {
     this.db.prepare('INSERT OR IGNORE INTO editions(id,weekend,data,demo) VALUES(?,?,?,?)').run(id,data.weekend,JSON.stringify(data),+demo);
     return this.get(id);
   }
-  get(id) { const row=this.db.prepare('SELECT * FROM editions WHERE id=?').get(id); if(!row) throw new Error('Edition not found'); return {...row,data:JSON.parse(row.data),selected:row.selected?JSON.parse(row.selected):null,stories:row.stories?JSON.parse(row.stories):[],themes:row.themes?JSON.parse(row.themes):{}}; }
+  get(id) { const row=this.db.prepare('SELECT * FROM editions WHERE id=?').get(id); if(!row) throw new Error('Edition not found'); return {...row,data:JSON.parse(row.data),selected:row.selected?JSON.parse(row.selected):null,stories:row.stories?JSON.parse(row.stories):[],themes:colours(row.themes)}; }
   list() { return this.db.prepare('SELECT id FROM editions ORDER BY created DESC, rowid DESC').all().map(r=>this.get(r.id)); }
   jobs(id) { return this.db.prepare('SELECT * FROM jobs WHERE edition=? ORDER BY id').all(id); }
   // `selected` lists the events to publish (omit for all); `stories` lists which of those also get a story draft.
@@ -171,19 +171,47 @@ export class Store {
     this.db.prepare('UPDATE editions SET data=? WHERE id=?').run(JSON.stringify(e.data),id);
     return this.get(id);
   }
-  // The colour theme of one day of an edition. Images go to Postiz at approval, so the colours are fixed from then on.
-  setTheme(id,date,theme) {
+  // Colours: the week's family for the whole edition, and a tone of it per day. Images go to Postiz at
+  // approval, so the colours are fixed from then on.
+  #colourable(id) {
     const e=this.get(id);
     if(e.approved) throw new Error('This edition is approved and its images are already in Postiz, so its colours can no longer be changed here');
-    if(!THEMES[theme]) throw new Error(`Unknown colour theme ${theme}`);
+    return e;
+  }
+  setPalette(id,palette) {
+    const e=this.#colourable(id);
+    if(!FAMILY_KEYS.includes(palette)) throw new Error(`Unknown colour family ${palette}`);
+    this.db.prepare('UPDATE editions SET themes=? WHERE id=?').run(JSON.stringify({...e.themes,palette}),id);
+    return this.get(id);
+  }
+  setTone(id,date,tone) {
+    const e=this.#colourable(id);
+    if(!TONES[tone]) throw new Error(`Unknown tone ${tone}`);
     if(!eventsByDay(e.data).some(d=>d.date===date)) throw new Error(`No events on ${date} in this edition`);
-    this.db.prepare('UPDATE editions SET themes=? WHERE id=?').run(JSON.stringify({...e.themes,[date]:theme}),id);
+    this.db.prepare('UPDATE editions SET themes=? WHERE id=?').run(JSON.stringify({...e.themes,days:{...e.themes.days,[date]:tone}}),id);
     return this.get(id);
   }
   // Story grids, one per edition day: the cards you picked, the envelope label, and the render state.
   grid(edition,date) {
     const row=this.db.prepare('SELECT * FROM grids WHERE edition=? AND date=?').get(edition,date);
     return row?{date:row.date,picks:JSON.parse(row.picks),kicker:row.kicker,category:row.category,holdSeconds:row.hold_seconds,style:row.style,status:row.status,error:row.error,updated:row.updated}:null;
+  }
+  // Every event that is already in a grid somebody built, keyed by its organiser link so the same event is
+  // recognised from one weekend to the next (a run of an exhibition is submitted again each week). Used to
+  // grey it out in the pickers: a story video should not go out twice with the same card in it.
+  gridUsage() {
+    const used=new Map();
+    for(const row of this.db.prepare('SELECT edition,date,picks FROM grids').all()) {
+      const e=this.db.prepare('SELECT weekend,data FROM editions WHERE id=?').get(row.edition);
+      if(!e) continue;
+      const events=JSON.parse(e.data).events;
+      for(const i of JSON.parse(row.picks)) {
+        const url=events[i]?.sourceUrl; if(!url) continue;
+        if(!used.has(url)) used.set(url,[]);
+        used.get(url).push({edition:row.edition,date:row.date,weekend:e.weekend});
+      }
+    }
+    return used;
   }
   grids(edition) {return this.db.prepare('SELECT date FROM grids WHERE edition=? ORDER BY date').all(edition).map(r=>this.grid(edition,r.date));}
   saveGrid(edition,date,{picks,kicker,category,holdSeconds,style='ticket'}) {
@@ -232,6 +260,12 @@ export class Store {
   close(){this.db.close();}
 }
 
+// The stored colour choices. The first version kept one whole theme per day ({date: key}); those picks
+// predate week families and are dropped, so such an edition falls back to its week's defaults.
+function colours(json) {
+  const c=json?JSON.parse(json):{};
+  return {...(c.palette?{palette:c.palette}:{}),days:c.days||{}};
+}
 // Where short links point: SHORT_LINK_BASE (a bare host such as kurejam.lv) once you own a short
 // domain, otherwise the dashboard's own host, which already serves them.
 export function shortBase(env=process.env) {

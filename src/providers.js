@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { caption, postCaption, postOn, escapeHtml, whatsappText, chosen, eventsByDay, dayName, eventTime } from './domain.js';
+import { WEEKEND_GRID, caption, postCaption, postOn, escapeHtml, whatsappText, chosen, eventsByDay, dayName, eventTime } from './domain.js';
 import { captionLinker } from './shortlinks.js';
 
 export async function request(url,options={},fetcher=fetch) {
@@ -31,7 +31,7 @@ export function preflight(target,env=process.env) {
 }
 // A digest sent mid-weekend only lists what is still to come.
 const upcoming=(data,selected,now=Date.now())=>chosen(data,selected).filter(x=>Date.parse(x.event.startsAt)>now).map(x=>x.index);
-export async function deliver(job,edition,dir,env=process.env,fetcher=fetch,link=null) {
+export async function deliver(job,edition,dir,env=process.env,fetcher=fetch,link=null,picks=null) {
   preflight(job.target,env);
   if(isWhatsApp(job.target)) {
     const result=await request(`${env.WAHA_URL.replace(/\/$/,'')}/api/sendText`,{method:'POST',headers:{'Content-Type':'application/json','X-Api-Key':env.WAHA_API_KEY},body:JSON.stringify({session:env.WAHA_SESSION||'default',chatId:env.WAHA_CHAT_ID,text:whatsappText(edition.data,upcoming(edition.data,edition.selected))})},fetcher);
@@ -47,7 +47,7 @@ export async function deliver(job,edition,dir,env=process.env,fetcher=fetch,link
     const body=new FormData(); body.append('file',new Blob([file],{type:'video/mp4'}),filename);
     const uploaded=await request(`${base}/upload`,{method:'POST',headers,body},fetcher);
     if(!uploaded.id||!uploaded.path) throw new Error('Postiz upload returned no media ID/path for the video');
-    const caption=video.kind==='reel'?gridCaption(edition,video.date,link):'';
+    const caption=video.kind==='reel'?gridCaption(edition,video.date,link,picks):'';
     // Drafts: you watch it in Postiz and schedule it there, so nothing goes out unseen.
     const payload={type:'draft',date:new Date(Date.now()+MIN_LEAD_MINUTES*60000).toISOString(),shortLink:false,tags:[],
       posts:[{integration:{id:env.INSTAGRAM_INTEGRATION_ID},value:[{content:caption,image:[{id:uploaded.id,path:uploaded.path}]}],
@@ -98,10 +98,13 @@ export async function deliverAnimation(dir,animation,kind,env=process.env,fetche
   return {postiz:'draft',kind,postId:result[0].postId,at:new Date().toISOString()};
 }
 
-export function gridCaption(edition,date,link=null) {
-  const items=eventsByDay(edition.data,edition.selected).find(d=>d.date===date)?.items||[];
+// The weekend grid lists the cards that are actually in its video (picks), since it chose among all the days.
+export function gridCaption(edition,date,link=null,picks=null) {
+  const items=date===WEEKEND_GRID
+    ?(picks||[]).map(i=>({event:edition.data.events[i]})).filter(x=>x.event)
+    :eventsByDay(edition.data,edition.selected).find(d=>d.date===date)?.items||[];
   const lines=items.map(({event:e},i)=>`${i+1}. ${e.title}\n${eventTime(e)} · ${e.venue} · ${e.price}${link?`\n${link(e.sourceUrl)}`:''}`);
-  return [`${edition.data.headline?`${edition.data.headline} · `:''}${dayName(date)} in Rīga.`,'',...lines,'','Save this for the weekend. Check organisers for updates.','#Riga #RigaEvents #Rīga']
+  return [`${edition.data.headline?`${edition.data.headline} · `:''}${date===WEEKEND_GRID?'This weekend':dayName(date)} in Rīga.`,'',...lines,'','Save this for the weekend. Check organisers for updates.','#Riga #RigaEvents #Rīga']
     .join('\n').slice(0,2200).split('\n').map(s=>`<p>${escapeHtml(s)}</p>`).join('');
 }
 // Instagram gets one carousel per day: a date cover, then that day's events in order.
@@ -121,7 +124,8 @@ export function slides(job,data,selected=null,link=null) {
 }
 export function jobEvents(job,data,selected=null) {
   const video=gridVideo(job.target);
-  if(video) return eventsByDay(data,selected).find(d=>d.date===video.date)?.items.map(x=>x.event)||[];
+  // A weekend grid spans the days, so a Friday event having started is no reason to hold back its video.
+  if(video) return video.date===WEEKEND_GRID?[]:eventsByDay(data,selected).find(d=>d.date===video.date)?.items.map(x=>x.event)||[];
   if(job.target.startsWith('instagram_story:')) return [data.events[Number(job.target.split(':')[1])]];
   const at=job.target.startsWith('instagram_feed:')?address(job.target):null;
   return at?postOn(data,at.date,at.part,selected).items.map(x=>x.event):chosen(data,selected).map(x=>x.event);
@@ -139,7 +143,8 @@ export async function runJobs(store,env=process.env,fetcher=fetch) {
       if(isWhatsApp(job.target)) {if(!upcoming(e.data,e.selected).length) throw new Error('Every event in this digest has already started');}
       else if(events.some(x=>Date.parse(x.startsAt)<=Date.now())) throw new Error('Event already started; create an updated edition');
     } catch(err) {store.finish(job.id,'blocked',{error:err.message});continue;}
-    try {store.finish(job.id,'sent',await deliver(job,e,store.dir,env,fetcher,link));}
+    const vid=gridVideo(job.target);
+    try {store.finish(job.id,'sent',await deliver(job,e,store.dir,env,fetcher,link,vid?store.grid(e.id,vid.date)?.picks:null));}
     // A rate limit means the provider refused the request outright, so nothing was created: try again later.
     catch(err) {if(err.status===429) store.requeue(job.id,10,'Rate limited; retrying automatically'); else store.finish(job.id,'uncertain',{error:err.message});}
   }

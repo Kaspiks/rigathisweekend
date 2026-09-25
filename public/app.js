@@ -3,7 +3,7 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 async function api(path,body){const r=await fetch(path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw Error(data.error||'Request failed');api.headers=r.headers;return data;}
 async function action(fn){try{$('#status').textContent='Working…';$('#status').className='';await fn();await load();$('#status').textContent='Done.';}catch(e){$('#status').textContent=e.message;$('#status').className='error';}}
 const riga=t=>t?new Date(t).toLocaleString('en-GB',{timeZone:'Europe/Riga',weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'';
-let stamp=Date.now(), postizUrl=null, ejuz=false, renderConfigured=false, showPast=false, themes=[];
+let stamp=Date.now(), postizUrl=null, ejuz=false, renderConfigured=false, showPast=false, families=[], tones=[];
 const gridInfo=new Map(), openGrids=new Set();
 const media=(e,file)=>`/media/${e.id}/${file}?v=${stamp}`;
 // Thumbnails keep the review page light; every one links to the full-size image.
@@ -20,12 +20,13 @@ function photoRow(e,i){
   return `<div class="photo-row${!mine&&!organiser&&!locked?' needs':''}"><a href="${media(e,`feed-${i}.jpg`)}" target="_blank" rel="noopener"><img ${lazy} src="${thumb(e,`feed-${i}.jpg`)}" alt="Slide for ${esc(e.data.events[i].title)}"></a>${state}${add}${remove}${story}</div>`;
 }
 
-// Other weekend days an event is also on. Editable on drafts; shown as text once approved.
+// Other days an event is also on, Monday to Sunday of the weekend's week. They only change the day tag on
+// its slides: the event is still posted once, on its own day. Editable on drafts; shown as text once approved.
 const weekday=d=>new Date(`${d}T12:00:00Z`).toLocaleDateString('en-GB',{weekday:'short',timeZone:'UTC'});
 function alsoRow(e,i){
-  const x=e.data.events[i], set=x.alsoOn||[], others=e.weekendDays.filter(d=>d!==e.eventDates[i]);
-  if(e.approved) return set.length?`<div class="also">Also on ${set.map(weekday).join(' and ')}</div>`:'';
-  return `<div class="also">Also on:${others.map(d=>`<label><input type="checkbox" data-also="${e.id}" data-index="${i}" value="${d}"${set.includes(d)?' checked':''}> ${weekday(d)}</label>`).join('')}</div>`;
+  const x=e.data.events[i], set=x.alsoOn||[], days=e.tagDays||e.weekendDays, own=e.eventDates[i];
+  if(e.approved) return set.length?`<div class="also">Also on ${set.map(weekday).join(', ')}</div>`:'';
+  return `<div class="also">Also on:${days.map(d=>d===own?`<span class="also-own">${weekday(d)}</span>`:`<label${e.weekendDays.includes(d)?'':' class="weekday"'}><input type="checkbox" data-also="${e.id}" data-index="${i}" value="${d}"${set.includes(d)?' checked':''}> ${weekday(d)}</label>`).join('')}</div>`;
 }
 function jobLabel(e,j){
   if(j.target.startsWith('instagram_feed:')){const [date,part]=j.target.slice(15).split('#');const p=e.posts.find(x=>x.date===date&&String(x.part)===part);return `Instagram post · ${esc(p?p.name:date)}`;}
@@ -84,7 +85,8 @@ function gridState(g){
 function gridBlock(e,g){
   const key=`${e.id}|${g.date}`, s=g.saved, picks=s?s.picks:g.suggested, busy=s?.status==='rendering';
   gridInfo.set(key,g);
-  const cards=g.events.map(x=>`<label class="grid-pick"><input type="checkbox" data-grid="${key}" value="${x.index}"${picks.includes(x.index)?' checked':''}${busy?' disabled':''}><img ${lazy} src="${thumb(e,`feed-${x.index}.jpg`)}" alt=""><span>${esc(x.title)}<small>${esc(x.time)}</small></span></label>`).join('');
+  // A card already used in a story, or left out of the weekend's posts, is greyed out and cannot be ticked.
+  const cards=g.events.map(x=>`<label class="grid-pick${x.blocked?' used':''}" data-pick="${e.id}|${x.index}"${x.blocked?' data-always-blocked="1"':''}><input type="checkbox" data-grid="${key}" value="${x.index}"${picks.includes(x.index)&&!x.blocked?' checked':''}${busy||x.blocked?' disabled':''}><img ${lazy} src="${thumb(e,`feed-${x.index}.jpg`)}" alt=""><span>${esc(x.title)}<small>${esc(x.time)}</small>${x.blocked?`<small class="why">${esc(x.blocked)}</small>`:''}</span></label>`).join('');
   const preview=g.collage?`<a href="${media(e,`grid-${g.date}.png`)}" target="_blank" rel="noopener"><img ${lazy} class="grid-preview" src="${thumb(e,`grid-${g.date}.png`)}" alt="Grid for ${esc(g.name)}"></a>`:'';
   const sendState=k=>{
     const j=(g.posts||[]).filter(x=>x.kind===k).pop();
@@ -99,13 +101,13 @@ function gridBlock(e,g){
     </div>`:'';
   const video=g.video&&!busy?`<div class="grid-video"><video controls playsinline preload="none" src="${media(e,`grid-${g.date}.mp4`)}"></video><a class="button-link" href="${media(e,`grid-${g.date}.mp4`)}" download="story-${g.date}.mp4">Download MP4</a></div>`:'';
   return `<section class="grid-day">
-    <h4>${esc(g.name)} · <span data-grid-count="${key}">${picks.length}</span> of ${GRID_MAX} cards · ${g.events.length} ${g.events.length===1?'event':'events'} that day</h4>
+    <h4>${esc(g.name)} · <span data-grid-count="${key}">${picks.length}</span> of ${GRID_MAX} cards · ${g.events.length} ${g.events.length===1?'event':'events'} ${g.date==='weekend'?'across the weekend':'that day'}</h4>
     <div class="grid-label">
       <label>Day <input value="${esc(g.day)}" disabled></label>
       <label>Kicker <input data-grid-kicker="${key}" maxlength="24" value="${esc(s?.kicker||'Overview')}"${busy?' disabled':''}></label>
       <label>Category <input data-grid-category="${key}" maxlength="32" value="${esc(s?.category||'Arts & Culture')}"${busy?' disabled':''}></label>
       <label>Hold (s) <input data-grid-hold="${key}" type="number" min="2" max="15" step="1" value="${s?.holdSeconds||6}"${busy?' disabled':''}></label>
-      <label>Opener <select data-grid-style="${key}"${busy?' disabled':''}>${[['ticket','Event ticket'],['envelope','Envelope']].map(([v,t])=>`<option value="${v}"${(s?.style||'ticket')===v?' selected':''}>${t}</option>`).join('')}</select></label>
+      <label>Opener <select data-grid-style="${key}"${busy?' disabled':''}>${[['ticket','Event ticket'],['envelope','Envelope'],['leaves','Leaf gust'],['bag','Harvest bag'],['book','Pressed leaf'],['mark','Leave your mark'],['sketch','Sketchbook'],['pinboard','Pinboard']].map(([v,t])=>`<option value="${v}"${(s?.style||'ticket')===v?' selected':''}>${t}</option>`).join('')}</select></label>
     </div>
     <div class="grid-picks">${cards}</div>
     <div class="toolbar">
@@ -121,17 +123,22 @@ function gridBlock(e,g){
 function gridSection(e){
   if(!e.grids?.length) return '';
   return `<details class="grids" data-open-key="grids-${e.id}"${openGrids.has(`grids-${e.id}`)?' open':''}><summary>Story grids · story video per day</summary>
-    <p class="hint">Tick up to ${GRID_MAX} cards for a day and build its grid. The video opens with the day's ticket (or the envelope), reveals the grid and holds it full screen with the day on top. Changing the opener needs a rebuild. ${e.approved?'Only events you approved are offered.':'Changing which events you publish later does not change a grid you already built.'}</p>
+    <p class="hint">Tick up to ${GRID_MAX} cards for a day and build its grid. Cards already used in a story, or left out of this weekend's posts, are greyed out. The video opens with the day's ticket (or the envelope), reveals the grid and holds it full screen with the day on top. Changing the opener needs a rebuild. ${e.approved?'Only events you approved are offered.':'Changing which events you publish later does not change a grid you already built.'}</p>
     ${e.grids.map(g=>gridBlock(e,g)).join('')}
   </details>`;
 }
 
-// The day's colour theme. One per day, so every part of a split day changes together; fixed once approved.
+// Colours: the week has a family (shared accent, so the week reads as one group) and each day a tone of it
+// (so the days tell apart). One tone per day, so every part of a split day changes together; fixed once approved.
+const familyName=k=>families.find(f=>f.key===k)?.name||k, toneName=k=>tones.find(t=>t.key===k)?.name||k;
+function palettePicker(e){
+  if(e.approved) return `<p class="palette"><span class="theme-now">Week colours: ${esc(familyName(e.palette))}</span></p>`;
+  return `<div class="palette"><span class="palette-label">Week colours</span><div class="themes" role="group" aria-label="Colour family for this week">${families.map(f=>`<button class="swatch swatch-family-${esc(f.key)}" data-palette="${esc(f.key)}" data-palette-edition="${e.id}" title="${esc(f.name)}" aria-label="${esc(f.name)}" aria-pressed="${f.key===e.palette}"></button>`).join('')}<span class="theme-now">${esc(familyName(e.palette))}${e.paletteChosen?'':' · this week’s default'}</span></div></div>`;
+}
 function themePicker(e,d){
-  const current=themes.find(t=>t.key===d.theme);
-  if(e.approved) return current?`<span class="theme-now">Colours: ${esc(current.name)}</span>`:'';
+  if(e.approved) return `<span class="theme-now">${esc(familyName(e.palette))} · ${esc(toneName(d.tone))}</span>`;
   if(d.part>1) return '';
-  return `<div class="themes" role="group" aria-label="Colours for ${esc(d.name)}">${themes.map(t=>`<button class="swatch swatch-${esc(t.key)}" data-theme="${esc(t.key)}" data-theme-edition="${e.id}" data-theme-date="${d.date}" title="${esc(t.name)}" aria-label="${esc(t.name)}" aria-pressed="${t.key===d.theme}"></button>`).join('')}<span class="theme-now">${esc(current?.name||'')}</span></div>`;
+  return `<div class="themes" role="group" aria-label="Tone for ${esc(d.name)}">${tones.map(t=>`<button class="swatch swatch-${esc(e.palette)}-${esc(t.key)}" data-tone="${esc(t.key)}" data-theme-edition="${e.id}" data-theme-date="${d.date}" title="${esc(t.name)}" aria-label="${esc(t.name)}" aria-pressed="${t.key===d.tone}"></button>`).join('')}<span class="theme-now">${esc(toneName(d.tone))}</span></div>`;
 }
 function edition(e){
   const missing=e.data.events.length-new Set([...e.uploads,...e.organiserPhotos]).size;
@@ -141,11 +148,12 @@ function edition(e){
   return `<article class="edition">
     <div class="edition-head"><div>${e.headline?`<span class="tag special">Special post</span>`:''}<h3>${e.headline?`${esc(e.headline)} · `:''}Weekend of ${esc(e.weekend)}</h3><p>${state} · ${e.data.events.length} picks</p></div>${!e.demo&&!e.approved?`<button data-approve="${e.id}">Approve & send to Postiz</button>`:''}</div>
     ${publishing(e)}
+    ${e.demo?'':palettePicker(e)}
     ${posts}
     ${gridSection(e)}
     <details><summary>Story previews</summary><div class="cards">${e.data.events.map((_,i)=>`<a href="${media(e,`story-${i}.jpg`)}" target="_blank" rel="noopener"><img ${lazy} src="${thumb(e,`story-${i}.jpg`)}" alt="Event ${i+1} story image"></a>`).join('')}</div></details>
     <details ${e.approved||e.demo?'':'open'}><summary>${e.approved?'Events in this edition':'Choose what to publish'} · ${e.data.events.length} found${e.demo?'':` · ${missing} without a photo`}</summary>
-      ${e.approved||e.demo?'':`<p class="hint">Untick events to leave them out. Tick Story to also get a story draft in Postiz for that event. Tick the other days an exhibition, festival or repeated show is also on, so its day tag shows them. Photos must be final before approving, because they go to Postiz then.${ejuz?' Caption links become ej.uz links when you approve.':''}</p>`}
+      ${e.approved||e.demo?'':`<p class="hint">Untick events to leave them out. Tick Story to also get a story draft in Postiz for that event. Tick the other days an exhibition, festival or repeated show is also on, Monday to Sunday, so its day tag shows them. It is still posted only on its own day. Photos must be final before approving, because they go to Postiz then.${ejuz?' Caption links become ej.uz links when you approve.':''}</p>`}
       <ol class="event-list picks">${rows}</ol>
       ${e.approved||e.demo?'':`<div class="toolbar"><button class="secondary" data-all="${e.id}">Select all</button><button class="secondary" data-none="${e.id}">Clear</button><button class="secondary" data-special="${e.id}">Make a special post from the ticked events…</button></div>
       <p class="hint">A special post has your own heading (such as Researchers’ Night) on its cover, above the date, and goes out as a separate carousel at noon, alongside the regular post for that day. It appears as its own edition below, for you to approve. Untick those events here if they should not also be in the regular post.</p>`}
@@ -158,7 +166,7 @@ async function load(){
   stamp=Date.now();
   const [status,editions]=await Promise.all([api('/api/status'),api(`/api/editions${showPast?'?scope=all':''}`)]);
   const past=Number(api.headers?.get('X-Past-Editions')||0);
-  postizUrl=status.postizUrl; ejuz=status.ejuz; renderConfigured=status.renderConfigured; themes=status.themes||[];
+  postizUrl=status.postizUrl; ejuz=status.ejuz; renderConfigured=status.renderConfigured; families=status.families||[]; tones=status.tones||[];
   $('#mode').textContent=status.live?'LIVE DELIVERY ENABLED':'PREVIEW MODE';
   $('#runs').textContent=status.runs.length?status.runs.map(r=>`${r.weekend} · ${r.status} · ${r.detail||''}`).join('\n'):'No scheduled research runs yet.';
   // Only the newest edition is open: older ones stay collapsed so their images are never fetched.
@@ -193,9 +201,15 @@ document.addEventListener('click',ev=>{
     input.click();return;
   }
   if(b.dataset.unphoto){action(async()=>{const r=await fetch(`/api/editions/${b.dataset.unphoto}/events/${b.dataset.index}/photo`,{method:'DELETE'});const d=await r.json();if(!r.ok)throw Error(d.error||'Could not remove the photo');});return;}
-  if(b.dataset.theme){
-    const {themeEdition:id,themeDate:date,theme}=b.dataset;
-    action(()=>api(`/api/editions/${id}/themes/${date}`,{theme}));
+  if(b.dataset.tone||b.dataset.palette){
+    const row=b.closest('.themes');
+    if(b.getAttribute('aria-pressed')==='true'||document.querySelector('.themes.busy')) return;
+    // Show the choice at once: redrawing takes a few seconds for a day, longer for the whole week, and the page reloads after.
+    row.querySelectorAll('.swatch').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));
+    row.classList.add('busy'); row.querySelector('.theme-now').textContent=`${b.title} · redrawing${b.dataset.palette?' every day':''}…`;
+    const call=b.dataset.palette?api(`/api/editions/${b.dataset.paletteEdition}/palette`,{palette:b.dataset.palette})
+      :api(`/api/editions/${b.dataset.themeEdition}/themes/${b.dataset.themeDate}`,{tone:b.dataset.tone});
+    action(()=>call).finally(()=>{row.classList.remove('busy');if($('#status').className==='error') load();});
     return;
   }
   if(b.dataset.special){
@@ -260,6 +274,23 @@ document.addEventListener('change',ev=>{
     const key=tick.dataset.grid, picks=gridPicks(key);
     if(picks.length>GRID_MAX){tick.checked=false;$('#status').textContent=`A grid holds at most ${GRID_MAX} cards.`;$('#status').className='error';return;}
     $(`[data-grid-count="${CSS.escape(key)}"]`).textContent=picks.length;
+    return;
+  }
+  // Unticking an event for publishing greys its grid card at once: the server only learns the selection at approval.
+  const pick=ev.target.closest('input[data-edition]');
+  if(pick){
+    const card=document.querySelector(`.grid-pick[data-pick="${CSS.escape(pick.dataset.edition+'|'+pick.value)}"]`);
+    if(card&&!card.dataset.alwaysBlocked){
+      const tick=card.querySelector('input');
+      card.classList.toggle('used',!pick.checked);
+      tick.disabled=!pick.checked;
+      if(!pick.checked) tick.checked=false;
+      const count=$(`[data-grid-count="${CSS.escape(tick.dataset.grid)}"]`);
+      if(count) count.textContent=gridPicks(tick.dataset.grid).length;
+      let why=card.querySelector('.why');
+      if(!pick.checked&&!why){why=document.createElement('small');why.className='why';why.textContent='left out of this weekend’s posts';card.querySelector('span').append(why);}
+      if(pick.checked&&why) why.remove();
+    }
     return;
   }
   const box=ev.target.closest('input[data-also]');if(!box)return;

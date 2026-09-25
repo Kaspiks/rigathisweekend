@@ -14,9 +14,10 @@ export const Event = z.object({
   imageUrl: z.string().url().max(500).refine(v => /^https:\/\//.test(v), 'HTTPS image required').optional(),
   // Which languages the event suits, shown as a tag on the card.
   languages: z.array(z.enum(['EN','LV','RU'])).min(1).max(3).optional(),
-  // Other days this weekend the event is also on (an exhibition, a festival, a repeated show).
-  // It is listed once, on its first or main day; the day tag on its slides shows all of them.
-  alsoOn: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).max(2).optional(),
+  // Other days the event is also on (an exhibition, a festival, a repeated show): any day from the Monday
+  // to the Sunday of the weekend's week. It is listed once, on its first or main day; the other days only
+  // appear in the day tag on its slides.
+  alsoOn: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).max(6).optional(),
 });
 export const Submission = z.object({
   weekend: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -53,15 +54,21 @@ export const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;',
 export function eventTime(e) { return DateTime.fromISO(e.startsAt).setZone(ZONE).setLocale('en').toFormat('ccc, dd LLL · HH:mm'); }
 // The grid puts every card of one day on screen at once, so its tiles carry the clock time alone.
 export const eventClock = e => DateTime.fromISO(e.startsAt).setZone(ZONE).setLocale('en').toFormat('HH:mm');
+// The weekend grid mixes days, so its tiles need the weekday as well: "Sun 10:00".
+export const eventDayClock = e => DateTime.fromISO(e.startsAt).setZone(ZONE).setLocale('en').toFormat('ccc HH:mm');
+// The story grid that draws from the whole weekend is stored and addressed under this key instead of a date.
+export const WEEKEND_GRID = 'weekend';
 export const languageTag = e => (e.languages?.length ? e.languages.join(' · ') : null);
 export const weekendDays = weekend => [0, 1, 2].map(n => DateTime.fromISO(weekend, { zone: ZONE }).plus({ days: n }).toISODate());
-// Valid "also on" days are other days of the same Friday–Sunday, never the event's own day.
+// The days a day tag can name: Monday to Sunday of the weekend's week. Seven days, so each weekday is unambiguous.
+export const tagDays = weekend => [-4, -3, -2, -1, 0, 1, 2].map(n => DateTime.fromISO(weekend, { zone: ZONE }).plus({ days: n }).toISODate());
+// Valid "also on" days are other days of the same Monday–Sunday week, never the event's own day.
 export function checkAlsoOn(weekend, event, dates) {
   if (dates == null) return [];
-  const own = DateTime.fromISO(event.startsAt).setZone(ZONE).toISODate(), days = weekendDays(weekend);
+  const own = DateTime.fromISO(event.startsAt).setZone(ZONE).toISODate(), days = tagDays(weekend);
   const clean = [...new Set(dates)].sort();
   for (const d of clean) {
-    if (!days.includes(d)) throw new Error(`"Also on" must be another day of this weekend: ${d} is not`);
+    if (!days.includes(d)) throw new Error(`"Also on" must be another day of this week, Monday to Sunday: ${d} is not`);
     if (d === own) throw new Error(`"Also on" cannot repeat the event's own day (${d})`);
   }
   return clean;
@@ -69,9 +76,14 @@ export function checkAlsoOn(weekend, event, dates) {
 const joinDays = xs => xs.length < 2 ? xs[0] : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
 export const alsoOnLabel = e => e.alsoOn?.length ? `Also on ${joinDays([...new Set(e.alsoOn)].sort().map(d => DateTime.fromISO(d, { zone: ZONE }).setLocale('en').toFormat('cccc')))}` : null;
 export const multiDay = e => !!e.alsoOn?.length;
-// The weekend days an event is on, for the day tag on its slides: "FRI · SAT · SUN".
-export const dayTag = e => [...new Set([DateTime.fromISO(e.startsAt).setZone(ZONE).toISODate(), ...(e.alsoOn || [])])].sort()
-  .map(d => DateTime.fromISO(d, { zone: ZONE }).setLocale('en').toFormat('ccc').toUpperCase()).join(' · ');
+// The days an event is on, for the day tag on its slides: "FRI · SAT · SUN", or "THU · SAT". Four or more
+// days in a row shorten to a range ("WED–SUN"), so the tag never grows wider than the corner it sits in.
+export function dayTag(e) {
+  const days = [...new Set([DateTime.fromISO(e.startsAt).setZone(ZONE).toISODate(), ...(e.alsoOn || [])])].sort().map(d => DateTime.fromISO(d, { zone: ZONE }));
+  const name = d => d.setLocale('en').toFormat('ccc').toUpperCase(), runs = [];
+  for (const d of days) { const run = runs[runs.length - 1]; if (run && d.diff(run[run.length - 1], 'days').days === 1) run.push(d); else runs.push([d]); }
+  return runs.map(r => r.length >= 4 ? `${name(r[0])}–${name(r[r.length - 1])}` : r.map(name).join(' · ')).join(' · ');
+}
 export const eventDate = e => DateTime.fromISO(e.startsAt).setZone(ZONE).toISODate();
 // A weekend is over once its Sunday has passed in Riga; those editions are kept but no longer listed.
 export const weekendOver = (weekend, now = DateTime.now()) => DateTime.fromISO(weekend, { zone: ZONE }).plus({ days: 3 }) <= now;

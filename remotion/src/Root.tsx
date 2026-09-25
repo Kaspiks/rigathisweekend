@@ -1,3 +1,4 @@
+import { MuseumComposition } from './MuseumComposition';
 import { Composition } from 'remotion';
 import { EnvelopeStory, FPS, durationFor, type EnvelopeStoryProps } from './EnvelopeStory';
 import { TicketStory, TICKET_FPS, ticketDuration, type TicketStoryProps } from './TicketStory';
@@ -12,6 +13,16 @@ import { Practice } from './Practice';
 import { Practice2x } from './Practice2';
 import { Practice3x } from './Practice3';
 import { Practice4x } from './Practice4';
+import { EcgStory, ECG_FPS, ecgDuration, type EcgStoryProps } from './EcgStory';
+import { ResearchersStory, RESEARCHERS_FPS, researchersDuration, type ResearchersStoryProps } from './ResearchersStory';
+import { ArtFairStory, ARTFAIR_FPS, artFairDuration, type ArtFairStoryProps } from './ArtFairStory';
+import { AUTUMN_FPS as OPENER_FPS } from './autumnOpener';
+import { LeafGustStory, gustDuration } from './LeafGustStory';
+import { HarvestBagStory, bagDuration } from './HarvestBagStory';
+import { PressedLeafStory, pressedDuration } from './PressedLeafStory';
+import { MarkStory, markDuration } from './MarkStory';
+import { SketchStory, sketchDuration } from './SketchStory';
+import { PinboardStory, pinboardDuration } from './PinboardStory';
 
 const autumn: AutumnStoryProps = { holdSeconds: 8 };
 // Riga Textile Mosaic 2026: the edition lists it from Friday 18 September, 9.00.
@@ -26,6 +37,20 @@ const ticket: TicketStoryProps = { day: 'FRIDAY', date: '18 SEPTEMBER', number: 
 const rye: RyeStoryProps = { day: 'SATURDAY', date: '19 SEPTEMBER', number: '0919', title: 'RUDZU RĪGA', kicker: 'rye & black humour', time: '14.00–16.00', price: 'FREE', sheet: 'collage.png', holdSeconds: 6 };
 
 const press: PressStoryProps = { title: 'RUDZU RĪGA', kicker: 'rye & black humour', day: 'SATURDAY', date: '19 SEPTEMBER', time: '14.00–16.00', venue: 'TORŅA IELA 4/II B · VECRĪGA', price: 'FREE', holdSeconds: 5, burst: 'steamflour' };
+
+// Medbaltica 2026, the medical fair at Ķīpsala, Thursday–Friday 24–25 September. Rust is that week's colour family.
+const ecg: EcgStoryProps = { title: ['MEDBALTICA', '2026'], days: 'THU · FRI', when: '24–25 SEPTEMBER', venue: 'ĶĪPSALA · ĶĪPSALAS IELA 8', price: '€3–5', accent: '#ffcf70', background: '#1c0d06', holdSeconds: 4 };
+
+// Researchers' Night, Friday 25 September, 16.00–22.00 at twelve venues. Same week as Medbaltica, so the same
+// Rust family: its accent, and the darkest tone for the sky.
+const researchers: ResearchersStoryProps = { title: ['RESEARCHERS’', 'NIGHT'], when: 'FRIDAY 25 SEPTEMBER', time: '16.00–22.00', where: '12 OPEN LABS ACROSS RĪGA', accent: '#ffcf70', background: ['#050304', '#140904'], liquid: ['#1fb5a5', '#7b4dff', '#ff3d7f', '#ff9d1f'], holdSeconds: 3 };
+
+// Art Riga Fair 2026, Friday-Sunday 25-27 September at the Latvian Railway History Museum. Ember is the
+// week's colour family, so the wash is its darkest tone and the accent its orange.
+const artFair: ArtFairStoryProps = { title: ['ART RIGA', 'FAIR 2026'], when: 'FRI–SUN · 25–27 SEPTEMBER', time: '10.00–18.00', venue: ['LATVIAN RAILWAY HISTORY MUSEUM', 'UZVARAS BULVĀRIS 2A'], price: '€14.63 · CONCESSIONS €7.32', accent: '#c23a16', ink: '#241a14', rinse: '#6b5a72', canvas: '#e8dcc2', paints: ['#c9184a', '#0f8b86', '#e08a1e'], holdSeconds: 2 };
+
+// The autumn and hands-on story openers take their sample props inline (below), not from a variable:
+// Studio can only save edited default props back into this file when they're written out in place.
 
 export const Root = () => (
   <>
@@ -111,6 +136,88 @@ export const Root = () => (
       calculateMetadata={({ props }) => ({ durationInFrames: durationFor(props.holdSeconds) })}
     />
     <Composition
+      id="EcgStory"
+      component={EcgStory}
+      width={1080}
+      height={1920}
+      fps={ECG_FPS}
+      durationInFrames={ecgDuration(ecg.holdSeconds)}
+      defaultProps={ecg}
+      calculateMetadata={({ props }) => ({ durationInFrames: ecgDuration(props.holdSeconds) })}
+    />
+    <Composition
+      id="ResearchersStory"
+      component={ResearchersStory}
+      width={1080}
+      height={1920}
+      fps={RESEARCHERS_FPS}
+      durationInFrames={researchersDuration(researchers.holdSeconds)}
+      defaultProps={researchers}
+      calculateMetadata={({ props }) => ({ durationInFrames: researchersDuration(props.holdSeconds) })}
+    />
+    <Composition
+      id="ArtFairStory"
+      component={ArtFairStory}
+      width={1080}
+      height={1920}
+      fps={ARTFAIR_FPS}
+      durationInFrames={artFairDuration(artFair.holdSeconds)}
+      defaultProps={artFair}
+      calculateMetadata={({ props }) => ({ durationInFrames: artFairDuration(props.holdSeconds) })}
+    />
+    <Composition id="LeafGustStory" component={LeafGustStory} width={1080} height={1920} fps={OPENER_FPS}
+      durationInFrames={gustDuration(3)} defaultProps={{ day: 'SATURDAY', date: '26 SEPTEMBER', kicker: 'Miķeļdiena', category: 'Harvest & markets', count: 4, sheet: 'collage.png', holdSeconds: 3 }}
+      calculateMetadata={({ props }) => ({ durationInFrames: gustDuration(props.holdSeconds) })} />
+    <Composition id="HarvestBagStory" component={HarvestBagStory} width={1080} height={1920} fps={OPENER_FPS}
+      durationInFrames={bagDuration(3)} defaultProps={{ day: 'SATURDAY', date: '26 SEPTEMBER', kicker: 'Miķeļdiena', category: 'Harvest & markets', count: 4, sheet: 'collage.png', holdSeconds: 3 }}
+      calculateMetadata={({ props }) => ({ durationInFrames: bagDuration(props.holdSeconds) })} />
+    <Composition id="MarkStory" component={MarkStory} width={1080} height={1920} fps={OPENER_FPS}
+      durationInFrames={markDuration(3)} defaultProps={{ day: 'SATURDAY', date: '26 SEPTEMBER', kicker: 'Hands-on', category: 'Workshops & dance', count: 4, sheet: 'collage.png', holdSeconds: 3 }}
+      calculateMetadata={({ props }) => ({ durationInFrames: markDuration(props.holdSeconds) })} />
+    <Composition id="SketchStory" component={SketchStory} width={1080} height={1920} fps={OPENER_FPS}
+      durationInFrames={sketchDuration(3)} defaultProps={{ day: 'SATURDAY', date: '26 SEPTEMBER', kicker: 'Hands-on', category: 'Workshops & dance', count: 4, sheet: 'collage.png', holdSeconds: 3 }}
+      calculateMetadata={({ props }) => ({ durationInFrames: sketchDuration(props.holdSeconds) })} />
+    <Composition id="PinboardStory" component={PinboardStory} width={1080} height={1920} fps={OPENER_FPS}
+      durationInFrames={pinboardDuration(3)}
+      defaultProps={{
+        day: 'SATURDAY',
+        date: '26 SEPTEMBER',
+        kicker: 'Hands-on',
+        category: 'Workshops & dance',
+        count: 4,
+        sheet: 'collage.png',
+        holdSeconds: 3,
+        events: [{
+          title: 'Churchill',
+          when: 'Fri, 18 Sep · 19:00',
+          price: '€30–40',
+          venue: 'Dailes Theatre, New Hall, Brīvības iela 75',
+          languages: ['LV'],
+        }, {
+          title: 'Helsinki Baroque Orchestra: Queen Christina\'s World',
+          when: 'Fri, 18 Sep · 19:00',
+          price: '€25–50',
+          venue: 'House of Blackheads, Festive Hall, Rātslaukums 7',
+          languages: ['EN', 'LV', 'RU'],
+        }, {
+          title: 'Riga Textile Mosaic 2026',
+          when: 'Fri, 18 Sep · 09:00',
+          price: 'Free',
+          venue: 'VEF Culture Palace, Exhibition Halls, Ropažu iela 2',
+          languages: ['EN', 'LV'],
+        }, {
+          title: 'Riga Acoustic Trio at MASA',
+          when: 'Fri, 18 Sep · 20:00',
+          price: '€20–110',
+          venue: 'MASA Studio, Elizabetes iela 67',
+          languages: ['EN', 'LV', 'RU'],
+        }],
+      }}
+      calculateMetadata={({ props }) => ({ durationInFrames: pinboardDuration(props.holdSeconds) })} />
+    <Composition id="PressedLeafStory" component={PressedLeafStory} width={1080} height={1920} fps={OPENER_FPS}
+      durationInFrames={pressedDuration(3)} defaultProps={{ day: 'SATURDAY', date: '26 SEPTEMBER', kicker: 'Miķeļdiena', category: 'Harvest & markets', count: 4, sheet: 'collage.png', holdSeconds: 3 }}
+      calculateMetadata={({ props }) => ({ durationInFrames: pressedDuration(props.holdSeconds) })} />
+    <Composition
       id="Practice"
       component={Practice}
       width={1080}
@@ -141,6 +248,14 @@ export const Root = () => (
       height={1920}
       fps={FPS}
       durationInFrames={150}
+    />
+    <Composition
+      id="MuseumComposition"
+      component={MuseumComposition}
+      durationInFrames={178}
+      fps={30}
+      width={1080}
+      height={1920}
     />
   </>
 );
