@@ -158,6 +158,7 @@ async function load(){
   // Weekends that are over are kept on the server but not listed, so the page stays light.
   if(past||showPast) $('#editions').insertAdjacentHTML('beforeend',`<p class="empty past-note">${showPast?'Showing past weekends too.':`${past} past ${past===1?'weekend is':'weekends are'} hidden.`} <button class="secondary small" id="past">${showPast?'Hide past weekends':'Show past weekends'}</button></p>`);
   if(editions.some(e=>e.grids?.some(g=>g.saved?.status==='rendering'))) watchRenders();
+  await loadFootage().catch(e=>{$('#clips').innerHTML=`<p class="empty error">${esc(e.message)}</p>`;});
 }
 // While a story renders, check quietly and only redraw the page once it has finished, so ticks
 // you are changing on another day are not reset every few seconds.
@@ -179,6 +180,7 @@ $('#research').onclick=()=>action(async()=>{const b=$('#research');b.disabled=tr
 $('#import').onclick=()=>action(()=>api('/api/editions',JSON.parse($('#json').value)));
 document.addEventListener('click',ev=>{
   const b=ev.target.closest('button');if(!b)return;
+  if(footageClick(b)) return;
   if(b.dataset.upload){
     const input=document.createElement('input');input.type='file';input.accept='image/jpeg,image/png,image/webp';
     input.onchange=()=>{const f=input.files[0];if(!f)return;action(async()=>{const r=await fetch(`/api/editions/${b.dataset.upload}/events/${b.dataset.index}/photo`,{method:'POST',headers:{'Content-Type':f.type||'application/octet-stream'},body:f});const d=await r.json();if(!r.ok)throw Error(d.error||'Upload failed');});};
@@ -245,4 +247,90 @@ document.addEventListener('change',ev=>{
   const dates=[...document.querySelectorAll(`input[data-also="${id}"][data-index="${index}"]:checked`)].map(x=>x.value);
   action(()=>api(`/api/editions/${id}/events/${index}/also-on`,{alsoOn:dates}));
 });
+// Your footage: clips ChatGPT animates through the app's MCP tools. The page shows each clip, the pictures an
+// edit can use, and what has been rendered, for you to watch and download.
+let footageRenderable=false, footageSig='', footageWatch=null;
+const clipBusy=c=>['uploading','processing'].includes(c.status), renderBusy=r=>['queued','rendering'].includes(r.status);
+const clipFile=(c,file)=>`/footage/${c.id}/${file}`;
+function renderRow(c,r){
+  const what=r.kind==='stills'?`Preview stills · edit v${r.version}`:`${r.requested?.quality==='final'?'Video':'Draft video, half size'} · edit v${r.version}`;
+  const state=r.status==='queued'?'Waiting for the renderer…':r.status==='rendering'?'Rendering…':r.status==='failed'?`<span class="error">Failed: ${esc(r.error||'')}</span>`:esc(riga(r.updated));
+  const file=r.status==='ready'&&r.file;
+  const media=!file?'':r.kind==='stills'
+    ?`<a href="${clipFile(c,`renders/${file}`)}" target="_blank" rel="noopener"><img loading="lazy" src="${clipFile(c,`renders/${file}`)}" alt="Preview stills"></a>`
+    :`<video controls playsinline preload="none" src="${clipFile(c,`renders/${file}`)}"></video><a class="button-link" href="${clipFile(c,`renders/${file}`)}" download="${esc(c.name.replace(/\.[^.]+$/,''))}-v${r.version}.mp4">Download MP4</a>`;
+  return `<li><strong>${what}</strong><span class="job-state ${r.status}">${state}</span>${media}</li>`;
+}
+function clipCard(c){
+  const busy=c.renders.some(renderBusy), last=c.edits[c.edits.length-1], ready=c.status==='ready';
+  const state=ready?'':c.status==='failed'?`<span class="tag missing">Failed</span> ${esc(c.error||'')}`:`<span class="tag ok">${c.status==='uploading'?'Uploading':'Processing'}${c.progress?` ${Math.round(c.progress*100)}%`:'…'}</span>`;
+  const meta=ready?`${c.seconds.toFixed(1)} s · ${c.width}×${c.height} · ${c.frames} frames at 30 fps${c.audio?' · with sound':''}${c.source?.hdr?' · HDR, converted':''}`:'';
+  const poster=ready?`<a href="${clipFile(c,'work.mp4')}" target="_blank" rel="noopener"><img src="${clipFile(c,'poster.jpg')}" alt="${esc(c.name)}"></a>`:'<div class="blank"></div>';
+  const edit=last?`Edit version ${last.version}${last.note?` · ${esc(last.note)}`:''} · saved ${esc(riga(last.created))}`:'No edit yet. In ChatGPT, ask it to animate this clip.';
+  const pictures=c.assets.map(a=>`<figure><a href="${clipFile(c,`assets/${a.name}.png`)}?v=${stamp}" target="_blank" rel="noopener"><img loading="lazy" src="${clipFile(c,`assets/${a.name}.png`)}?v=${stamp}" alt="${esc(a.name)}"></a><span>${esc(a.name)} · ${a.width}×${a.height}</span><button class="secondary small" data-unasset="${c.id}" data-name="${esc(a.name)}">Remove</button></figure>`).join('');
+  const off=!last||!footageRenderable||busy?' disabled':'';
+  return `<article class="clip">
+    <div class="clip-poster">${poster}</div>
+    <div>
+      <h3>${esc(c.name)}</h3>
+      <p class="meta">${meta} ${state}</p>
+      <div class="id">Clip id ${c.id}</div>
+      ${ready?`<h4>Edit</h4><p class="hint">${edit}</p>
+      <div class="toolbar"><button class="small" data-clip-render="${c.id}" data-quality="final"${off}>Render video</button><button class="secondary small" data-clip-render="${c.id}" data-quality="draft"${off}>Quick draft (half size)</button></div>
+      ${footageRenderable?'':'<p class="hint">The render service is not configured (RENDER_URL), so edits cannot be rendered here yet.</p>'}
+      <h4>Pictures</h4><p class="hint">Images an edit can use by name: an illustrated frame to line up over the footage, a logo, a drawing. PNG keeps transparency.</p>
+      <div class="pictures">${pictures}<button class="secondary small" data-asset="${c.id}">Add picture</button></div>`:''}
+      ${c.renders.length?`<h4>Renders</h4><ul class="renders">${c.renders.map(r=>renderRow(c,r)).join('')}</ul>`:''}
+      <div class="toolbar">${c.status==='failed'?`<button class="secondary small" data-clip-retry="${c.id}">Retry processing</button>`:''}<button class="secondary small" data-clip-delete="${c.id}"${busy||clipBusy(c)?' disabled':''}>Delete clip</button></div>
+    </div>
+  </article>`;
+}
+// Redraw only when something changed, so a video you are watching is not reset by the refresh.
+function showFootage(d){
+  footageRenderable=d.renderConfigured;
+  const sig=JSON.stringify(d.footage.map(c=>[c.id,c.status,c.progress,c.name,c.edits.length,c.assets,c.renders.map(r=>[r.render,r.status])]));
+  if(sig===footageSig) return;
+  footageSig=sig;
+  $('#clips').innerHTML=d.footage.length?d.footage.map(clipCard).join(''):`<p class="empty">No footage yet. Upload a clip (up to ${d.limits.mb} MB and ${Math.round(d.limits.seconds/60)} minutes) to start.</p>`;
+}
+async function loadFootage(){
+  footageSig='';
+  const d=await api('/api/footage'); showFootage(d);
+  if(d.footage.some(c=>clipBusy(c)||c.renders.some(renderBusy))) watchFootage();
+}
+function watchFootage(){
+  if(footageWatch) return;
+  footageWatch=setInterval(async()=>{
+    try{const d=await api('/api/footage');showFootage(d);if(!d.footage.some(c=>clipBusy(c)||c.renders.some(renderBusy))){clearInterval(footageWatch);footageWatch=null;}}catch{}
+  },4000);
+}
+const pickFile=accept=>new Promise(ok=>{const input=document.createElement('input');input.type='file';input.accept=accept;input.onchange=()=>ok(input.files[0]||null);input.click();});
+// Uploads stream to the server, so a large clip shows its progress instead of a frozen page.
+function sendFile(url,file){
+  return new Promise((ok,fail)=>{
+    const x=new XMLHttpRequest();x.open('POST',url);x.setRequestHeader('Content-Type',file.type||'application/octet-stream');
+    x.upload.onprogress=e=>{if(e.lengthComputable)$('#status').textContent=`Uploading ${file.name}… ${Math.round((e.loaded/e.total)*100)}%`;};
+    x.onload=()=>{let d={};try{d=JSON.parse(x.responseText);}catch{}if(x.status<300)ok(d);else fail(Error(d.error||`Upload failed (HTTP ${x.status})`));};
+    x.onerror=()=>fail(Error('Upload failed: the connection dropped'));
+    x.send(file);
+  });
+}
+const removeAt=async url=>{const r=await fetch(url,{method:'DELETE'});const d=await r.json();if(!r.ok)throw Error(d.error||'Could not remove it');};
+function footageClick(b){
+  if(b.id==='upload-footage'){pickFile('video/*').then(f=>{if(f)action(()=>sendFile(`/api/footage?name=${encodeURIComponent(f.name)}`,f));});return true;}
+  if(b.dataset.asset){
+    pickFile('image/png,image/jpeg,image/webp').then(f=>{
+      if(!f)return;
+      const suggested=f.name.replace(/\.[^.]+$/,'').toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,32)||'picture';
+      const name=prompt('Name for this picture (lowercase letters, digits and dashes). ChatGPT refers to it by this name.',suggested);
+      if(name) action(()=>sendFile(`/api/footage/${b.dataset.asset}/assets/${encodeURIComponent(name.trim())}`,f));
+    });
+    return true;
+  }
+  if(b.dataset.unasset){if(confirm(`Remove the picture "${b.dataset.name}"? Edits that use it will not render until it is back.`))action(()=>removeAt(`/api/footage/${b.dataset.unasset}/assets/${b.dataset.name}`));return true;}
+  if(b.dataset.clipRender){action(()=>api(`/api/footage/${b.dataset.clipRender}/renders`,{quality:b.dataset.quality}));return true;}
+  if(b.dataset.clipRetry){action(()=>api(`/api/footage/${b.dataset.clipRetry}/retry`,{}));return true;}
+  if(b.dataset.clipDelete){if(confirm('Delete this clip with its edits, pictures and renders? Download anything you want to keep first.'))action(()=>removeAt(`/api/footage/${b.dataset.clipDelete}`));return true;}
+  return false;
+}
 load().catch(e=>{$('#status').textContent=e.message;});

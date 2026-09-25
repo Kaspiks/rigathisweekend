@@ -30,6 +30,11 @@ a separate button sends a WhatsApp digest through WAHA.
 - `src/providers.js` — Postiz: carousels `schedule`, stories `draft`; 429 → requeue in 10 min. WhatsApp: upcoming events only.
 - `src/app.js`, `src/oauth.js`, `src/cli.js`, `public/app.js`, `public/style.css`, `test/system.test.js` (42 tests pass).
 - Docs: `docs/chatgpt-task.md` (ChatGPT prompt), `docs/go-live.md`, `README.md`.
+- Animated edits over your own footage (docs/chatgpt-video.md): `src/footage.js` (upload streaming, ffprobe, 30 fps
+  working copy, contact sheets, gridded frames), `src/edits.js` (edit JSON schema, output↔source timeline, the guide
+  ChatGPT reads), `src/animate.js` (dashboard routes, serial processing and render queues, the footage MCP tools),
+  `remotion/src/FootageEdit.tsx` + `remotion/src/edit/` (composition, SVG drawing filters, stickers, text),
+  `remotion/server.mjs` POST /clip, `test/footage.test.js`.
 
 ## Current live state
 - Edition `a2db1e9d4f2c9b50e2d45b65` (weekend of 2026-09-18) approved.
@@ -47,6 +52,8 @@ a separate button sends a WhatsApp digest through WAHA.
 - Confirm before publishing/editing anything public. Never type passwords or secrets into forms.
 
 ## Open items
+- Animated edits: check in ChatGPT Work that the footage tools appear after refreshing the plugin and that Astra can
+  see the contact sheets they return (docs/chatgpt-video.md, "Check these first").
 - Rotate secrets that were pasted in chat (Instagram app secret, Postiz API key, ej.uz key).
 - Commit the uncommitted work.
 - Send WhatsApp digest for the 18–20 Sep edition when ready.

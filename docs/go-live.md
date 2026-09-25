@@ -34,14 +34,18 @@ Everything below the "You" marker needs your accounts, phone or browser session 
 - [ ] **You:** create the scheduled task with the prompt in [chatgpt-task.md](chatgpt-task.md) and the connector enabled. Check the next Thursday run actually reached the server (dashboard or `scripts/remote.sh logs`). Scheduled tasks calling custom connectors is the least certain part of this design; verify it once before relying on it.
 - [ ] Fallback: `scripts/remote.sh env` with `OPENAI_API_KEY`, a Responses-API model that supports `web_search`, and `RESEARCH_SCHEDULE_ENABLED=true`. Never enable both.
 
-## 5. Staged go-live
+## 5. Animated edits (optional)
+
+- [ ] **You:** refresh the plugin in ChatGPT so the footage tools appear, then run the five-minute checks in [chatgpt-video.md](chatgpt-video.md#check-these-first-five-minutes). The one that matters most is whether Work mode can see the contact sheets the tools return.
+
+## 6. Staged go-live
 
 - [ ] `scripts/remote.sh check` reports `Configuration complete`.
 - [ ] Preview cycle with `LIVE_PUBLISH=false`: submit a real edition for the coming weekend, review every event and image, approve. The Instagram items should appear as "Handing over to Postiz" and stay there while delivery is off. Once live, each carousel shows "Scheduled in Postiz" with its time and each ticked story shows "Draft in Postiz"; WhatsApp only moves when you press its button.
 - [ ] `scripts/remote.sh env`: `LIVE_PUBLISH=true`. Watch the first Friday: `scripts/remote.sh logs`, the Postiz calendar, Instagram, and the WhatsApp group. Resolve any `uncertain` jobs in the dashboard after checking the provider.
 - [ ] Only after a clean manual weekend, and only for the VPS scheduler path: `AUTO_APPROVE=true`. For the ChatGPT path, add the `approve_weekend_edition` call to the task prompt instead.
 
-## 6. Keep it running
+## 7. Keep it running
 
 - [ ] Weekly `scripts/remote.sh backup`; keep an encrypted copy of the server `.env` off the VPS.
 - [ ] Update: `scripts/remote.sh deploy` rebuilds the app; bump `POSTIZ_IMAGE`/`WAHA_IMAGE` deliberately, one at a time.

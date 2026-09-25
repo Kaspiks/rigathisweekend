@@ -27,6 +27,8 @@ services:
       WAHA_SESSION: ${WAHA_SESSION:-default}
       WAHA_CHAT_ID: ${WAHA_CHAT_ID:-}
       RENDER_URL: ${RENDER_URL:-http://render:3200}
+      FOOTAGE_MAX_MB: ${FOOTAGE_MAX_MB:-1024}
+      FOOTAGE_MAX_SECONDS: ${FOOTAGE_MAX_SECONDS:-600}
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
     cap_drop: [ALL]
@@ -194,9 +196,10 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     network_mode: none
-  # Story video renderer (Remotion: Node + headless Chrome), kept out of the app image. The app calls
-  # POST http://render:3200/render when you press "Render story video"; it writes grid-<date>.mp4 next
-  # to the grid in the shared data volume. Its network is internal: it reaches the app, not the internet.
+  # Video renderer (Remotion: Node + headless Chrome), kept out of the app image. The app calls
+  # POST http://render:3200/render when you press "Render story video", writing grid-<date>.mp4 next to
+  # the grid, and POST /clip for animated edits over uploaded footage, writing into footage/<id>/renders.
+  # Both are on the shared data volume. Its network is internal: it reaches the app, not the internet.
   render:
     build: ./remotion
     restart: unless-stopped

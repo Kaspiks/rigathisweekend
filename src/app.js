@@ -15,9 +15,10 @@ import { researchInto } from './research.js';
 import { prepareLinks, captionLinker, linkSummary } from './shortlinks.js';
 import { request, gridVideo } from './providers.js';
 import { createOAuthProvider } from './oauth.js';
+import { createAnimator } from './animate.js';
 
 function equal(a,b) {const aa=Buffer.from(a||''),bb=Buffer.from(b||'');return aa.length===bb.length&&timingSafeEqual(aa,bb);}
-export function createApp(store,env=process.env,{fetcher=fetch}={}) {
+export function createApp(store,env=process.env,{fetcher=fetch,animator:animatorOptions={}}={}) {
   if(!env.ADMIN_TOKEN||env.ADMIN_TOKEN.length<24) throw new Error('ADMIN_TOKEN must be at least 24 characters');
   const app=express(); app.disable('x-powered-by'); app.set('trust proxy',1);
   store.recoverGrids();
@@ -59,7 +60,7 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
     }
     if(req.headers.origin && req.headers.origin!==(env.APP_ORIGIN||'http://localhost:3100')) return res.status(403).send('Origin not allowed');
     // Rendered media never changes under the same name within a visit; the dashboard adds ?v= when it does.
-    res.set('Cache-Control',/^\/(media|thumb)\//.test(req.path)?'private, max-age=86400':'no-store');
+    res.set('Cache-Control',/^\/(media|thumb|footage)\//.test(req.path)?'private, max-age=86400':'no-store');
     res.set('X-Content-Type-Options','nosniff');
     res.set('Content-Security-Policy',"default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'");
     next();
@@ -67,12 +68,15 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
   // A full 60-event submission runs to ~92KB at maximum field lengths, and Latvian diacritics
   // are multibyte, so the limit sits well clear of the largest submission the schema allows.
   app.use(express.json({limit:'512kb'}));
+  // Animated edits over your own footage: uploads, renders and the MCP tools that drive them.
+  const animator=createAnimator(app,store,env,{fetcher,...animatorOptions});
   const submit=async input=>{const e=store.submit(input);await renderEdition(e,store.dir,fetch,{link});return e;};
   app.post('/mcp',async(req,res)=>{
     const server=new McpServer({name:'riga-weekend',version:'0.1.0'});
     const result=data=>({content:[{type:'text',text:JSON.stringify(data)}]});
     server.registerTool('submit_weekend_events',{description:'Submit source-verified Riga events for a Friday–Sunday weekend. Generates Instagram images and a WhatsApp digest. Saves for review; does not publish.',inputSchema:Submission.shape},async input=>result(await submit(input)));
     server.registerTool('list_weekend_editions',{description:'List prepared editions and delivery status.',inputSchema:{}},async()=>result(store.list().map(e=>({...e,jobs:store.jobs(e.id)}))));
+    animator.register(server);
     server.registerTool('approve_weekend_edition',{description:'Approve a reviewed edition and queue Instagram and WhatsApp publication. Requires explicit user authorization to publish. Live dispatch also requires server LIVE_PUBLISH=true.',inputSchema:{id:z.string().regex(/^[a-f0-9]{24}$/)},annotations:{readOnlyHint:false,destructiveHint:true}},async({id})=>result(store.approve(id)));
     const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
     res.on('close',()=>{void transport.close();void server.close();});
@@ -195,6 +199,6 @@ export function createApp(store,env=process.env,{fetcher=fetch}={}) {
   });
   app.use('/media',express.static(resolve(store.dir,'media'),{dotfiles:'deny'}));
   app.use(express.static(resolve('public')));
-  app.use((err,_req,res,_next)=>{console.error(err.message);if(err.type==='entity.too.large') return res.status(413).json({error:'That file is too large; keep uploads under 15 MB'});res.status(400).json({error:err instanceof z.ZodError?err.issues.map(x=>`${x.path.join('.')}: ${x.message}`).join('; '):err.message});});
+  app.use((err,_req,res,_next)=>{console.error(err.message);if(err.type==='entity.too.large') return res.status(413).json({error:'That file is too large; keep uploads under 15 MB'});res.status(err.httpStatus||400).json({error:err instanceof z.ZodError?err.issues.map(x=>`${x.path.join('.')}: ${x.message}`).join('; '):err.message});});
   return app;
 }

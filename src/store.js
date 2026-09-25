@@ -17,7 +17,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS short_links(code TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, created TEXT NOT NULL, clicks INTEGER NOT NULL DEFAULT 0, last_click TEXT);
       CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, edition TEXT NOT NULL, target TEXT NOT NULL, due TEXT NOT NULL, status TEXT DEFAULT 'queued', result TEXT, UNIQUE(edition,target));
       CREATE TABLE IF NOT EXISTS runs(weekend TEXT PRIMARY KEY, status TEXT NOT NULL, detail TEXT);
-      CREATE TABLE IF NOT EXISTS grids(edition TEXT NOT NULL, date TEXT NOT NULL, picks TEXT NOT NULL, kicker TEXT NOT NULL, category TEXT NOT NULL, hold_seconds REAL NOT NULL DEFAULT 6, status TEXT NOT NULL DEFAULT 'built', error TEXT, updated TEXT NOT NULL, PRIMARY KEY(edition,date));`);
+      CREATE TABLE IF NOT EXISTS grids(edition TEXT NOT NULL, date TEXT NOT NULL, picks TEXT NOT NULL, kicker TEXT NOT NULL, category TEXT NOT NULL, hold_seconds REAL NOT NULL DEFAULT 6, status TEXT NOT NULL DEFAULT 'built', error TEXT, updated TEXT NOT NULL, PRIMARY KEY(edition,date));
+      CREATE TABLE IF NOT EXISTS footage(id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, error TEXT, progress REAL, info TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS footage_edits(footage TEXT NOT NULL, version INTEGER NOT NULL, spec TEXT NOT NULL, note TEXT, created TEXT NOT NULL, PRIMARY KEY(footage,version));
+      CREATE TABLE IF NOT EXISTS footage_renders(id INTEGER PRIMARY KEY, footage TEXT NOT NULL, version INTEGER NOT NULL, kind TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', error TEXT, result TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);`);
     // Instagram posts are per day, so the approval rule moved from one edition per weekend
     // to one per weekend day. Editions approved under the old rule keep their days.
     this.db.exec('DROP INDEX IF EXISTS one_approved_weekend');
@@ -189,6 +192,64 @@ export class Store {
   // The app runs renders, so only its start-up clears them: a render cut short by a restart never reports back.
   recoverGrids() {this.db.prepare("UPDATE grids SET status='failed', error='Rendering was interrupted; render again' WHERE status='rendering'").run();}
   finishGridRender(edition,date,error=null) {this.db.prepare('UPDATE grids SET status=?,error=?,updated=? WHERE edition=? AND date=?').run(error?'failed':'ready',error,new Date().toISOString(),edition,date);}
+  // Footage for animated edits. A clip goes uploading → processing (the 30 fps working copy) → ready, or failed.
+  addFootage(id,name) {const now=new Date().toISOString();this.db.prepare("INSERT INTO footage(id,name,status,created,updated) VALUES(?,?,'uploading',?,?)").run(id,name,now,now);return this.footage(id);}
+  footage(id) {
+    const row=this.db.prepare('SELECT * FROM footage WHERE id=?').get(id); if(!row) throw Object.assign(new Error('Footage not found'),{httpStatus:404});
+    return {...row,info:row.info?JSON.parse(row.info):null};
+  }
+  footageList() {return this.db.prepare('SELECT id FROM footage ORDER BY created DESC, rowid DESC').all().map(r=>this.footage(r.id));}
+  updateFootage(id,fields) {
+    const allowed=['name','status','error','progress','info'], keys=Object.keys(fields).filter(k=>allowed.includes(k));
+    const values=keys.map(k=>k==='info'&&fields[k]!=null?JSON.stringify(fields[k]):fields[k]);
+    this.db.prepare(`UPDATE footage SET ${keys.map(k=>`${k}=?`).join(',')}${keys.length?',':''}updated=? WHERE id=?`).run(...values,new Date().toISOString(),id);
+    return this.footage(id);
+  }
+  deleteFootage(id) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {for(const t of ['footage_renders','footage_edits']) this.db.prepare(`DELETE FROM ${t} WHERE footage=?`).run(id);this.db.prepare('DELETE FROM footage WHERE id=?').run(id);this.db.exec('COMMIT');}
+    catch(err) {this.db.exec('ROLLBACK');throw err;}
+  }
+  // Every save is a new version, so an edit can be compared with, or rolled back to, an earlier one.
+  saveEdit(footage,spec,note=null) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const version=(this.db.prepare('SELECT max(version) v FROM footage_edits WHERE footage=?').get(footage).v||0)+1;
+      this.db.prepare('INSERT INTO footage_edits(footage,version,spec,note,created) VALUES(?,?,?,?,?)').run(footage,version,JSON.stringify(spec),note,new Date().toISOString());
+      this.db.exec('COMMIT');
+      return this.edit(footage,version);
+    } catch(err) {this.db.exec('ROLLBACK');throw err;}
+  }
+  edit(footage,version=null) {
+    const row=version==null?this.db.prepare('SELECT * FROM footage_edits WHERE footage=? ORDER BY version DESC LIMIT 1').get(footage):this.db.prepare('SELECT * FROM footage_edits WHERE footage=? AND version=?').get(footage,version);
+    if(!row) throw Object.assign(new Error(version==null?'This footage has no edit yet; save one first':`Edit version ${version} does not exist`),{httpStatus:404});
+    return {version:row.version,spec:JSON.parse(row.spec),note:row.note,created:row.created};
+  }
+  edits(footage) {return this.db.prepare('SELECT version,note,created FROM footage_edits WHERE footage=? ORDER BY version').all(footage);}
+  // Renders of an edit, run one at a time by the app: stills for a quick look, or the video itself.
+  queueFootageRender(footage,version,kind,request) {
+    const now=new Date().toISOString();
+    const {lastInsertRowid}=this.db.prepare('INSERT INTO footage_renders(footage,version,kind,request,created,updated) VALUES(?,?,?,?,?,?)').run(footage,version,kind,JSON.stringify(request),now,now);
+    return this.footageRender(Number(lastInsertRowid));
+  }
+  footageRender(id) {
+    const row=this.db.prepare('SELECT * FROM footage_renders WHERE id=?').get(id); if(!row) throw Object.assign(new Error('Render not found'),{httpStatus:404});
+    return {...row,request:JSON.parse(row.request),result:row.result?JSON.parse(row.result):null};
+  }
+  footageRenders(footage) {return this.db.prepare('SELECT id FROM footage_renders WHERE footage=? ORDER BY id DESC').all(footage).map(r=>this.footageRender(r.id));}
+  claimFootageRender() {
+    const row=this.db.prepare("UPDATE footage_renders SET status='rendering',updated=? WHERE id=(SELECT id FROM footage_renders WHERE status='queued' ORDER BY id LIMIT 1) AND status='queued' RETURNING id").get(new Date().toISOString());
+    return row?this.footageRender(row.id):null;
+  }
+  // Back in the queue when the renderer is busy with a story video; nothing was made.
+  requeueFootageRender(id) {this.db.prepare("UPDATE footage_renders SET status='queued',updated=? WHERE id=?").run(new Date().toISOString(),id);}
+  finishFootageRender(id,error,result=null) {this.db.prepare('UPDATE footage_renders SET status=?,error=?,result=?,updated=? WHERE id=?').run(error?'failed':'ready',error,result?JSON.stringify(result):null,new Date().toISOString(),id);}
+  // Only the app processes clips and runs their renders, so only its start-up clears what a restart cut short.
+  recoverFootage() {
+    this.db.prepare("UPDATE footage SET status='failed', error='The upload was interrupted; delete this clip and upload it again', progress=NULL WHERE status='uploading'").run();
+    this.db.prepare("UPDATE footage SET status='failed', error='Processing was interrupted; press Retry', progress=NULL WHERE status='processing'").run();
+    this.db.prepare("UPDATE footage_renders SET status='failed', error='Rendering was interrupted; render again' WHERE status='rendering'").run();
+  }
   close(){this.db.close();}
 }
 
