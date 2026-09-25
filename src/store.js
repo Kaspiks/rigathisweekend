@@ -31,6 +31,7 @@ export class Store {
     try {this.db.exec('ALTER TABLE jobs ADD COLUMN publish_at TEXT');} catch {} // when Postiz should publish it
     try {this.db.exec('ALTER TABLE jobs ADD COLUMN finished_at TEXT');} catch {}
     try {this.db.exec("ALTER TABLE grids ADD COLUMN style TEXT NOT NULL DEFAULT 'ticket'");} catch {} // added with the ticket opener
+    try {this.db.exec("ALTER TABLE upload_links ADD COLUMN kind TEXT NOT NULL DEFAULT 'picture'");} catch {} // picture, depth or download
     for(const column of ['ejuz TEXT','ejuz_error TEXT','ejuz_tried TEXT','ejuz_clicks INTEGER NOT NULL DEFAULT 0','ejuz_display TEXT'])
       try {this.db.exec(`ALTER TABLE short_links ADD COLUMN ${column}`);} catch {} // ej.uz links alongside the app's own
     if(!this.db.prepare('SELECT count(*) n FROM day_locks').get().n)
@@ -254,12 +255,14 @@ export class Store {
   deleteGraphic(name) {return this.db.prepare('DELETE FROM graphics WHERE name=?').run(name).changes>0;}
   // One-time upload links, so ChatGPT can send a file it made straight from its sandbox. Only a hash of
   // the token is kept; a link works once, for one named picture of one clip, until it expires.
-  addUploadLink(hash,footage,name,expires) {
+  addUploadLink(hash,footage,name,expires,kind='picture') {
     this.db.prepare("DELETE FROM upload_links WHERE expires<?").run(new Date().toISOString());
-    this.db.prepare('INSERT INTO upload_links(token,footage,name,expires) VALUES(?,?,?,?)').run(hash,footage,name,expires.toISOString());
+    this.db.prepare('INSERT INTO upload_links(token,footage,name,expires,kind) VALUES(?,?,?,?,?)').run(hash,footage,name,expires.toISOString(),kind);
   }
+  // A download link can be used repeatedly until it expires, so an interrupted download can be retried.
+  downloadLink(hash,now=new Date()) {return this.db.prepare("SELECT * FROM upload_links WHERE token=? AND kind='download' AND expires>?").get(hash,now.toISOString())||null;}
   // Claimed before the upload is read, so two uploads to one link cannot both land.
-  claimUploadLink(hash,now=new Date()) {return this.db.prepare("UPDATE upload_links SET state='receiving' WHERE token=? AND state='open' AND expires>? RETURNING *").get(hash,now.toISOString())||null;}
+  claimUploadLink(hash,now=new Date()) {return this.db.prepare("UPDATE upload_links SET state='receiving' WHERE token=? AND state='open' AND kind!='download' AND expires>? RETURNING *").get(hash,now.toISOString())||null;}
   releaseUploadLink(hash) {this.db.prepare("UPDATE upload_links SET state='open' WHERE token=? AND state='receiving'").run(hash);}
   finishUploadLink(hash) {this.db.prepare("UPDATE upload_links SET state='used' WHERE token=?").run(hash);}
   // Only the app processes clips and runs their renders, so only its start-up clears what a restart cut short.

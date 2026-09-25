@@ -51,6 +51,9 @@ What ChatGPT can do in an edit:
 | `image` | A picture you uploaded, either on screen or lined up exactly over the footage |
 | `sequence` | Frame-by-frame animation from an uploaded sprite sheet (all frames in one row): flapping wings, a turntable of a 3D object, a hand-drawn flicker |
 | `path` (on images, sequences and stickers) | Flies it through the frame along smoothed keyframes, even during a freeze; the last key can land exactly on an anchor, and `facing: "path"` turns it the way it flies |
+| `graphic` | Shapes ChatGPT draws and animates itself (keyframed position, rotation around a pivot, scale, opacity, draw-on, repeats for particles); `save_graphic` keeps one by name for reuse |
+| `depth` (on the edit and on moving layers) | With a depth source (per-frame depth for the clip, or a depth picture for a freeze), things pass behind nearer parts of the shot |
+| `blur`, `fog`, `parallax` | Depth effects: depth of field around a focus, haze that thickens with distance, and a 2.5D camera move |
 | `zoom` | Push in towards, or follow, an anchor |
 | `shake`, `flash` | Camera shake and a flash, for moments of impact |
 
@@ -88,7 +91,14 @@ The drawing styles are filters: they need no image generation and cost nothing e
 | `preview_edit` | renders stills | Real renders of chosen OUTPUT frames, as one sheet |
 | `render_edit` | renders a video | Draft (half size) or final MP4 in the background |
 | `get_render` | no | Progress, and frames from the result when ready |
-| `create_upload_link` | makes a link | One-time link for ChatGPT to upload a picture from its sandbox |
+| `save_graphic`, `list_graphics` | saves / no | A library of animated graphics reused by name |
+| `create_download_link` | makes a link | The clip's working copy for 30 minutes, e.g. to compute depth in ChatGPT's sandbox |
+| `get_depth` | no | Depth values (0 far – 1 near) at points, plus the depth picture |
+| `create_upload_link` | makes a link | One-time link for ChatGPT to upload a picture, or the clip's per-frame depth video, from its sandbox |
 | `add_picture` | stores a picture | A file from the conversation, or a public HTTPS link |
 
 Uploading footage, deleting and downloading stay on the dashboard, behind your login. The upload link is the only route without a login, and it accepts nothing but one picture.
+
+## Depth
+
+Depth is computed by ChatGPT, not on your server: it downloads the clip with `create_download_link`, runs a depth model (such as Depth Anything V2) in its sandbox, and uploads a greyscale depth video (near = white, one frame per clip frame, normalised across the whole clip so it does not flicker) with `create_upload_link` kind `depth`. The server checks the frame count and stores small depth frames the renderer reads. A depth picture for a single frozen frame works the same way, uploaded as a picture. Edits then say where depth comes from (`"depth": {"video": true}` or stills for a freeze), give moving layers a `depth`, and can add `blur`, `fog` and `parallax`.

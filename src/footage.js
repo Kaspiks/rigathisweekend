@@ -4,7 +4,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { rename, rm, stat } from 'node:fs/promises';
+import { mkdir, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setPriority } from 'node:os';
 import { Transform } from 'node:stream';
@@ -20,7 +20,7 @@ export const footageDir = (dir, id) => {
 };
 export const footageFiles = (dir, id) => {
   const base = footageDir(dir, id);
-  return { dir: base, source: join(base, 'source'), work: join(base, 'work.mp4'), poster: join(base, 'poster.jpg'), assets: join(base, 'assets'), renders: join(base, 'renders') };
+  return { dir: base, source: join(base, 'source'), work: join(base, 'work.mp4'), poster: join(base, 'poster.jpg'), assets: join(base, 'assets'), renders: join(base, 'renders'), depth: join(base, 'depth') };
 };
 // Limits can be raised in .env; the defaults suit phone clips on a 4 vCPU server without a GPU.
 export const limits = (env = process.env) => ({
@@ -246,4 +246,47 @@ export async function saveAsset(buffer, file) {
   const out = await sharp(buffer).rotate().resize(8192, 2160, { fit: 'inside', withoutEnlargement: true }).png().toFile(tmp);
   await rename(tmp, file);
   return { width: out.width, height: out.height };
+}
+
+// Per-frame depth for a clip: a greyscale video with one frame per frame of the working copy (near is
+// white). It is checked against the clip and split into small JPEG frames the renderer reads by number,
+// so the depth always matches the footage frame on screen, through cuts, freezes and speed changes.
+export const DEPTH_WIDTH = 360;
+export const depthFrameName = n => `${String(n).padStart(5, '0')}.jpg`;
+export async function importDepth(video, folder, work) {
+  const probed = await probe(video).catch(() => { throw fail('That depth file is not a video this server can read; send an MP4'); });
+  const stream = probed.streams.find(s => s.codec_type === 'video');
+  if (!stream) throw fail('That depth file has no video track');
+  const frames = Number(stream.nb_frames) || Math.round(Number(probed.format.duration) * FPS);
+  if (Math.abs(frames - work.frames) > 1) throw fail(`The depth video has ${frames} frames but the clip has ${work.frames}; make one depth frame per frame of the clip (download it with create_download_link)`);
+  const ratio = (stream.width / stream.height) / (work.width / work.height);
+  if (Math.abs(ratio - 1) > 0.03) throw fail(`The depth video is ${stream.width}×${stream.height}, which is not the shape of the clip (${work.width}×${work.height})`);
+  const part = `${folder}.part`;
+  await rm(part, { recursive: true, force: true });
+  await mkdir(part, { recursive: true });
+  try {
+    // passthrough keeps every uploaded frame, so frame N stays frame N whatever frame rate the file claims.
+    await run('ffmpeg', ['-v', 'error', '-nostdin', '-i', video, '-vf', `scale=${DEPTH_WIDTH}:-2,format=gray`, '-fps_mode', 'passthrough', '-q:v', '3', '-start_number', '0', join(part, '%05d.jpg')], { nice: true, timeoutMs: 20 * 60000 });
+  } catch (err) { await rm(part, { recursive: true, force: true }); throw err; }
+  await rm(folder, { recursive: true, force: true });
+  await rename(part, folder);
+  const count = Math.min(frames, work.frames);
+  const first = await sharp(join(folder, depthFrameName(0))).metadata();
+  return { frames: count, width: first.width, height: first.height, updated: new Date().toISOString() };
+}
+
+// Depth (0 far – 1 near) at points given in 0–1 of the footage, from a depth frame or picture.
+export async function depthAt(file, points) {
+  const { data, info } = await sharp(file).greyscale().raw().toBuffer({ resolveWithObject: true });
+  return points.map(p => {
+    const x = Math.min(info.width - 1, Math.max(0, Math.round(p.x * (info.width - 1)))), y = Math.min(info.height - 1, Math.max(0, Math.round(p.y * (info.height - 1))));
+    // A 5×5 average, so a single noisy pixel does not decide it.
+    let sum = 0, n = 0;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const xx = x + dx, yy = y + dy;
+      if (xx < 0 || yy < 0 || xx >= info.width || yy >= info.height) continue;
+      sum += data[(yy * info.width + xx) * info.channels]; n++;
+    }
+    return Math.round((sum / n / 255) * 1000) / 1000;
+  });
 }

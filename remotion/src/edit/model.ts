@@ -7,7 +7,7 @@ export type Point = { x: number; y: number };
 export type Place = string | Point;
 type Span = { from: number; to: number; in: number; out: number };
 export type TextLayer = Span & { type: 'text'; text: string; style: 'title' | 'callout' | 'caption' | 'label' | 'script' | 'band'; at?: Place; offset?: Point; pointer: boolean; size?: number; color?: string; background?: string; align: 'left' | 'center' | 'right'; enter: 'pop' | 'fade' | 'rise' | 'type' | 'slide' | 'none'; exit: 'fade' | 'pop' | 'sink' | 'none' };
-export type PathKey = { frame: number; x?: number; y?: number; at?: string };
+export type PathKey = { frame: number; x?: number; y?: number; at?: string; depth?: number };
 export type Facing = 'as-drawn' | 'flip' | 'path';
 export type StickerLayer = Span & { type: 'sticker'; shape: 'sparkles' | 'steam' | 'hearts' | 'stars' | 'circle' | 'arrow' | 'burst' | 'pulse' | 'underline' | 'squiggle'; at?: Place; offset?: Point; path?: PathKey[]; size: number; color: string; rotate: number; enter: 'draw' | 'pop' | 'fade' | 'none'; exit: 'fade' | 'pop' | 'none' };
 export type IllustrateLayer = Span & { type: 'illustrate'; style: 'cel' | 'ink' | 'sketch' | 'watercolor' | 'duotone' | 'posterize'; transition: 'fade' | 'wipe' | 'iris'; at?: Place; boil: boolean; colors?: [string, string] };
@@ -27,13 +27,18 @@ export type GraphicElement = {
 };
 export type GraphicLayer = Span & { type: 'graphic'; use?: string; viewBox?: { width: number; height: number }; loop?: number; elements?: GraphicElement[];
   at?: Place; offset?: Point; path?: PathKey[]; facing: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none' };
-export type Layer = TextLayer | StickerLayer | IllustrateLayer | ImageLayer | SequenceLayer | GraphicLayer | ZoomLayer | ShakeLayer | FlashLayer;
+export type BlurLayer = Span & { type: 'blur'; focus: number; range: number; amount: number; near: boolean };
+export type FogLayer = Span & { type: 'fog'; color: string; strength: number; start: number };
+export type ParallaxLayer = Span & { type: 'parallax'; move: 'pan' | 'tilt' | 'orbit'; amount: number };
+export type Layer = TextLayer | StickerLayer | IllustrateLayer | ImageLayer | SequenceLayer | GraphicLayer | BlurLayer | FogLayer | ParallaxLayer | ZoomLayer | ShakeLayer | FlashLayer;
 export type Keyframe = { frame: number; x: number; y: number };
-export type Spec = { format: string; fit: 'cover' | 'contain'; background: string; audio: 'source' | 'mute'; anchors: Record<string, Keyframe[]>; layers: Layer[] };
+export type DepthSpec = { video: boolean; stills?: { from: number; to: number; asset: string }[]; near: 'white' | 'black' };
+export type Spec = { format: string; fit: 'cover' | 'contain'; background: string; audio: 'source' | 'mute'; anchors: Record<string, Keyframe[]>; layers: Layer[]; depth?: DepthSpec };
 export type Segment = { from: number; to: number; source: number; hold?: boolean; sourceTo?: number; speed?: number };
 export type Plan = { width: number; height: number; fps: number; durationInFrames: number; segments: Segment[] };
 export type Asset = { src: string; width: number; height: number };
-export type FootageEditProps = { spec: Spec; plan: Plan; video: string; assets: Record<string, Asset>; source: { width: number; height: number; frames: number } };
+export type DepthFrames = { base: string; frames: number };
+export type FootageEditProps = { spec: Spec; plan: Plan; video: string; assets: Record<string, Asset>; source: { width: number; height: number; frames: number }; depth?: DepthFrames | null };
 
 export const PALETTE: Record<string, string> = { ink: '#17352d', lime: '#d4ed86', paper: '#f4f0e6', white: '#ffffff', black: '#111111', coral: '#ff6b5b', gold: '#f5c542', sky: '#7cc6fe' };
 export const colour = (c: string | undefined, fallback: string) => (c ? PALETTE[c] ?? c : fallback);
@@ -187,4 +192,31 @@ export function motionStyle(enterKind: string, exitKind: string, enter: number, 
     default: break;
   }
   return { opacity, scale, dx, dy };
+}
+
+// The depth picture for an output frame: a still where one covers the frame, otherwise the clip's
+// per-frame depth at the source frame on screen, so it follows cuts and freezes like the footage.
+export function depthSource(props: FootageEditProps, frame: number): string | null {
+  const d = props.spec.depth;
+  if (!d) return null;
+  const still = d.stills?.find((st) => frame >= st.from && frame < st.to);
+  if (still) return props.assets[still.asset]?.src ?? null;
+  if (!d.video || !props.depth) return null;
+  const n = Math.min(props.depth.frames - 1, Math.max(0, Math.floor(sourceAt(props.plan.segments, frame))));
+  return `${props.depth.base}/${String(n).padStart(5, '0')}.jpg`;
+}
+// How near a layer is at a frame: eased between path keys that carry a depth, else its own depth.
+export function layerDepth(layer: { depth?: number; path?: PathKey[] }, frame: number): number | undefined {
+  const keys = layer.path?.filter((k) => k.depth != null) ?? [];
+  if (!keys.length) return layer.depth;
+  if (frame <= keys[0].frame) return keys[0].depth;
+  const last = keys[keys.length - 1];
+  if (frame >= last.frame) return last.depth;
+  const i = keys.findIndex((k, n) => frame >= k.frame && frame < keys[n + 1].frame);
+  const a = keys[i], b = keys[i + 1];
+  return lerp(a.depth!, b.depth!, smooth((frame - a.frame) / (b.frame - a.frame)));
+}
+// A colour-matrix row turning the depth picture's grey into a*nearness + b, whichever end is near.
+export function nearRow(near: 'white' | 'black' | undefined, a: number, b: number) {
+  return near === 'black' ? `${-a} 0 0 0 ${a + b}` : `${a} 0 0 0 ${b}`;
 }

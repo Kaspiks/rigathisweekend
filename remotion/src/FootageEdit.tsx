@@ -9,8 +9,9 @@ import '@fontsource/great-vibes/400.css';
 import type { CSSProperties } from 'react';
 import { AbsoluteFill, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
 import { BoilFilter, IllustrationFilter } from './edit/filters';
-import type { FootageEditProps, IllustrateLayer, ImageLayer, Layer, SequenceLayer } from './edit/model';
-import { PALETTE, baseScale, cameraAt, colour, footageRect, heading, layerPoint, motionStyle, phase, screenPlace } from './edit/model';
+import type { BlurLayer, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
+import { PALETTE, baseScale, cameraAt, colour, depthSource, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace } from './edit/model';
+import { useLocalImage } from './edit/depth';
 import { GraphicView } from './edit/Graphics';
 import { Sticker } from './edit/Stickers';
 import { DEFAULT_AT, TextBox } from './edit/Texts';
@@ -104,22 +105,95 @@ export const FootageEdit = (props: FootageEditProps) => {
   const drawings = spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'illustrate' && active(l));
   const boils = spec.layers.some((l) => l.type === 'image' && l.motion === 'boil' && active(l));
 
+  // Depth: one greyscale picture for this frame, laid exactly over the footage (so it follows zooms), turned
+  // by colour matrices into masks and maps. A soft edge K wide keeps the cut-outs from looking jagged.
+  const depthSrc = useLocalImage(depthSource(props, frame)), near = spec.depth?.near, K = 25;
+  const hex = (c: string) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255);
+  const grey = (row: string) => `${row}  ${row}  ${row}  0 0 0 0 1`;
+  const depthImage = (filter: string) => depthSrc ? <image href={depthSrc} x={rect.left} y={rect.top} width={rect.width} height={rect.height} preserveAspectRatio="none" filter={`url(#${filter})`} /> : null;
+  const flat = (id: string, values: string) => (
+    <filter id={id} x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB"><feColorMatrix type="matrix" values={values} /></filter>
+  );
+  const nearness = spec.layers.map((l, i) => (depthSrc && active(l) ? layerDepth(l as never, frame) : undefined));
+  const blurs = depthSrc ? spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'blur' && active(l)) as (readonly [BlurLayer, number])[] : [];
+  const fogs = depthSrc ? spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'fog' && active(l)) as (readonly [FogLayer, number])[] : [];
+  const parallax = depthSrc ? spec.layers.find((l): l is ParallaxLayer => l.type === 'parallax' && active(l)) : undefined;
+  let shift: { ux: number; uy: number; scale: number } | null = null;
+  if (parallax) {
+    const e = envelope(parallax, frame), t = (frame - parallax.from) / Math.max(1, parallax.to - parallax.from - 1);
+    const u = parallax.move === 'orbit' ? { ux: Math.cos(2 * Math.PI * t), uy: 0.6 * Math.sin(2 * Math.PI * t) }
+      : parallax.move === 'tilt' ? { ux: 0, uy: 2 * t - 1 } : { ux: 2 * t - 1, uy: 0 };
+    shift = { ux: u.ux * e, uy: u.uy * e, scale: 2 * parallax.amount * plan.width };
+  }
+
   return (
     <AbsoluteFill style={{ background: colour(spec.background, PALETTE.ink), overflow: 'hidden' }}>
       <svg width={0} height={0} style={{ position: 'absolute' }} aria-hidden>
         <defs>
           {drawings.map(([l, i]) => <IllustrationFilter key={i} id={`drawn-${i}`} layer={l as IllustrateLayer} frame={frame} />)}
           {boils ? <BoilFilter id="boil-img" frame={frame} /> : null}
+          {/* Hidden where the scene is nearer than the layer: white (shown) where layer depth > scene nearness. */}
+          {nearness.map((d, i) => d == null ? null : (
+            <g key={`occ-${i}`}>
+              {flat(`occf-${i}`, grey(nearRow(near, -K, K * d + 0.5)))}
+              <mask id={`occ-${i}`} maskUnits="userSpaceOnUse" x={0} y={0} width={plan.width} height={plan.height}>
+                <rect width={plan.width} height={plan.height} fill="#fff" />{depthImage(`occf-${i}`)}
+              </mask>
+            </g>
+          ))}
+          {blurs.map(([l, i]) => (
+            <g key={`blur-${i}`}>
+              {flat(`blurf-${i}`, grey(nearRow(near, -K, K * (l.focus - l.range) + 0.5)))}
+              <mask id={`blur-${i}`} maskUnits="userSpaceOnUse" x={0} y={0} width={plan.width} height={plan.height}>{depthImage(`blurf-${i}`)}</mask>
+              {flat(`blurn-f-${i}`, grey(nearRow(near, K, -K * (l.focus + l.range) + 0.5)))}
+              <mask id={`blurn-${i}`} maskUnits="userSpaceOnUse" x={0} y={0} width={plan.width} height={plan.height}>{depthImage(`blurn-f-${i}`)}</mask>
+            </g>
+          ))}
+          {fogs.map(([l, i]) => {
+            const [r, g, b] = hex(colour(l.color, PALETTE.paper)), s = l.strength * envelope(l, frame), st = Math.max(0.01, l.start);
+            return <g key={`fog-${i}`}>{flat(`fogf-${i}`, `0 0 0 0 ${r}  0 0 0 0 ${g}  0 0 0 0 ${b}  ${nearRow(near, -s / st, s)}`)}</g>;
+          })}
+          {shift ? (
+            <filter id="parallax" x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
+              <feImage href={depthSrc!} x={rect.left} y={rect.top} width={rect.width} height={rect.height} preserveAspectRatio="none" result="depth" />
+              <feColorMatrix in="depth" type="matrix" result="map"
+                values={`${nearRow(near, shift.ux, 0.5 - 0.5 * shift.ux)}  ${nearRow(near, shift.uy, 0.5 - 0.5 * shift.uy)}  0 0 0 0 0  0 0 0 0 1`} />
+              <feDisplacementMap in="SourceGraphic" in2="map" scale={shift.scale} xChannelSelector="R" yChannelSelector="G" />
+            </filter>
+          ) : null}
         </defs>
       </svg>
-      <Footage props={props} rect={rect} muted={spec.audio === 'mute'} />
-      {/* Drawings replace the footage, so they sit right over it and under everything else, whatever their
-          place in the list. The filter works on a screen-sized layer: a zoomed-in picture costs no more. */}
-      {drawings.map(([l, i]) => (
-        <Footage key={`drawn-${i}`} props={props} rect={rect} muted style={{ filter: `url(#drawn-${i})`, ...reveal(l as IllustrateLayer, frame, at(l, { x: 0.5, y: 0.5 }), plan.width, plan.height) }} />
-      ))}
+      <AbsoluteFill style={shift ? { filter: 'url(#parallax)', transform: `scale(${1 + shift.scale / plan.width})` } : undefined}>
+        <Footage props={props} rect={rect} muted={spec.audio === 'mute'} />
+        {/* Drawings replace the footage, so they sit right over it and under everything else, whatever their
+            place in the list. The filter works on a screen-sized layer: a zoomed-in picture costs no more. */}
+        {drawings.map(([l, i]) => (
+          <Footage key={`drawn-${i}`} props={props} rect={rect} muted style={{ filter: `url(#drawn-${i})`, ...reveal(l as IllustrateLayer, frame, at(l, { x: 0.5, y: 0.5 }), plan.width, plan.height) }} />
+        ))}
+        {/* Depth of field: blurred copies of the footage, shown only where it is out of focus. */}
+        {blurs.map(([l, i]) => {
+          const px = l.amount * envelope(l, frame);
+          return (
+            <AbsoluteFill key={`blur-${i}`}>
+              <Footage props={props} rect={rect} muted style={{ filter: `blur(${px.toFixed(2)}px)`, mask: `url(#blur-${i})` }} />
+              {l.near ? <Footage props={props} rect={rect} muted style={{ filter: `blur(${(px * 0.7).toFixed(2)}px)`, mask: `url(#blurn-${i})` }} /> : null}
+            </AbsoluteFill>
+          );
+        })}
+        {fogs.map(([, i]) => (
+          <svg key={`fog-${i}`} width={plan.width} height={plan.height} style={{ position: 'absolute', left: 0, top: 0 }}>{depthImage(`fogf-${i}`)}</svg>
+        ))}
+      </AbsoluteFill>
       {spec.layers.map((l, i) => {
         if (!active(l)) return null;
+        const node = drawLayer(l, i);
+        // A layer with a depth is cut away wherever the scene is nearer.
+        return node && nearness[i] != null ? <AbsoluteFill key={i} style={{ mask: `url(#occ-${i})` }}>{node}</AbsoluteFill> : node;
+      })}
+    </AbsoluteFill>
+  );
+
+  function drawLayer(l: Layer, i: number) {
         switch (l.type) {
           case 'text': {
             const p = at(l, DEFAULT_AT[l.style]);
@@ -149,11 +223,9 @@ export const FootageEdit = (props: FootageEditProps) => {
             return <AbsoluteFill key={i} style={{ background: colour(l.color, PALETTE.white), opacity: o }} />;
           }
           default:
-            return null; // drawings are above; zoom and shake move the camera and draw nothing themselves
+            return null; // drawings and depth effects are above; zoom and shake move the camera
         }
-      })}
-    </AbsoluteFill>
-  );
+  }
 };
 
 // Shown in the Studio, where there is no uploaded footage.

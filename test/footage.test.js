@@ -415,3 +415,39 @@ test('ChatGPT can define its own animated graphics and save them to reuse by nam
   const script = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers: [{ type: 'graphic', from: 0, to: 10, elements: [{ shape: 'path', d: 'M0,0 L1,1 <script>' }] }] } } });
   assert.ok(script.isError, 'path data can only be path data');
 });
+
+test('ChatGPT can download a clip, send back its per-frame depth and composite with it', needsFfmpeg, async t => {
+  const { dir, store, base, upload, settle, mcp, calls } = await setup(t);
+  const { id } = await upload(await readFile(await rampClip(dir))).then(json); await settle();
+  const client = await mcp();
+  const edit = { depth: { video: true }, layers: [{ type: 'blur', from: 0, to: 30, focus: 0.7 }, { type: 'text', from: 0, to: 30, text: 'Hi', depth: 0.5 }] };
+  const early = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit } });
+  assert.ok(early.isError); assert.match(early.content[0].text, /no per-frame depth yet/);
+  // The working copy goes out through a link that needs no login.
+  const down = dataOf(await client.callTool({ name: 'create_download_link', arguments: { footage: id } }));
+  assert.equal(down.frames, 60);
+  const got = await fetch(base + new URL(down.url).pathname);
+  assert.equal(got.status, 200);
+  assert.deepEqual(Buffer.from(await got.arrayBuffer()), await readFile(footageFiles(dir, id).work));
+  assert.equal((await fetch(base + new URL(down.url).pathname)).status, 200, 'a download can be retried');
+  // A depth video with the wrong number of frames is refused, and the link can be used again.
+  const depthVideo = async (frames, name) => { const f = join(dir, name); ffmpeg(['-f', 'lavfi', '-i', `color=black:s=64x96:r=30,geq=lum='X*255/64':cb=128:cr=128`, '-frames:v', String(frames), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', f]); return readFile(f); };
+  const link = dataOf(await client.callTool({ name: 'create_upload_link', arguments: { footage: id, kind: 'depth' } }));
+  const path = new URL(link.url).pathname;
+  const short = await fetch(base + path, { method: 'PUT', body: await depthVideo(30, 'short.mp4') });
+  assert.equal(short.status, 400); assert.match((await short.json()).error, /30 frames but the clip has 60/);
+  const ok = await fetch(base + path, { method: 'PUT', body: await depthVideo(60, 'depth.mp4') });
+  assert.equal(ok.status, 201);
+  assert.equal((await ok.json()).depth.frames, 60);
+  assert.ok(existsSync(join(footageFiles(dir, id).depth, '00059.jpg')));
+  // Depth reads back at points: this test depth grows from left (far) to right (near).
+  const read = dataOf(await client.callTool({ name: 'get_depth', arguments: { footage: id, frame: 10, points: [{ x: 0.05, y: 0.5 }, { x: 0.95, y: 0.5 }] } }));
+  assert.ok(read.points[0].depth < 0.2 && read.points[1].depth > 0.8, JSON.stringify(read.points));
+  assert.equal(dataOf(await client.callTool({ name: 'list_footage', arguments: {} }))[0].depth.frames, 60);
+  // Now the edit is accepted, and renders get the depth frames.
+  assert.ok(!(await client.callTool({ name: 'save_edit', arguments: { footage: id, edit } })).isError);
+  await client.callTool({ name: 'preview_edit', arguments: { footage: id, frames: [5] } });
+  assert.equal(calls.at(-1).body.props.depth.frames, 60);
+  assert.throws(() => planEdit({ layers: [{ type: 'fog', from: 0, to: 10 }] }, { frames: 60, width: 64, height: 96 }), /no depth source/);
+  assert.throws(() => planEdit({ depth: { stills: [{ from: 0, to: 10, asset: 'nope' }] } }, { frames: 60, width: 64, height: 96 }), /no picture called 'nope'/);
+});

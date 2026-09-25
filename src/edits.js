@@ -25,10 +25,12 @@ const Path = () => z.array(z.object({
   frame: Frame().describe('OUTPUT frame'),
   x: Unit().optional(), y: Unit().optional(),
   at: z.string().regex(ANCHOR).optional().describe('Instead of x/y: an anchor name, to arrive exactly on it'),
+  depth: Unit().optional().describe('Depth at this key (0 far – 1 near), eased between keys; overrides the layer depth'),
 }).strict()).min(2).max(600).optional()
   .describe('Moves the layer along keyframes {frame,x,y} in 0–1 of the finished frame (or {frame,at:"anchor"}), smoothed into curves; used instead of `at`');
 const Facing = () => z.enum(['as-drawn', 'flip', 'path']).default('as-drawn')
   .describe('path: turns to face the way it moves along `path` and leans into turns (draw it facing right); flip: mirrored');
+const Depth = () => Unit().optional().describe('How near it is, 0 far – 1 near (get_depth): it is hidden wherever the scene is nearer, so it can pass behind things. Needs depth on the edit');
 const Span = () => ({
   from: Frame().describe('First OUTPUT frame the layer is on'),
   to: Frame().describe('OUTPUT frame the layer is gone by (exclusive)'),
@@ -42,7 +44,7 @@ const Text = z.object({
   style: z.enum(['title', 'callout', 'caption', 'label', 'script', 'band']).default('caption')
     .describe('title: big serif headline; callout: paper card, pairs with pointer; caption: bold subtitle; label: small tag; script: handwritten accent; band: full-width bar'),
   at: Place().optional().describe('Where the text sits. Defaults: title near the top, caption and band near the bottom, others at the centre'),
-  offset: Offset().optional(),
+  offset: Offset().optional(), depth: Depth(),
   pointer: z.boolean().default(false).describe('Draw a line from the text back to `at`; use with an anchor and an offset for a callout'),
   size: z.number().int().min(20).max(220).optional().describe('Type size in pixels on a 1080-wide frame'),
   color: Color().optional(), background: z.union([Color(), z.literal('none')]).optional(),
@@ -55,7 +57,7 @@ const Sticker = z.object({
   type: z.literal('sticker'), ...Span(),
   shape: z.enum(['sparkles', 'steam', 'hearts', 'stars', 'circle', 'arrow', 'burst', 'pulse', 'underline', 'squiggle'])
     .describe('Animated drawing. steam rises and sparkles twinkle for as long as they are on; circle, arrow, underline and squiggle draw themselves on; burst and pulse radiate'),
-  at: Place().optional(), offset: Offset().optional(), path: Path(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), depth: Depth(),
   size: z.number().int().min(40).max(1200).default(240).describe('Width in pixels on a 1080-wide frame'),
   color: Color().default('lime'),
   rotate: z.number().min(-180).max(180).default(0).describe('Degrees; an arrow points right at 0'),
@@ -78,7 +80,7 @@ const Image = z.object({
   asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of an image uploaded for this footage (see list_footage)'),
   place: z.enum(['footage', 'screen']).default('screen')
     .describe('footage: cover the video exactly and move with it (an illustration drawn over a frame of this clip); screen: a picture placed at `at`'),
-  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(), depth: Depth(),
   size: z.number().min(0.05).max(2).default(0.4).describe('Width as a fraction of the finished frame (screen placement)'),
   opacity: Unit().default(1),
   enter: z.enum(['pop', 'fade', 'wipe', 'none']).default('fade'),
@@ -94,7 +96,7 @@ const Sequence = z.object({
   count: z.number().int().min(2).max(64).describe('How many frames the sheet holds'),
   fps: z.number().int().min(1).max(30).default(12).describe('How fast the frames play; 8–12 feels hand-drawn, 24–30 smooth'),
   loop: z.boolean().default(true).describe('Repeat the frames, or stop on the last one'),
-  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(), depth: Depth(),
   size: z.number().min(0.03).max(2).default(0.2).describe('Width of one frame as a fraction of the finished frame'),
   opacity: Unit().default(1),
   enter: z.enum(['pop', 'fade', 'none']).default('fade'),
@@ -142,7 +144,7 @@ const Graphic = z.object({
   type: z.literal('graphic'), ...Span(),
   use: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).optional().describe('Name of a saved graphic (list_graphics), instead of elements'),
   ...GraphicFields(),
-  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(), depth: Depth(),
   size: z.number().int().min(10).max(4000).default(300).describe('Width in pixels on a 1080-wide frame'),
   opacity: Unit().default(1),
   enter: z.enum(['pop', 'fade', 'none']).default('fade'),
@@ -164,6 +166,25 @@ export function graphicErrors(def, where) {
   return errors;
 }
 
+// Depth effects: they need a depth source on the edit (per-frame depth for the clip, or a depth picture).
+const Blur = z.object({
+  type: z.literal('blur'), ...Span(),
+  focus: Unit().describe('Depth that stays sharp (read it with get_depth, e.g. the cup)'),
+  range: z.number().min(0.01).max(1).default(0.15).describe('How far either side of focus stays sharp'),
+  amount: z.number().min(1).max(40).default(12).describe('Blur in pixels on a 1080-wide frame for the farthest parts'),
+  near: z.boolean().default(false).describe('Also blur what is nearer than the focus'),
+}).strict();
+const Fog = z.object({
+  type: z.literal('fog'), ...Span(),
+  color: Color().default('paper'), strength: Unit().default(0.6).describe('Opacity of the fog at the farthest point'),
+  start: Unit().default(0.6).describe('Depth where fog begins; farther parts get more'),
+}).strict();
+const Parallax = z.object({
+  type: z.literal('parallax'), ...Span(),
+  move: z.enum(['pan', 'tilt', 'orbit']).default('pan').describe('pan: near things slide sideways more than far ones; tilt: up and down; orbit: a slow circle'),
+  amount: z.number().min(0.005).max(0.15).default(0.04).describe('How far the nearest things move, as a fraction of the frame width'),
+}).strict();
+
 const Zoom = z.object({
   type: z.literal('zoom'), ...Span(),
   scale: z.number().min(1).max(4).describe('1.5 fills the frame with the middle two thirds'),
@@ -173,7 +194,7 @@ const Zoom = z.object({
 const Shake = z.object({ type: z.literal('shake'), ...Span(), strength: Unit().default(0.4) }).strict();
 const Flash = z.object({ type: z.literal('flash'), ...Span(), color: Color().default('white') }).strict();
 
-export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Graphic, Zoom, Shake, Flash]);
+export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Graphic, Blur, Fog, Parallax, Zoom, Shake, Flash]);
 
 const Play = z.object({
   from: Frame().describe('First SOURCE frame'), to: Frame().describe('SOURCE frame to stop before'),
@@ -197,6 +218,12 @@ export const EditSpec = z.object({
   // ChatGPT's tool-schema check rejects.
   anchors: z.record(z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(900))
     .refine(a => Object.keys(a).length <= 40, 'At most 40 anchors').default({}).describe('Named points on things in the footage, keyframed on SOURCE frames in 0–1 of the footage; positions between keyframes are interpolated, and held before the first and after the last'),
+  depth: z.object({
+    video: z.boolean().default(false).describe('Use this clip\'s per-frame depth (see create_download_link and create_upload_link kind depth); it follows the timeline like the footage'),
+    stills: z.array(z.object({ from: Frame(), to: Frame(), asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/) }).strict()).max(20).optional()
+      .describe('A depth picture (uploaded asset, same shape as the footage) for OUTPUT frames from..to, e.g. during a freeze; takes over from the video there'),
+    near: z.enum(['white', 'black']).default('white').describe('Which end of the greyscale is near'),
+  }).strict().optional().describe('Where depth comes from, for layers with depth and for blur, fog and parallax'),
   layers: z.array(Layer).max(80).default([]).describe('Drawn in order, later layers on top; illustrate layers always sit right over the footage, under every other layer'),
 }).strict();
 
@@ -315,6 +342,17 @@ export function planEdit(input, footage, assets = {}, graphics = {}) {
   for (let k = 1; k < zooms.length; k++)
     if (zooms[k].from < zooms[k - 1].to) errors.push(`layers.${zooms[k].i} (zoom): overlaps the zoom in layers.${zooms[k - 1].i}; one zoom at a time`);
   for (const name of Object.keys(spec.anchors)) if (!used.has(name)) warnings.push(`anchors.${name}: defined but not used by any layer`);
+  const needsDepth = spec.layers.some(l => ['blur', 'fog', 'parallax'].includes(l.type) || l.depth != null || l.path?.some(k => k.depth != null));
+  if (spec.depth) {
+    if (spec.depth.video && !footage.depth) errors.push('depth.video: this clip has no per-frame depth yet; compute it from create_download_link and upload it with create_upload_link kind depth');
+    for (const [i, st] of (spec.depth.stills || []).entries()) {
+      if (st.to <= st.from) errors.push(`depth.stills.${i}: 'to' must be after 'from'`);
+      const a = assets[st.asset];
+      if (!a) errors.push(`depth.stills.${i}: no picture called '${st.asset}' has been uploaded for this footage`);
+      else if (Math.abs((a.width / a.height) / (footage.width / footage.height) - 1) > 0.03) warnings.push(`depth.stills.${i}: '${st.asset}' is not the shape of the footage, so it will not line up`);
+    }
+    if (!spec.depth.video && !spec.depth.stills?.length) errors.push('depth: give video: true or at least one still');
+  } else if (needsDepth) errors.push('Some layers use depth (depth values, blur, fog or parallax), but the edit has no depth source; add "depth": {"video": true} or depth stills');
   if (errors.length) throw fail(errors.join('; '));
 
   const [width, height] = FORMATS[spec.format];
@@ -421,6 +459,22 @@ A bird with flapping wings (looping every 8 frames), flown along a path:
   {"shape":"path","d":"M83,48 L92,51 L83,54Z","fill":"gold"}]}
 Confetti: one small rect with "repeat":{"count":30,"delay":2,"dx":9,"rotate":40} and keys on y and rotate.
 save_graphic stores a graphic by name so later edits use {"type":"graphic","use":"bird"}; list_graphics shows them.
+
+## Depth: things passing behind things, depth of field, fog, 2.5D moves
+Depth is a greyscale picture of how far each pixel is (near = white). Two sources:
+- Per-frame, for the whole clip: create_download_link, then in your sandbox run a monocular depth model
+  (e.g. Depth Anything V2) on every frame, normalise the whole clip with one min/max (per-frame
+  normalising flickers), encode a greyscale MP4 with exactly the clip's frame count, and upload it with
+  create_upload_link kind "depth". Then "depth": {"video": true}. It follows cuts and freezes like the footage.
+- A still, for a freeze: depth of that one frame uploaded as a picture, then
+  "depth": {"stills": [{"from": 88, "to": 148, "asset": "cup-depth"}]}.
+Use get_depth to read values at points (the rim might be 0.72, the window 0.15).
+- "depth": 0.6 on an image, sequence, graphic, sticker or text hides it wherever the scene is nearer
+  than 0.6: a bird at 0.5 flies behind a cup at 0.7 and in front of a window at 0.2. Path keys can carry
+  their own depth, so it can come from behind and land in front ({"frame":130,"at":"rim","depth":0.75}).
+- {"type":"blur","focus":0.7,"range":0.12,"amount":14}: depth of field, sharp around the focus.
+- {"type":"fog","strength":0.6,"start":0.5}: haze that thickens with distance.
+- {"type":"parallax","move":"pan","amount":0.04}: a 2.5D camera move; best on a freeze.
 
 ## Tips
 - Layers are drawn in list order, later on top. Illustrate layers are the exception: they redraw the footage itself,

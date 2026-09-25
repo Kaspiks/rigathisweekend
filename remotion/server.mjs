@@ -56,7 +56,8 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
     if (!ASSET.test(name)) throw bad(`Invalid asset name ${name}`);
     assets[name] = { width: Number(a.width), height: Number(a.height), src: `http://127.0.0.1:${PORT}/footage/${footage}/assets/${name}.png` };
   }
-  const inputProps = { spec: props.spec, plan: props.plan, source: props.source, assets, video: `http://127.0.0.1:${PORT}/footage/${footage}/work.mp4` };
+  const depth = props.depth?.frames > 0 ? { frames: Number(props.depth.frames), base: `http://127.0.0.1:${PORT}/footage/${footage}/depth` } : null;
+  const inputProps = { spec: props.spec, plan: props.plan, source: props.source, assets, depth, video: `http://127.0.0.1:${PORT}/footage/${footage}/work.mp4` };
   const k = Math.min(1, Math.max(0.2, Number(scale) || 1));
   const out = join(dir, 'renders');
   await mkdir(out, { recursive: true });
@@ -89,12 +90,14 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
   }
 }
 
-// Files Chrome reads while rendering: the day's grid, a clip's working copy and its pictures.
+// Files Chrome reads while rendering: the day's grid, a clip's working copy, its pictures and depth frames.
 function localFile(url) {
   const grid = url.match(/^\/grid\/([a-f0-9]{24})\/(\d{4}-\d{2}-\d{2})\.png$/);
   if (grid) return { file: join(DATA, 'media', grid[1], `grid-${grid[2]}.png`), type: 'image/png' };
   const video = url.match(/^\/footage\/([a-f0-9]{24})\/work\.mp4$/);
   if (video) return { file: join(DATA, 'footage', video[1], 'work.mp4'), type: 'video/mp4' };
+  const depth = url.match(/^\/footage\/([a-f0-9]{24})\/depth\/(\d{5})\.jpg$/);
+  if (depth) return { file: join(DATA, 'footage', depth[1], 'depth', `${depth[2]}.jpg`), type: 'image/jpeg' };
   const asset = url.match(/^\/footage\/([a-f0-9]{24})\/assets\/([a-z0-9][a-z0-9-]{0,31})\.png$/);
   if (asset) return { file: join(DATA, 'footage', asset[1], 'assets', `${asset[2]}.png`), type: 'image/png' };
   return null;
@@ -105,7 +108,8 @@ http.createServer(async (req, res) => {
     const local = req.method === 'GET' && localFile(req.url);
     if (local) {
       const { size } = await stat(local.file);
-      res.writeHead(200, { 'Content-Type': local.type, 'Content-Length': size });
+      // CORS so the page can load depth pictures as its own (see src/edit/depth.ts); this service is internal only.
+      res.writeHead(200, { 'Content-Type': local.type, 'Content-Length': size, 'Access-Control-Allow-Origin': '*' });
       return createReadStream(local.file).pipe(res);
     }
     if (req.method === 'GET' && req.url === '/healthz') return send(res, 200, { ok: true, busy });
