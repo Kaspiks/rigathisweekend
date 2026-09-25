@@ -258,7 +258,7 @@ function renderRow(c,r){
   const file=r.status==='ready'&&r.file;
   const media=!file?'':r.kind==='stills'
     ?`<a href="${clipFile(c,`renders/${file}`)}" target="_blank" rel="noopener"><img loading="lazy" src="${clipFile(c,`renders/${file}`)}" alt="Preview stills"></a>`
-    :`<video controls playsinline preload="none" src="${clipFile(c,`renders/${file}`)}"></video><a class="button-link" href="${clipFile(c,`renders/${file}`)}" download="${esc(c.name.replace(/\.[^.]+$/,''))}-v${r.version}.mp4">Download MP4</a>`;
+    :`<video controls playsinline preload="none" src="${clipFile(c,`renders/${file}`)}"></video>${r.sheet?`<a href="${clipFile(c,`renders/${r.sheet}`)}" target="_blank" rel="noopener"><img loading="lazy" src="${clipFile(c,`renders/${r.sheet}`)}" alt="Frames from this video"></a>`:''}<a class="button-link" href="${clipFile(c,`renders/${file}`)}" download="${esc(c.name.replace(/\.[^.]+$/,''))}-v${r.version}.mp4">Download MP4</a>`;
   return `<li><strong>${what}</strong><span class="job-state ${r.status}">${state}</span>${media}</li>`;
 }
 function clipCard(c){

@@ -133,6 +133,8 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         await sharp(await contactSheet(cells, { portrait: plan.height >= plan.width })).toFile(join(renders, sheet));
         out = { ...out, sheet, frames: out.files.map(x => ({ output: x.frame, source: sourceFrameAt(plan.segments, x.frame), seconds: secondsOf(x.frame) })) };
       }
+      // A video comes with a sheet of frames from the file itself, for the dashboard and for ChatGPT.
+      if (job.kind === 'video') try { out = { ...out, sheet: await videoSheet(f.id, job.id, out) }; } catch (err) { console.error(`Frame sheet for render ${job.id}: ${err.message}`); }
       store.finishFootageRender(job.id, null, out);
     } catch (err) {
       store.finishFootageRender(job.id, err.name === 'TimeoutError' ? 'Rendering took too long' : err.message);
@@ -147,9 +149,20 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     return f;
   };
   const checkFrame = (f, frame) => { if (frame > f.info.work.frames - 1) throw fail(`Frame ${frame} is past the end of the clip (its last frame is ${f.info.work.frames - 1})`); return frame; };
+  // Eight frames spread over a rendered video, read back from the MP4 itself. Returns the sheet's file name.
+  async function videoSheet(footage, id, result) {
+    const renders = footageFiles(store.dir, footage).renders, name = `${id}-sheet.jpg`;
+    if (!existsSync(join(renders, name))) {
+      const frames = spread(0, Math.max(1, Math.round((result.seconds || 1) * FPS)), 8);
+      const cells = await Promise.all(frames.map(async n => ({ image: await grabFrame(join(renders, result.file), n, { width: 600 }), label: `${secondsOf(n).toFixed(2)}s into the render` })));
+      await sharp(await contactSheet(cells, { portrait: (result.height || 2) >= (result.width || 1) })).toFile(join(renders, name));
+    }
+    return name;
+  }
   const renderSummary = r => ({
     render: r.id, footage: r.footage, version: r.version, kind: r.kind, status: r.status, error: r.error, requested: r.request, created: r.created, updated: r.updated,
-    ...(r.status === 'ready' && r.result ? { file: r.result.file || r.result.sheet, url: `${origin}/footage/${r.footage}/renders/${r.result.file || r.result.sheet}`, seconds: r.result.seconds } : {}),
+    ...(r.status === 'ready' && r.result ? { file: r.result.file || r.result.sheet, url: `${origin}/footage/${r.footage}/renders/${r.result.file || r.result.sheet}`, seconds: r.result.seconds,
+      ...(r.kind === 'video' && r.result.sheet ? { sheet: r.result.sheet } : {}) } : {}),
   });
   async function summary(f) {
     const work = f.info?.work;
@@ -249,12 +262,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   const read = { readOnlyHint: true, openWorldHint: false }, write = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
   const stillsResult = async r => picture(await sharp(join(footageFiles(store.dir, r.footage).renders, r.result.sheet)).toBuffer(), { ...renderSummary(r), frames: r.result.frames });
   async function videoResult(r) {
-    const renders = footageFiles(store.dir, r.footage).renders, sheet = join(renders, `${r.id}-sheet.jpg`);
-    const frames = spread(0, Math.max(1, Math.round((r.result.seconds || 1) * FPS)), 8);
-    if (!existsSync(sheet)) {
-      const cells = await Promise.all(frames.map(async f => ({ image: await grabFrame(join(renders, r.result.file), f, { width: 600 }), label: `${secondsOf(f).toFixed(2)}s into the render` })));
-      await sharp(await contactSheet(cells, { portrait: (r.result.height || 2) >= (r.result.width || 1) })).toFile(sheet);
-    }
+    const sheet = join(footageFiles(store.dir, r.footage).renders, r.result.sheet || await videoSheet(r.footage, r.id, r.result));
     return picture(await sharp(sheet).toBuffer(), { ...renderSummary(r), note: 'Frames sampled from the rendered video. The owner downloads it from the dashboard.' });
   }
 

@@ -291,6 +291,8 @@ test('ChatGPT can look at a clip, save an edit, preview it and render it over MC
   assert.equal(dataOf(done).status, 'ready');
   assert.equal(dataOf(done).url, `http://localhost:3100/footage/${id}/renders/${queued.render}.mp4`);
   assert.equal((await sharp(imageOf(done)).metadata()).format, 'jpeg', 'a video comes back as frames from it');
+  assert.equal(dataOf(done).sheet, `${queued.render}-sheet.jpg`, 'the frame sheet is made with the video');
+  assert.ok(existsSync(join(footageFiles(dir, id).renders, `${queued.render}-sheet.jpg`)));
   assert.equal(calls.at(-1).body.scale, 1);
   assert.equal(store.footageRender(queued.render).request.quality, 'final');
 });
