@@ -99,6 +99,10 @@ async function setup(t, { renderUrl = 'http://render:3200', busy = 0, failRender
   const calls = [];
   const fetcher = async (url, opts) => {
     // Anything but the render service is a picture being fetched for add_picture.
+    if (String(url).endsWith('.glb')) {
+      const model = glb();
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/octet-stream', 'content-length': String(model.length) }), arrayBuffer: async () => model };
+    }
     if (!String(url).endsWith('/clip')) {
       const png = await sharp({ create: { width: 300, height: 200, channels: 3, background: '#d4ed86' } }).png().toBuffer();
       return { ok: true, status: 200, headers: new Headers({ 'content-type': 'image/png', 'content-length': String(png.length) }), arrayBuffer: async () => png };
@@ -506,10 +510,20 @@ test('ChatGPT can upload a 3D model and animate it walking along a path', needsF
   const sent = calls.at(-1).body.props;
   assert.deepEqual(sent.models, { cat: { animations: ['Walk', 'animation_1'] } });
   assert.deepEqual([sent.spec.layers[0].size, sent.spec.layers[0].pin, sent.spec.layers[0].blend], [0.2, 'feet', 8], 'defaults are filled in');
+  // A sandbox without network hands the file over instead, and the server fetches it with the usual guards.
+  const tools = (await client.listTools()).tools;
+  assert.deepEqual(tools.find(x => x.name === 'add_model')._meta, { 'openai/fileParams': ['file'] });
+  const handed = await client.callTool({ name: 'add_model', arguments: { footage: id, name: 'kitten', file: { download_url: 'https://93.184.216.34/cat.glb', file_id: 'file-2' } } });
+  assert.ok(!handed.isError, handed.content?.[0]?.text);
+  assert.deepEqual(dataOf(handed).animations.map(a => a.name), ['Walk', 'animation_1']);
+  const inside = await client.callTool({ name: 'add_model', arguments: { footage: id, name: 'sneaky', url: 'https://127.0.0.1/cat.glb' } });
+  assert.ok(inside.isError); assert.match(inside.content[0].text, /Non-public address/);
+  const notModel = await client.callTool({ name: 'add_model', arguments: { footage: id, name: 'flat', url: 'https://93.184.216.34/cat.png' } });
+  assert.ok(notModel.isError); assert.match(notModel.content[0].text, /not a GLB/);
   // Models can also be added and removed from the dashboard.
   const auth = { Authorization: `Bearer ${'f'.repeat(32)}` };
   const dash = await fetch(`${base}/api/footage/${id}/models/fox`, { method: 'POST', headers: { ...auth, 'Content-Type': 'model/gltf-binary' }, body: glb() });
   assert.equal(dash.status, 201);
   await fetch(`${base}/api/footage/${id}/models/fox`, { method: 'DELETE', headers: auth });
-  assert.deepEqual(dataOf(await client.callTool({ name: 'list_footage', arguments: {} }))[0].models.map(m => m.name), ['cat']);
+  assert.deepEqual(dataOf(await client.callTool({ name: 'list_footage', arguments: {} }))[0].models.map(m => m.name), ['cat', 'kitten']);
 });

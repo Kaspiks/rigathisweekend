@@ -497,6 +497,24 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       return text(await storeAsset(store, footage, name, got.buffer));
     });
 
+    // For a sandbox without outbound network: ChatGPT hands the file over and this server fetches it.
+    server.registerTool('add_model', {
+      description: 'Add a 3D model (.glb, textures embedded, no Draco) to a clip, from a file in this conversation (attached or made in your sandbox) or from a public HTTPS link. Answers with its animations. Use it when your sandbox cannot reach create_upload_link.',
+      inputSchema: {
+        footage: Id, name: AssetName,
+        file: z.object({ download_url: z.string().url(), file_id: z.string(), mime_type: z.string().optional(), file_name: z.string().optional() }).optional().describe('The model as a ChatGPT file'),
+        url: z.string().url().max(2000).optional().describe('Or a public HTTPS link to the .glb'),
+      },
+      annotations: { ...write, openWorldHint: true },
+      _meta: { 'openai/fileParams': ['file'] },
+    }, async ({ footage, name, file, url }) => {
+      const f = store.footage(footage), source = file?.download_url || url;
+      if (!source) throw fail('No file arrived. Attach the .glb to the conversation, or ask the owner to add it on the dashboard under 3D models');
+      let got;
+      try { got = await fetchPublic(source, 'model/gltf-binary, application/octet-stream, */*', MAX_MODEL, fetcher, 60000); } catch (err) { throw fail(`Could not fetch the model (${err.message}). Ask the owner to add it on the dashboard under 3D models`); }
+      return text({ footage: f.id, ...await saveModel(got.buffer, footageFiles(store.dir, f.id).models, name) });
+    });
+
     server.registerTool('get_render', {
       description: 'Status of a render. When ready: stills come back as their sheet; a video comes back as frames sampled from it, plus where the owner can download it.',
       inputSchema: { render: z.number().int().min(1) }, annotations: read,

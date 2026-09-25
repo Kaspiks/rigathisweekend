@@ -521,7 +521,8 @@ A model layer draws a real 3D model (.glb) in the shot, playing its own animatio
   Poly Pizza (CC0 animated animals and characters by Quaternius), Sketchfab (download as glTF binary), Mixamo
   (characters with walk cycles, converted to GLB). Or build one in your sandbox (trimesh or pygltflib; for
   animation, export node rotation keyframes, e.g. legs swinging).
-- Upload it: create_upload_link with kind "model" and a name, then curl -T cat.glb "<url>". The answer (and
+- Upload it: create_upload_link with kind "model" and a name, then curl -T cat.glb "<url>". If your sandbox has
+  no network, use add_model with the file instead (or ask the owner to add it on the dashboard). The answer (and
   list_footage under models) lists its animations by name and length; use those names exactly.
 - Place it like any layer: "at" (its feet stand there with the default pin "feet"), or a path. "size" is its
   height as a fraction of the frame height. "turn" 0 faces the camera, 90 faces right; "facing":"path" turns

@@ -97,6 +97,7 @@ The drawing styles are filters: they need no image generation and cost nothing e
 | `get_depth` | no | Depth values (0 far – 1 near) at points, plus the depth picture |
 | `create_upload_link` | makes a link | One-time link for ChatGPT to upload a picture, a 3D model (.glb), or the clip's per-frame depth video, from its sandbox |
 | `add_picture` | stores a picture | A file from the conversation, or a public HTTPS link |
+| `add_model` | stores a 3D model | A .glb from the conversation, or a public HTTPS link; for a sandbox that cannot reach the upload link |
 
 Uploading footage, deleting and downloading stay on the dashboard, behind your login. The upload link is the only route without a login, and it accepts nothing but the one picture, model or depth video it was made for.
 
@@ -105,7 +106,7 @@ Uploading footage, deleting and downloading stay on the dashboard, behind your l
 A model layer draws a real 3D model in the shot with Three.js, inside the same render. It suits a character that has to move believably: a cat walking round the cup and sitting on the saucer, a bird landing, a product turning on a turntable.
 
 1. Get an animated, low-poly model as one binary glTF file (`.glb`, textures embedded). Free sources: [Poly Pizza](https://poly.pizza) (CC0 animals and characters, many by Quaternius with walk, idle and sit animations), Sketchfab (download as glTF binary; check the licence), Mixamo (characters with walk cycles, converted to GLB in Blender). ChatGPT can also build simple ones in its sandbox.
-2. ChatGPT uploads it with `create_upload_link` kind `model` (or you add it on the dashboard under the clip's **3D models**). The server checks it and lists its animations by name.
+2. ChatGPT uploads it with `create_upload_link` kind `model`. When its sandbox has no network (normal ChatGPT chats often do not), it hands the file over with `add_model` and the server fetches it; or you download the file and add it on the dashboard under the clip's **3D models**. The server checks it and lists its animations by name.
 3. The edit places it with `at` or a `path`, picks animations by name and switches between them with `actions`, and sets `size`, `tilt` (how far the camera looks down, to match the footage), `light` (where the light in the shot comes from) and `shadow`. `look: "toon"` draws it like a cartoon with an ink outline, to match illustrated moments.
 
 Models are checked on upload: at most 50 MB and 400,000 triangles, everything inside the one file, and no Draco or KTX2 compression (the renderer cannot decode them; re-export without compression). There is no camera tracking: a model follows anchors and paths on screen, and does not match a moving camera's perspective. It works best on a still or slowly moving shot, or on a freeze. On a 4-core test machine a 4 s draft with two models rendered in about 40 s.
