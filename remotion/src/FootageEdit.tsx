@@ -7,10 +7,10 @@ import '@fontsource/cormorant-garamond/600.css';
 import '@fontsource/cormorant-garamond/700.css';
 import '@fontsource/great-vibes/400.css';
 import type { CSSProperties } from 'react';
-import { AbsoluteFill, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
+import { AbsoluteFill, Audio, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
 import { BoilFilter, IllustrationFilter } from './edit/filters';
 import type { BlurLayer, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
-import { PALETTE, baseScale, cameraAt, colour, depthSource, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, travel, walked } from './edit/model';
+import { PALETTE, baseScale, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, travel, walked } from './edit/model';
 import { ModelView } from './edit/Model3D';
 import { depthNear, useLocalImage } from './edit/depth';
 import { GraphicView } from './edit/Graphics';
@@ -38,7 +38,8 @@ const Footage = ({ props, rect, muted, style }: { props: FootageEditProps; rect:
             // Remotion keeps a video's frame inside its sequence, so a freeze stops at the sequence's first
             // frame and the trim picks the source frame to show.
             ? <Freeze frame={0}><OffthreadVideo src={props.video} trimBefore={s.source || undefined} muted style={place} /></Freeze>
-            : <OffthreadVideo src={props.video} trimBefore={s.source || undefined} playbackRate={s.speed ?? 1} muted={muted || (s.speed ?? 1) !== 1} style={place} />}
+            : <OffthreadVideo src={props.video} trimBefore={s.source || undefined} playbackRate={s.speed ?? 1} muted={muted || (s.speed ?? 1) !== 1} style={place}
+              volume={muted ? undefined : (f) => sourceVolumeAt(props.spec, s.from + f)} />}
         </Sequence>
       ))}
     </AbsoluteFill>
@@ -195,6 +196,16 @@ export const FootageEdit = (props: FootageEditProps) => {
           <svg key={`fog-${i}`} width={plan.width} height={plan.height} style={{ position: 'absolute', left: 0, top: 0 }}>{depthImage(`fogf-${i}`)}</svg>
         ))}
       </AbsoluteFill>
+      {/* Sound effects and music, each on its own stretch of the timeline. Volume keys count on through
+          loops ("extend"), so a swell over a looping sound does not start again every repeat. */}
+      {(spec.sounds ?? []).map((c, i) => {
+        const src = props.sounds?.[c.file ?? c.sound]?.src;
+        return src ? (
+          <Sequence key={`sound-${i}`} from={c.at} durationInFrames={c.length} layout="none">
+            <Audio src={src} trimBefore={Math.round(c.from * plan.fps) || undefined} playbackRate={c.speed} loop={c.loop} loopVolumeCurveBehavior="extend" volume={(f) => cueVolume(c, f)} />
+          </Sequence>
+        ) : null;
+      })}
       {spec.layers.map((l, i) => {
         if (!active(l)) return null;
         const node = drawLayer(l, i);

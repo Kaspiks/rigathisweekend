@@ -18,6 +18,7 @@ import {
 import { fetchPublic } from './photos.js';
 import { MAX_MODEL, deleteModel, modelList, saveModel } from './models.js';
 import { depthEstimateSeconds, depthLimits, depthModel, makeDepth } from './depth.js';
+import { MAX_SOUND, deleteSound, loudness, processedSound, saveSound, soundList } from './sounds.js';
 import http from 'node:http';
 
 const fail = (message, httpStatus = 400) => Object.assign(new Error(message), { httpStatus });
@@ -40,7 +41,7 @@ async function storeAsset(store, id, name, buffer) {
 }
 
 // The only routes that need no login. The token is the permission: made by an authorised MCP call and
-// gone after 30 minutes. PUT or POST /u/<token> takes one picture, 3D model or clip's per-frame depth video, and
+// gone after 30 minutes. PUT or POST /u/<token> takes one picture, 3D model, sound or clip's per-frame depth video, and
 // works once. GET /d/<token> hands out a clip's working copy, so ChatGPT can compute depth from it.
 // Mounted before the login check in app.js.
 async function readBody(req, max) {
@@ -74,9 +75,12 @@ export function uploadLinkRoute(store) {
         } finally { await rm(incoming, { force: true }); }
         return;
       }
+      const folders = () => footageFiles(store.dir, store.footage(link.footage).id);
       const saved = link.kind === 'model'
-        ? { footage: link.footage, ...await saveModel(await readBody(req, MAX_MODEL), footageFiles(store.dir, store.footage(link.footage).id).models, link.name) }
-        : await storeAsset(store, link.footage, link.name, await readBody(req, MAX_ASSET));
+        ? { footage: link.footage, ...await saveModel(await readBody(req, MAX_MODEL), folders().models, link.name) }
+        : link.kind === 'sound'
+          ? { footage: link.footage, ...await saveSound(await readBody(req, MAX_SOUND), folders().sounds, link.name) }
+          : await storeAsset(store, link.footage, link.name, await readBody(req, MAX_ASSET));
       store.finishUploadLink(hash);
       res.status(201).json(saved);
     } catch (err) {
@@ -199,15 +203,21 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     return pumping;
   }
   const withAssets = async id => Object.fromEntries((await assetList(store.dir, id)).map(a => [a.name, { width: a.width, height: a.height }]));
+  const withSounds = async id => Object.fromEntries((await soundList(footageFiles(store.dir, id).sounds)).map(x => [x.name, { seconds: x.seconds }]));
   const withModels = async id => Object.fromEntries((await modelList(footageFiles(store.dir, id).models)).map(m => [m.name, { animations: m.animations.map(a => a.name) }]));
   async function runRender(job) {
     try {
       const f = store.footage(job.footage);
       if (f.status !== 'ready') throw new Error('The footage is not ready');
-      const work = f.info.work, assets = await withAssets(f.id), models = await withModels(f.id);
-      const { spec, plan } = planEdit(store.edit(f.id, job.version).spec, clipInfo(f), assets, store.graphics(), models);
+      const work = f.info.work, assets = await withAssets(f.id), models = await withModels(f.id), sounds = await withSounds(f.id);
+      const planned = planEdit(store.edit(f.id, job.version).spec, clipInfo(f), assets, store.graphics(), models, sounds), plan = planned.plan;
+      // Stills are silent. A video gets each cue's sound with its effects applied (made once, then kept).
+      const folder = footageFiles(store.dir, f.id).sounds, files = {};
+      const cues = job.kind === 'video' ? await Promise.all(planned.spec.sounds.map(async c => ({ ...c, file: await processedSound(folder, c) }))) : [];
+      for (const c of cues) files[c.file] = {};
+      const spec = { ...planned.spec, sounds: cues };
       const body = JSON.stringify({ footage: f.id, render: job.id, kind: job.kind, ...job.request,
-        props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null, models } });
+        props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null, models, sounds: files } });
       let out;
       for (let waited = 0; ; waited++) {
         const r = await clipFetcher(`${renderUrl()}/clip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(job.kind === 'stills' ? 5 * 60000 : 60 * 60000) });
@@ -229,6 +239,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       }
       // A video comes with a sheet of frames from the file itself, for the dashboard and for ChatGPT.
       if (job.kind === 'video') try { out = { ...out, sheet: await videoSheet(f.id, job.id, out) }; } catch (err) { console.error(`Frame sheet for render ${job.id}: ${err.message}`); }
+      if (job.kind === 'video') out = { ...out, loudness: await loudness(join(footageFiles(store.dir, f.id).renders, out.file)) };
       store.finishFootageRender(job.id, null, out);
     } catch (err) {
       const cause = err.cause?.code || err.cause?.message;
@@ -269,6 +280,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       depthJob: depthState(f),
       assets: await assetList(store.dir, f.id),
       models: await modelList(footageFiles(store.dir, f.id).models),
+      sounds: await soundList(footageFiles(store.dir, f.id).sounds),
       edits: store.edits(f.id),
       renders: store.footageRenders(f.id).slice(0, 10).map(renderSummary),
     };
@@ -285,7 +297,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   async function videoRequest(f, version, quality, from, to) {
     if (!renderUrl()) throw fail('The render service is not configured (RENDER_URL)', 409);
     const edit = store.edit(f.id, version);
-    const { plan } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id));
+    const { plan } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id));
     const last = plan.durationInFrames - 1;
     const range = from != null || to != null ? [Math.min(last, from ?? 0), Math.min(last, to ?? last)] : null;
     if (range && range[1] < range[0]) throw fail('`to` must not be before `from`');
@@ -350,6 +362,18 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     if (!ASSET_NAME.test(name)) throw fail('Name the model with lowercase letters, digits and dashes (up to 32), e.g. cat');
     res.status(201).json(await saveModel(req.body, footageFiles(store.dir, f.id).models, name));
   });
+  // Sounds for edits: any audio file ffmpeg reads, stored as WAV (src/sounds.js).
+  app.post('/api/footage/:id/sounds/:name', express.raw({ type: () => true, limit: MAX_SOUND }), async (req, res) => {
+    const f = store.footage(Id.parse(req.params.id)), name = String(req.params.name || '').toLowerCase();
+    if (!ASSET_NAME.test(name)) throw fail('Name the sound with lowercase letters, digits and dashes (up to 32), e.g. cat-steps');
+    res.status(201).json(await saveSound(req.body, footageFiles(store.dir, f.id).sounds, name));
+  });
+  app.delete('/api/footage/:id/sounds/:name', async (req, res) => {
+    const f = store.footage(Id.parse(req.params.id));
+    if (!ASSET_NAME.test(req.params.name)) throw fail('No such sound');
+    await deleteSound(footageFiles(store.dir, f.id).sounds, req.params.name);
+    res.json({ ok: true });
+  });
   app.delete('/api/footage/:id/models/:name', async (req, res) => {
     const f = store.footage(Id.parse(req.params.id));
     if (!ASSET_NAME.test(req.params.name)) throw fail('No such model');
@@ -367,7 +391,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     res.status(202).json(renderSummary(await videoRequest(f, body.version ?? null, body.quality)));
   });
   // The working copy, poster, pictures and renders, for the dashboard. The original upload is not served.
-  app.get(/^\/footage\/([a-f0-9]{24})\/(work\.mp4|poster\.jpg|assets\/[a-z0-9][a-z0-9-]{0,31}\.png|depth\/\d{5}\.jpg|renders\/[0-9]+(?:-sheet|-f[0-9]+)?\.(?:jpg|mp4))$/, (req, res, next) => {
+  app.get(/^\/footage\/([a-f0-9]{24})\/(work\.mp4|poster\.jpg|assets\/[a-z0-9][a-z0-9-]{0,31}\.png|depth\/\d{5}\.jpg|sounds\/[a-z0-9][a-z0-9-]{0,31}\.wav|renders\/[0-9]+(?:-sheet|-f[0-9]+)?\.(?:jpg|mp4))$/, (req, res, next) => {
     const [id, file] = [req.params[0], req.params[1]];
     res.sendFile(file, { root: resolve(footageFiles(store.dir, id).dir), dotfiles: 'deny' }, err => { if (err) next(err.statusCode === 404 || err.code === 'ENOENT' ? undefined : err); });
   });
@@ -379,12 +403,15 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   const stillsResult = async r => picture(await sharp(join(footageFiles(store.dir, r.footage).renders, r.result.sheet)).toBuffer(), { ...renderSummary(r), frames: r.result.frames });
   async function videoResult(r) {
     const sheet = join(footageFiles(store.dir, r.footage).renders, r.result.sheet || await videoSheet(r.footage, r.id, r.result));
-    return picture(await sharp(sheet).toBuffer(), { ...renderSummary(r), note: 'Frames sampled from the rendered video. The owner downloads it from the dashboard.' });
+    const level = r.result.loudness;
+    return picture(await sharp(sheet).toBuffer(), { ...renderSummary(r),
+      audio: level ? { every: level.every, db: level.db.join(' '), note: 'Loudness of the rendered sound every quarter second in dB (-60 silence, about -20 a clear sound effect): check each sound starts where it should' } : 'silent',
+      note: 'Frames sampled from the rendered video. The owner downloads it from the dashboard.' });
   }
 
   function register(server) {
     server.registerTool('list_footage', {
-      description: 'List uploaded video clips for animated edits: id, status (processing/ready/failed), length in frames at 30 fps, size, uploaded pictures (assets), 3D models with their animations, saved edit versions and recent renders.',
+      description: 'List uploaded video clips for animated edits: id, status (processing/ready/failed), length in frames at 30 fps, size, uploaded pictures (assets), 3D models with their animations, sounds with their lengths, saved edit versions and recent renders.',
       inputSchema: {}, annotations: read,
     }, async () => text(await Promise.all(store.footageList().map(summary))));
 
@@ -430,8 +457,8 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       inputSchema: { footage: Id, version: z.number().int().min(1).optional() }, annotations: read,
     }, async ({ footage, version }) => {
       const f = ready(footage), edit = store.edit(f.id, version ?? null);
-      const { timeline, plan, warnings } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id));
-      return text({ footage: f.id, version: edit.version, note: edit.note, edit: toMcpEdit(edit.spec), durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, warnings, versions: store.edits(f.id) });
+      const { timeline, plan, cues, warnings } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id));
+      return text({ footage: f.id, version: edit.version, note: edit.note, edit: toMcpEdit(edit.spec), durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, sounds: cues, warnings, versions: store.edits(f.id) });
     });
 
     server.registerTool('save_edit', {
@@ -439,9 +466,9 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       inputSchema: { footage: Id, edit: McpEditSpec, note: z.string().trim().max(200).optional().describe('What changed, for the version list') }, annotations: write,
     }, async ({ footage, edit, note }) => {
       const f = ready(footage);
-      const { spec, plan, timeline, warnings } = planEdit(fromMcpEdit(edit), clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id));
+      const { spec, plan, timeline, cues, warnings } = planEdit(fromMcpEdit(edit), clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id));
       const saved = store.saveEdit(f.id, spec, note || null);
-      return text({ footage: f.id, version: saved.version, format: spec.format, size: [plan.width, plan.height], fps: FPS, durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, warnings, next: 'preview_edit to check frames, then render_edit' });
+      return text({ footage: f.id, version: saved.version, format: spec.format, size: [plan.width, plan.height], fps: FPS, durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, sounds: cues, warnings, next: 'preview_edit to check frames, then render_edit' });
     });
 
     server.registerTool('preview_edit', {
@@ -454,7 +481,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async ({ footage, version, frames, scale }) => {
       if (!renderUrl()) throw fail('The render service is not configured (RENDER_URL)');
       const f = ready(footage), edit = store.edit(f.id, version ?? null);
-      const { plan, spec } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id));
+      const { plan, spec } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id));
       const list = frames ? [...new Set(frames)].sort((a, b) => a - b) : previewFrames(plan, spec.layers, 8);
       const outside = list.find(x => x > plan.durationInFrames - 1);
       if (outside != null) throw fail(`Frame ${outside} is past the end of the edit (its last frame is ${plan.durationInFrames - 1})`);
@@ -499,8 +526,8 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async () => text(store.graphicList()));
 
     server.registerTool('create_upload_link', {
-      description: 'A one-time link for sending a file you made in your sandbox to a clip. kind picture (default): a PNG/JPEG/WebP stored as a named asset for image, sequence or depth-still use. kind model: a 3D model as one binary glTF (.glb, textures embedded, no Draco) for model layers; its animations are listed back. kind depth: the clip\'s per-frame depth as a greyscale MP4 (near = white, one frame per clip frame; get the clip with create_download_link). Upload the raw file with PUT or POST as the body, e.g. curl --fail -T file "<url>". Works once, for 30 minutes.',
-      inputSchema: { footage: Id, kind: z.enum(['picture', 'model', 'depth']).default('picture'), name: AssetName.optional().describe('Required for a picture or model') }, annotations: write,
+      description: 'A one-time link for sending a file you made in your sandbox to a clip. kind picture (default): a PNG/JPEG/WebP stored as a named asset for image, sequence or depth-still use. kind model: a 3D model as one binary glTF (.glb, textures embedded, no Draco) for model layers; its animations are listed back. kind sound: an audio file (MP3, WAV, OGG, FLAC, M4A, up to 3 minutes) for the sounds in edits. kind depth: the clip\'s per-frame depth as a greyscale MP4 (near = white, one frame per clip frame; get the clip with create_download_link). Upload the raw file with PUT or POST as the body, e.g. curl --fail -T file "<url>". Works once, for 30 minutes.',
+      inputSchema: { footage: Id, kind: z.enum(['picture', 'model', 'sound', 'depth']).default('picture'), name: AssetName.optional().describe('Required for a picture, model or sound') }, annotations: write,
     }, async ({ footage, kind, name }) => {
       const f = store.footage(footage);
       if (kind !== 'depth' && !name) throw fail(`Give the ${kind} a name`);
@@ -510,6 +537,8 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const url = `${origin}/u/${token}`;
       if (kind === 'depth') return text({ url, expires: expires.toISOString(), footage: f.id, kind, maxMB: MAX_DEPTH / 1048576, frames: f.info.work.frames,
         upload: `curl --fail -sS -T /path/to/depth.mp4 "${url}"`, then: 'The server checks it has one frame per clip frame, then edits can use "depth":{"video":true}; get_depth reads values.' });
+      if (kind === 'sound') return text({ url, expires: expires.toISOString(), footage: f.id, kind, name, maxMB: MAX_SOUND / 1048576, upload: `curl --fail -sS -T /path/to/${name}.mp3 "${url}"`,
+        then: `Place it in the edit's sounds: {"sound":"${name}","at":<output frame>}; list_footage shows it under sounds with its length.` });
       if (kind === 'model') return text({ url, expires: expires.toISOString(), footage: f.id, kind, name, maxMB: MAX_MODEL / 1048576, upload: `curl --fail -sS -T /path/to/${name}.glb "${url}"`,
         then: `The answer lists its animations. Use it as {"type":"model","asset":"${name}","animation":"<one of them>",...}; list_footage shows it under models.` });
       return text({ url, expires: expires.toISOString(), footage: f.id, name, maxMB: MAX_ASSET / 1048576, upload: `curl --fail -sS -T /path/to/${name}.png "${url}"`,
@@ -589,6 +618,23 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       let got;
       try { got = await fetchPublic(source, 'model/gltf-binary, application/octet-stream, */*', MAX_MODEL, fetcher, 60000); } catch (err) { throw fail(`Could not fetch the model (${err.message}). Ask the owner to add it on the dashboard under 3D models`); }
       return text({ footage: f.id, ...await saveModel(got.buffer, footageFiles(store.dir, f.id).models, name) });
+    });
+
+    server.registerTool('add_sound', {
+      description: 'Add a sound effect or music to a clip, from a file in this conversation (attached or made in your sandbox) or from a public HTTPS link to the audio file. MP3, WAV, OGG, FLAC or M4A, up to 3 minutes. Answers with its length. Then place it in the edit\'s sounds.',
+      inputSchema: {
+        footage: Id, name: AssetName,
+        file: z.object({ download_url: z.string().url(), file_id: z.string(), mime_type: z.string().optional(), file_name: z.string().optional() }).optional().describe('The sound as a ChatGPT file'),
+        url: z.string().url().max(2000).optional().describe('Or a public HTTPS link to the audio file itself'),
+      },
+      annotations: { ...write, openWorldHint: true },
+      _meta: { 'openai/fileParams': ['file'] },
+    }, async ({ footage, name, file, url }) => {
+      const f = store.footage(footage), source = file?.download_url || url;
+      if (!source) throw fail('No file arrived. Attach the sound to the conversation, or ask the owner to add it on the dashboard under Sounds');
+      let got;
+      try { got = await fetchPublic(source, 'audio/*, application/octet-stream, */*', MAX_SOUND, fetcher, 60000); } catch (err) { throw fail(`Could not fetch the sound (${err.message}). Ask the owner to add it on the dashboard under Sounds`); }
+      return text({ footage: f.id, ...await saveSound(got.buffer, footageFiles(store.dir, f.id).sounds, name) });
     });
 
     server.registerTool('get_render', {

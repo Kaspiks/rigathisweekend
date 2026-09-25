@@ -38,12 +38,15 @@ export type ParallaxLayer = Span & { type: 'parallax'; move: 'pan' | 'tilt' | 'o
 export type Layer = TextLayer | StickerLayer | IllustrateLayer | ImageLayer | SequenceLayer | GraphicLayer | ModelLayer | BlurLayer | FogLayer | ParallaxLayer | ZoomLayer | ShakeLayer | FlashLayer;
 export type Keyframe = { frame: number; x: number; y: number };
 export type DepthSpec = { video: boolean; stills?: { from: number; to: number; asset: string }[]; near: 'white' | 'black' };
-export type Spec = { format: string; fit: 'cover' | 'contain'; background: string; audio: 'source' | 'mute'; anchors: Record<string, Keyframe[]>; layers: Layer[]; depth?: DepthSpec };
+export type Level = { frame: number; value: number }[];
+export type SoundCue = { sound: string; file?: string; at: number; length: number; volume: number; from: number; loop: boolean; fadeIn: number; fadeOut: number; speed: number; volumeKeys?: Level; duck?: number };
+export type Spec = { format: string; fit: 'cover' | 'contain'; background: string; audio: 'source' | 'mute'; anchors: Record<string, Keyframe[]>; layers: Layer[]; depth?: DepthSpec;
+  sounds?: SoundCue[]; sourceVolume?: number; sourceKeys?: Level };
 export type Segment = { from: number; to: number; source: number; hold?: boolean; sourceTo?: number; speed?: number };
 export type Plan = { width: number; height: number; fps: number; durationInFrames: number; segments: Segment[] };
 export type Asset = { src: string; width: number; height: number };
 export type DepthFrames = { base: string; frames: number };
-export type FootageEditProps = { spec: Spec; plan: Plan; video: string; assets: Record<string, Asset>; source: { width: number; height: number; frames: number }; depth?: DepthFrames | null; models?: Record<string, { src: string }> };
+export type FootageEditProps = { spec: Spec; plan: Plan; video: string; assets: Record<string, Asset>; source: { width: number; height: number; frames: number }; depth?: DepthFrames | null; models?: Record<string, { src: string }>; sounds?: Record<string, { src: string }> };
 
 export const PALETTE: Record<string, string> = { ink: '#17352d', lime: '#d4ed86', paper: '#f4f0e6', white: '#ffffff', black: '#111111', coral: '#ff6b5b', gold: '#f5c542', sky: '#7cc6fe' };
 export const colour = (c: string | undefined, fallback: string) => (c ? PALETTE[c] ?? c : fallback);
@@ -273,4 +276,30 @@ export function layerDepth(layer: { depth?: number; path?: PathKey[] }, frame: n
 // A colour-matrix row turning the depth picture's grey into a*nearness + b, whichever end is near.
 export function nearRow(near: 'white' | 'black' | undefined, a: number, b: number) {
   return near === 'black' ? `${-a} 0 0 0 ${a + b}` : `${a} 0 0 0 ${b}`;
+}
+
+// A level from keys, eased between them and held before the first and after the last.
+export function levelAt(keys: Level | undefined, frame: number, fallback = 1): number {
+  if (!keys?.length) return fallback;
+  if (frame <= keys[0].frame) return keys[0].value;
+  const last = keys[keys.length - 1];
+  if (frame >= last.frame) return last.value;
+  const i = keys.findIndex((k, n) => frame >= k.frame && frame < keys[n + 1].frame);
+  return lerp(keys[i].value, keys[i + 1].value, smooth((frame - keys[i].frame) / (keys[i + 1].frame - keys[i].frame)));
+}
+// A sound cue's volume `f` frames into it: its level, its volume keys, and its fades.
+export function cueVolume(c: SoundCue, f: number): number {
+  const fadeIn = c.fadeIn > 0 ? clamp(f / c.fadeIn) : 1, fadeOut = c.fadeOut > 0 ? clamp((c.length - f) / c.fadeOut) : 1;
+  return Math.max(0, c.volume * levelAt(c.volumeKeys, f) * fadeIn * fadeOut);
+}
+// The clip's own sound at an output frame: its volume and keys, lowered under any cue that ducks it
+// (easing down over the 6 frames before the cue and back up over the 6 after).
+export function sourceVolumeAt(spec: Spec, frame: number): number {
+  let v = (spec.sourceVolume ?? 1) * levelAt(spec.sourceKeys, frame);
+  for (const c of spec.sounds ?? []) {
+    if (c.duck == null) continue;
+    const w = clamp((frame - (c.at - 6)) / 6) * clamp((c.at + c.length + 6 - frame) / 6);
+    v *= 1 - (1 - c.duck) * smooth(w);
+  }
+  return Math.max(0, v);
 }

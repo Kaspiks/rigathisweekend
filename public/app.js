@@ -270,6 +270,7 @@ function clipCard(c){
   const edit=last?`Edit version ${last.version}${last.note?` · ${esc(last.note)}`:''} · saved ${esc(riga(last.created))}`:'No edit yet. In ChatGPT, ask it to animate this clip.';
   const pictures=c.assets.map(a=>`<figure><a href="${clipFile(c,`assets/${a.name}.png`)}?v=${stamp}" target="_blank" rel="noopener"><img loading="lazy" src="${clipFile(c,`assets/${a.name}.png`)}?v=${stamp}" alt="${esc(a.name)}"></a><span>${esc(a.name)} · ${a.width}×${a.height}</span><button class="secondary small" data-unasset="${c.id}" data-name="${esc(a.name)}">Remove</button></figure>`).join('');
   const models=(c.models||[]).map(m=>`<li><strong>${esc(m.name)}</strong> · ${m.animations.length?`animations: ${m.animations.map(a=>esc(a.name)).join(', ')}`:'no animations'} · ${m.mb} MB <button class="secondary small" data-unmodel="${c.id}" data-name="${esc(m.name)}">Remove</button></li>`).join('');
+  const sounds=(c.sounds||[]).map(x=>`<li><strong>${esc(x.name)}</strong> · ${x.seconds.toFixed(1)} s <audio controls preload="none" src="${clipFile(c,`sounds/${x.name}.wav`)}?v=${stamp}"></audio> <button class="secondary small" data-unsound="${c.id}" data-name="${esc(x.name)}">Remove</button></li>`).join('');
   const job=c.depthJob, mid=c.depth?String(Math.floor(c.depth.frames/2)).padStart(5,'0'):null;
   const depthState=depthBusy(c)?`<span class="tag ok">${job.status==='queued'?'Waiting to make depth…':`Making depth… ${Math.round((job.progress||0)*100)}%`}</span> about ${Math.max(1,Math.round(job.estimateSeconds/60))} min in all`
     :job?.status==='failed'?`<span class="tag missing">Depth failed</span> ${esc(job.error||'')}`:'';
@@ -289,6 +290,8 @@ function clipCard(c){
       <div class="pictures">${pictures}<button class="secondary small" data-asset="${c.id}">Add picture</button></div>
       <h4>3D models</h4><p class="hint">Animated models (.glb, textures embedded) an edit can place in the shot, e.g. a cat that walks and sits.</p>
       ${models?`<ul class="models">${models}</ul>`:''}<button class="secondary small" data-model="${c.id}">Add 3D model</button>
+      <h4>Sounds</h4><p class="hint">Sound effects and music an edit can place on exact frames: steps, a whoosh, a poof. MP3, WAV, OGG, FLAC or M4A, up to 3 minutes.</p>
+      ${sounds?`<ul class="models sounds">${sounds}</ul>`:''}<button class="secondary small" data-sound="${c.id}">Add sound</button>
       <h4>Depth</h4><p class="hint">How far away each part of the shot is (near is white), so animations can pass behind things and edits can blur or fog by distance. Made on this server in a few minutes.</p>
       ${depth}`:''}
       ${c.renders.length?`<h4>Renders</h4><ul class="renders">${c.renders.map(r=>renderRow(c,r)).join('')}</ul>`:''}
@@ -299,7 +302,7 @@ function clipCard(c){
 // Redraw only when something changed, so a video you are watching is not reset by the refresh.
 function showFootage(d){
   footageRenderable=d.renderConfigured;
-  const sig=JSON.stringify(d.footage.map(c=>[c.id,c.status,c.progress,c.name,c.edits.length,c.assets,c.models,c.depth,c.depthJob,c.renders.map(r=>[r.render,r.status])]));
+  const sig=JSON.stringify(d.footage.map(c=>[c.id,c.status,c.progress,c.name,c.edits.length,c.assets,c.models,c.sounds,c.depth,c.depthJob,c.renders.map(r=>[r.render,r.status])]));
   if(sig===footageSig) return;
   footageSig=sig;
   $('#clips').innerHTML=d.footage.length?d.footage.map(clipCard).join(''):`<p class="empty">No footage yet. Upload a clip (up to ${d.limits.mb} MB and ${Math.round(d.limits.seconds/60)} minutes) to start.</p>`;
@@ -347,12 +350,22 @@ function footageClick(b){
     });
     return true;
   }
+  if(b.dataset.sound){
+    pickFile('audio/*,.mp3,.wav,.ogg,.flac,.m4a').then(f=>{
+      if(!f)return;
+      const suggested=f.name.replace(/\.[^.]+$/,'').toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,32)||'sound';
+      const name=prompt('Name for this sound (lowercase letters, digits and dashes). ChatGPT refers to it by this name.',suggested);
+      if(name) action(()=>sendFile(`/api/footage/${b.dataset.sound}/sounds/${encodeURIComponent(name.trim())}`,f));
+    });
+    return true;
+  }
+  if(b.dataset.unsound){if(confirm(`Remove the sound "${b.dataset.name}"? Edits that use it will not render until it is back.`))action(()=>removeAt(`/api/footage/${b.dataset.unsound}/sounds/${b.dataset.name}`));return true;}
   if(b.dataset.unmodel){if(confirm(`Remove the model "${b.dataset.name}"? Edits that use it will not render until it is back.`))action(()=>removeAt(`/api/footage/${b.dataset.unmodel}/models/${b.dataset.name}`));return true;}
   if(b.dataset.unasset){if(confirm(`Remove the picture "${b.dataset.name}"? Edits that use it will not render until it is back.`))action(()=>removeAt(`/api/footage/${b.dataset.unasset}/assets/${b.dataset.name}`));return true;}
   if(b.dataset.depth){action(async()=>{await api(`/api/footage/${b.dataset.depth}/depth`,{});watchFootage();});return true;}
   if(b.dataset.clipRender){action(()=>api(`/api/footage/${b.dataset.clipRender}/renders`,{quality:b.dataset.quality}));return true;}
   if(b.dataset.clipRetry){action(()=>api(`/api/footage/${b.dataset.clipRetry}/retry`,{}));return true;}
-  if(b.dataset.clipDelete){if(confirm('Delete this clip with its edits, pictures, models and renders? Download anything you want to keep first.'))action(()=>removeAt(`/api/footage/${b.dataset.clipDelete}`));return true;}
+  if(b.dataset.clipDelete){if(confirm('Delete this clip with its edits, pictures, models, sounds and renders? Download anything you want to keep first.'))action(()=>removeAt(`/api/footage/${b.dataset.clipDelete}`));return true;}
   return false;
 }
 load().catch(e=>{$('#status').textContent=e.message;});

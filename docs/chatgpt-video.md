@@ -55,6 +55,7 @@ What ChatGPT can do in an edit:
 | `model` | A 3D model (.glb) placed in the shot and played through its own animations (walk, idle, sit…), switching between them at set frames; it can walk along a path facing the way it goes, is lit from the side you choose, casts a soft shadow, and can be drawn as a toon with an ink outline |
 | `depth` (on the edit and on moving layers) | With a depth source (per-frame depth for the clip, or a depth picture for a freeze), things pass behind nearer parts of the shot |
 | `blur`, `fog`, `parallax` | Depth effects: depth of field around a focus, haze that thickens with distance, and a 2.5D camera move |
+| `sounds` | Sound effects and music on exact frames: volume, fades, volume over time, looping, trimming, speed, pan, pitch, reverse, low/high-pass, bass/treble, echo, reverb, normalising; `duck` dips the clip's own sound under one, and `sourceVolume`/`sourceKeys` set the clip's sound over time |
 | `zoom` | Push in towards, or follow, an anchor |
 | `shake`, `flash` | Camera shake and a flash, for moments of impact |
 
@@ -96,8 +97,9 @@ The drawing styles are filters: they need no image generation and cost nothing e
 | `create_download_link` | makes a link | The clip's working copy for 30 minutes, e.g. to compute depth in ChatGPT's sandbox |
 | `make_depth` | starts a job | Per-frame depth for the clip, made on the server in the background |
 | `get_depth` | no | Depth values (0 far – 1 near) at points, plus the depth picture |
-| `create_upload_link` | makes a link | One-time link for ChatGPT to upload a picture, a 3D model (.glb), or the clip's per-frame depth video, from its sandbox |
+| `create_upload_link` | makes a link | One-time link for ChatGPT to upload a picture, a 3D model (.glb), a sound, or the clip's per-frame depth video, from its sandbox |
 | `add_picture` | stores a picture | A file from the conversation, or a public HTTPS link |
+| `add_sound` | stores a sound | An audio file from the conversation, or a public HTTPS link to one |
 | `add_model` | stores a 3D model | A .glb from the conversation, or a public HTTPS link; for a sandbox that cannot reach the upload link |
 
 Uploading footage, deleting and downloading stay on the dashboard, behind your login. The upload link is the only route without a login, and it accepts nothing but the one picture, model or depth video it was made for.

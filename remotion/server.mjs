@@ -61,8 +61,13 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
     if (!ASSET.test(name)) throw bad(`Invalid model name ${name}`);
     models[name] = { src: `http://127.0.0.1:${PORT}/footage/${footage}/models/${name}.glb` };
   }
+  const sounds = {};
+  for (const name of Object.keys(props.sounds || {})) {
+    if (!ASSET.test(name)) throw bad(`Invalid sound name ${name}`);
+    sounds[name] = { src: `http://127.0.0.1:${PORT}/footage/${footage}/sounds/${name}.wav` };
+  }
   const depth = props.depth?.frames > 0 ? { frames: Number(props.depth.frames), base: `http://127.0.0.1:${PORT}/footage/${footage}/depth` } : null;
-  const inputProps = { spec: props.spec, plan: props.plan, source: props.source, assets, depth, models, video: `http://127.0.0.1:${PORT}/footage/${footage}/work.mp4` };
+  const inputProps = { spec: props.spec, plan: props.plan, source: props.source, assets, depth, models, sounds, video: `http://127.0.0.1:${PORT}/footage/${footage}/work.mp4` };
   const k = Math.min(1, Math.max(0.2, Number(scale) || 1));
   const out = join(dir, 'renders');
   await mkdir(out, { recursive: true });
@@ -85,7 +90,7 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
     const frameRange = Array.isArray(range) ? [Math.max(0, range[0] | 0), Math.min(last, range[1] | 0)] : null;
     if (frameRange && frameRange[1] < frameRange[0]) throw bad('The frame range is empty');
     const file = `${id}.mp4`, tmp = join(out, `${id}.part.mp4`);
-    await renderMedia({ composition, serveUrl: SERVE_URL, codec: 'h264', crf: k < 1 ? 23 : 18, inputProps, outputLocation: tmp, overwrite: true, logLevel: 'error', scale: k, frameRange, puppeteerInstance, muted: props.spec.audio === 'mute' })
+    await renderMedia({ composition, serveUrl: SERVE_URL, codec: 'h264', crf: k < 1 ? 23 : 18, inputProps, outputLocation: tmp, overwrite: true, logLevel: 'error', scale: k, frameRange, puppeteerInstance, muted: props.spec.audio === 'mute' && !props.spec.sounds?.length })
       .catch(async err => { await rm(tmp, { force: true }); throw err; });
     await rename(tmp, join(out, file));
     const count = frameRange ? frameRange[1] - frameRange[0] + 1 : composition.durationInFrames;
@@ -95,7 +100,7 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
   }
 }
 
-// Files Chrome reads while rendering: the day's grid, a clip's working copy, its pictures, 3D models and depth frames.
+// Files Chrome reads while rendering: the day's grid, a clip's working copy, its pictures, 3D models, sounds and depth frames.
 function localFile(url) {
   const grid = url.match(/^\/grid\/([a-f0-9]{24})\/(\d{4}-\d{2}-\d{2})\.png$/);
   if (grid) return { file: join(DATA, 'media', grid[1], `grid-${grid[2]}.png`), type: 'image/png' };
@@ -105,6 +110,8 @@ function localFile(url) {
   if (depth) return { file: join(DATA, 'footage', depth[1], 'depth', `${depth[2]}.jpg`), type: 'image/jpeg' };
   const asset = url.match(/^\/footage\/([a-f0-9]{24})\/assets\/([a-z0-9][a-z0-9-]{0,31})\.png$/);
   if (asset) return { file: join(DATA, 'footage', asset[1], 'assets', `${asset[2]}.png`), type: 'image/png' };
+  const sound = url.match(/^\/footage\/([a-f0-9]{24})\/sounds\/([a-z0-9][a-z0-9-]{0,31})\.wav$/);
+  if (sound) return { file: join(DATA, 'footage', sound[1], 'sounds', `${sound[2]}.wav`), type: 'audio/wav' };
   const model = url.match(/^\/footage\/([a-f0-9]{24})\/models\/([a-z0-9][a-z0-9-]{0,31})\.glb$/);
   if (model) return { file: join(DATA, 'footage', model[1], 'models', `${model[2]}.glb`), type: 'model/gltf-binary' };
   return null;

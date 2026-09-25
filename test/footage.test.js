@@ -574,3 +574,52 @@ test('The server makes per-frame depth for a clip in the background', needsFfmpe
   createAnimator({ get: routes, post: routes, patch: routes, delete: routes, locals: { renders: new Set() } }, store, {});
   assert.match(store.footage(id).info.depthJob.error, /restart/);
 });
+
+test('Sounds are uploaded, placed on frames with levels and effects, and handed to the renderer', needsFfmpeg, async t => {
+  const { dir, base, auth, upload, settle, mcp, calls } = await setup(t);
+  const { id } = await upload(await readFile(await rampClip(dir))).then(json); await settle();
+  const client = await mcp();
+  const tone = (seconds, name) => { const f = join(dir, name); ffmpeg(['-f', 'lavfi', '-i', `sine=frequency=660:sample_rate=44100:duration=${seconds}`, '-c:a', 'libmp3lame', f]); return readFile(f); };
+  // Through a one-time link, from the dashboard, or handed over by ChatGPT; anything but sound is refused.
+  const link = dataOf(await client.callTool({ name: 'create_upload_link', arguments: { footage: id, kind: 'sound', name: 'whoosh' } }));
+  const bad = await fetch(base + new URL(link.url).pathname, { method: 'PUT', body: Buffer.from('not a sound at all') });
+  assert.equal(bad.status, 400); assert.match((await bad.json()).error, /not a sound/);
+  const ok = await fetch(base + new URL(link.url).pathname, { method: 'PUT', body: await tone(0.5, 'whoosh.mp3') });
+  assert.equal(ok.status, 201);
+  assert.ok(Math.abs((await ok.json()).seconds - 0.5) < 0.1);
+  assert.equal((await fetch(`${base}/api/footage/${id}/sounds/steps`, { method: 'POST', headers: { ...auth, 'Content-Type': 'audio/mpeg' }, body: await tone(1, 'steps.mp3') })).status, 201);
+  const listed = dataOf(await client.callTool({ name: 'list_footage', arguments: {} }))[0].sounds;
+  assert.deepEqual(listed.map(x => x.name), ['steps', 'whoosh']);
+  assert.equal((await fetch(`${base}/footage/${id}/sounds/steps.wav`, { headers: auth })).status, 200, 'the dashboard can play it');
+  // Cues: checked against the sounds and the edit, with lengths worked out and reported back.
+  const save = sounds => client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { sourceVolume: 0.5, sourceKeys: [{ frame: 50, value: 0 }, { frame: 40, value: 1 }], sounds } } });
+  const refused = async (sounds, pattern) => { const r = await save(sounds); assert.ok(r.isError); assert.match(r.content[0].text, pattern); };
+  await refused([{ sound: 'poof', at: 10 }], /no sound called 'poof'/);
+  await refused([{ sound: 'steps', at: 10, loop: true }], /looping sound needs a length/);
+  await refused([{ sound: 'steps', at: 70 }], /edit is only 60 frames/);
+  const saved = await save([
+    { sound: 'whoosh', at: 30, volume: 1.5, pan: 0.5, echo: { delay: 100, decay: 0.3 }, duck: 0.3 },
+    { sound: 'steps', at: 0, length: 40, loop: true, volume: 0.4, fadeIn: 5, volumeKeys: [{ frame: 20, value: 0.5 }, { frame: 0, value: 1 }] },
+  ]);
+  assert.ok(!saved.isError, saved.content?.[0]?.text);
+  const answer = dataOf(saved);
+  // 0.5 s of whoosh plus 0.4 s of echo tail is 27 frames.
+  assert.deepEqual(answer.sounds.map(c => [c.sound, c.output]), [['steps', [0, 40]], ['whoosh', [30, 57]]], 'in order, with the echo tail allowed for');
+  const late = dataOf(await save([{ sound: 'steps', at: 50 }]));
+  assert.deepEqual(late.sounds[0].output, [50, 60]);
+  assert.match(late.warnings.join(), /steps\): runs past the end/);
+  // A video render gets each sound with its effects made on the server; stills get none.
+  await client.callTool({ name: 'preview_edit', arguments: { footage: id, version: answer.version, frames: [5] } });
+  assert.deepEqual(calls.at(-1).body.props.spec.sounds, []);
+  const r = dataOf(await client.callTool({ name: 'render_edit', arguments: { footage: id, version: answer.version } }));
+  await settle();
+  const props = calls.at(-1).body.props, fx = props.spec.sounds.find(c => c.sound === 'whoosh').file;
+  assert.match(fx, /^fx-[a-f0-9]{20}$/);
+  assert.deepEqual(Object.keys(props.sounds).sort(), [fx, 'steps'].sort());
+  assert.ok(existsSync(join(footageFiles(dir, id).sounds, `${fx}.wav`)));
+  assert.deepEqual(props.spec.sounds[0].volumeKeys.map(k => k.frame), [0, 20]);
+  // ChatGPT cannot listen, so the finished render reports its loudness over time.
+  const got = dataOf(await client.callTool({ name: 'get_render', arguments: { render: r.render } }));
+  assert.equal(got.audio.every, 0.25);
+  assert.ok(got.audio.db.split(' ').length >= 7, got.audio.db);
+});

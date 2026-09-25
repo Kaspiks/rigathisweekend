@@ -253,13 +253,49 @@ const Hold = z.object({
   frames: z.number().int().min(1).max(30 * FPS).describe('How many OUTPUT frames the freeze lasts (silent)'),
 }).strict();
 
+// Sound effects and music on the timeline, in OUTPUT frames, from sound files uploaded for the clip.
+const Cue = () => z.object({
+  sound: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of a sound uploaded for this footage (list_footage, under sounds)'),
+  at: Frame().describe('OUTPUT frame it starts on, e.g. the frame a cat lands'),
+  volume: z.number().min(0).max(2).default(1).describe('1 as recorded; 0.3 for quiet background steps'),
+  from: z.number().min(0).max(600).default(0).describe('Seconds into the file to start from, to skip silence or pick one hit from a longer recording'),
+  length: z.number().int().min(1).max(100000).optional().describe('OUTPUT frames to play before it is cut (default: to the end of the file); with loop, how long the loop runs'),
+  loop: z.boolean().default(false).describe('Repeat the sound for its whole length, e.g. footsteps under a walk'),
+  fadeIn: z.number().int().min(0).max(300).default(0).describe('Frames to fade in'),
+  fadeOut: z.number().int().min(0).max(300).default(3).describe('Frames to fade out at the end, so a cut never clicks'),
+  speed: z.number().min(0.5).max(2).default(1).describe('Playback speed; changes pitch too'),
+  volumeKeys: z.array(z.object({ frame: z.number().int().min(0).max(100000).describe('Frames from the cue\'s start'), value: z.number().min(0).max(4) }).strict()).min(1).max(100).optional()
+    .describe('Volume over time (multiplies volume), eased between keys: swells, dips, a sound that builds'),
+  duck: z.number().min(0).max(1).optional().describe('While this plays, the clip\'s own sound drops to this level (0.3 = 30%), easing down and back up'),
+  // Effects are applied to the file first (on the server, with ffmpeg); from, length and loop then apply to the result.
+  pan: z.number().min(-1).max(1).default(0).describe('Stereo position: -1 left, 0 centre, 1 right, e.g. following something across the screen'),
+  pitch: z.number().min(-12).max(12).default(0).describe('Pitch shift in semitones without changing speed (-12 an octave down, 12 up)'),
+  reverse: z.boolean().default(false).describe('Play it backwards'),
+  lowpass: z.number().int().min(100).max(20000).optional().describe('Cut frequencies above this many Hz: muffled, through a wall, underwater (e.g. 800)'),
+  highpass: z.number().int().min(20).max(10000).optional().describe('Cut frequencies below this many Hz: thin, like a phone or radio (e.g. 1500)'),
+  bass: z.number().min(-20).max(20).default(0).describe('Bass boost or cut in dB'),
+  treble: z.number().min(-20).max(20).default(0).describe('Treble boost or cut in dB'),
+  echo: z.object({ delay: z.number().int().min(20).max(2000).default(250).describe('Milliseconds between repeats'), decay: z.number().min(0.05).max(0.9).default(0.4).describe('How loud each repeat is') }).strict().optional(),
+  reverb: z.number().min(0).max(1).default(0).describe('Room sound: 0.2 a small room, 0.6 a hall, 1 a cathedral'),
+  normalize: z.boolean().default(false).describe('Even out the loudness first, for sounds recorded too quiet or too loud'),
+}).strict();
+
+// Echo and reverb ring on after a sound ends: the processed file gets this much silence added so the
+// tail is heard, and the cue's natural length includes it.
+export const tailSeconds = cue => Math.min(4, (cue.echo ? (cue.echo.delay / 1000) * 4 : 0) + (cue.reverb ? 0.4 + cue.reverb * 2 : 0));
+export const soundEffects = cue => !!(cue.pan || cue.pitch || cue.reverse || cue.lowpass || cue.highpass || cue.bass || cue.treble || cue.echo || cue.reverb || cue.normalize);
+
 const AnchorKeys = () => z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(900);
 
 export const EditSpec = z.object({
   format: z.enum(Object.keys(FORMATS)).default('vertical').describe('vertical 1080×1920 (Reels, Stories), portrait 1080×1350, square 1080×1080, landscape 1920×1080'),
   fit: z.enum(['cover', 'contain']).default('cover').describe('cover fills the frame and crops; contain shows the whole clip on the background'),
   background: Color().default('ink'),
-  audio: z.enum(['source', 'mute']).default('source'),
+  audio: z.enum(['source', 'mute']).default('source').describe('The clip\'s own sound; sound effects in sounds play either way'),
+  sourceVolume: z.number().min(0).max(2).default(1).describe('Volume of the clip\'s own sound, e.g. 0.4 to keep the café ambience under the effects'),
+  sourceKeys: z.array(z.object({ frame: Frame().describe('OUTPUT frame'), value: z.number().min(0).max(4) }).strict()).min(1).max(200).optional()
+    .describe('The clip\'s own sound over time (multiplies sourceVolume), eased between keys: fade it out at the end, swell it on a reveal'),
+  sounds: z.array(Cue()).max(60).default([]).describe('Sound effects and music placed on OUTPUT frames: steps, a whoosh on a jump, a poof, a music bed'),
   timeline: z.array(z.union([Play, Hold])).min(1).max(40).optional()
     .describe('The cut, in order: {from,to[,speed]} plays source frames, {hold,frames} freezes one. Leave out to play the whole clip once'),
   // Anchor names are checked in planEdit: a key pattern in the schema becomes propertyNames, which
@@ -298,10 +334,10 @@ const pos = s => typeof s === 'string' ? `anchor '${s}'` : null;
 
 // Checks an edit against the clip it animates and works out its timeline. `footage` is the working
 // copy's info ({frames, width, height}); `assets` maps asset names to {width, height}; `models` maps model
-// names to {animations: [names]}. Returns the
+// names to {animations: [names]}; `sounds` maps sound names to {seconds}. Returns the
 // normalised spec (defaults filled in, so a stored version renders the same later), the plan the
 // renderer follows and the output↔source mapping to show back.
-export function planEdit(input, footage, assets = {}, graphics = {}, models = {}) {
+export function planEdit(input, footage, assets = {}, graphics = {}, models = {}, sounds = {}) {
   const spec = EditSpec.parse(input);
   const errors = [], warnings = [];
   const last = footage.frames - 1;
@@ -408,6 +444,34 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
   for (let k = 1; k < zooms.length; k++)
     if (zooms[k].from < zooms[k - 1].to) errors.push(`layers.${zooms[k].i} (zoom): overlaps the zoom in layers.${zooms[k - 1].i}; one zoom at a time`);
   for (const name of Object.keys(spec.anchors)) if (!used.has(name)) warnings.push(`anchors.${name}: defined but not used by any layer`);
+  // Each cue gets its length worked out (to the end of the file unless cut), so the renderer and the
+  // answer to ChatGPT agree on when every sound starts and stops.
+  const cues = [];
+  spec.sounds.sort((a, b) => a.at - b.at);
+  for (const [i, cue] of spec.sounds.entries()) {
+    const where = `sounds.${i} (${cue.sound})`, file = sounds[cue.sound];
+    if (!file) { errors.push(`${where}: no sound called '${cue.sound}' has been uploaded for this footage (create_upload_link kind sound, or add_sound)`); continue; }
+    if (cue.at >= duration) { errors.push(`${where}: starts at frame ${cue.at}, but the edit is only ${duration} frames long`); continue; }
+    if (cue.from >= file.seconds) { errors.push(`${where}: from ${cue.from} s is past the end of the sound (${file.seconds} s)`); continue; }
+    const natural = Math.max(1, Math.floor(((file.seconds + tailSeconds(cue) - cue.from) / cue.speed) * FPS));
+    if (cue.volumeKeys) {
+      cue.volumeKeys.sort((a, b) => a.frame - b.frame);
+      if (cue.volumeKeys.some((k, n) => n && k.frame === cue.volumeKeys[n - 1].frame)) { errors.push(`${where}: volumeKeys has two keys on one frame`); continue; }
+    }
+    if (cue.loop && cue.length == null) { errors.push(`${where}: a looping sound needs a length in frames`); continue; }
+    let length = cue.length ?? natural;
+    if (!cue.loop && length > natural) { warnings.push(`${where}: the sound ends after ${natural} frames, before its length of ${length}`); length = natural; }
+    if (cue.at + length > duration) { warnings.push(`${where}: runs past the end of the edit, so it is cut at frame ${duration}`); length = duration - cue.at; }
+    cue.length = length;
+    cue.fadeIn = Math.min(cue.fadeIn, length); cue.fadeOut = Math.min(cue.fadeOut, length - cue.fadeIn);
+    cues.push({ sound: cue.sound, output: [cue.at, cue.at + length], seconds: [Math.round((cue.at / FPS) * 100) / 100, Math.round(((cue.at + length) / FPS) * 100) / 100], ...(cue.loop ? { loop: true } : {}) });
+  }
+  if (spec.sourceKeys) {
+    spec.sourceKeys.sort((a, b) => a.frame - b.frame);
+    if (spec.sourceKeys.some((k, n) => n && k.frame === spec.sourceKeys[n - 1].frame)) errors.push('sourceKeys: two keys on one frame');
+  }
+  if (spec.audio === 'mute' && (spec.sourceVolume !== 1 || spec.sourceKeys || spec.sounds.some(c => c.duck != null))) warnings.push('sourceVolume, sourceKeys and duck have no effect while audio is mute');
+
   const needsDepth = spec.layers.some(l => ['blur', 'fog', 'parallax'].includes(l.type) || l.depth != null || l.path?.some(k => k.depth != null));
   if (spec.depth) {
     if (spec.depth.video && !footage.depth) errors.push('depth.video: this clip has no per-frame depth yet; compute it from create_download_link and upload it with create_upload_link kind depth');
@@ -428,6 +492,7 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     timeline: segments.map(s => s.hold
       ? { output: [s.from, s.to], hold: s.source }
       : { output: [s.from, s.to], source: [s.source, s.sourceTo], ...(s.speed !== 1 ? { speed: s.speed } : {}) }),
+    cues,
     warnings,
   };
 }
@@ -580,6 +645,31 @@ Use get_depth to read values at points (the rim might be 0.72, the window 0.15).
 - {"type":"blur","focus":0.7,"range":0.12,"amount":14}: depth of field, sharp around the focus.
 - {"type":"fog","strength":0.6,"start":0.5}: haze that thickens with distance.
 - {"type":"parallax","move":"pan","amount":0.04}: a 2.5D camera move; best on a freeze.
+
+## Sound effects and music
+Upload sounds for the clip (create_upload_link kind "sound", add_sound with a file or a public link to the
+audio file, or the owner adds them on the dashboard under Sounds): MP3, WAV, OGG, FLAC or M4A, up to 3 minutes.
+list_footage shows each with its length. Place them in "sounds", on OUTPUT frames:
+"sounds": [
+  {"sound":"paw-steps","at":0,"length":140,"loop":true,"volume":0.35,"fadeIn":6,"fadeOut":10},
+  {"sound":"whoosh","at":138,"volume":0.8,"pan":0.3},
+  {"sound":"poof","at":163,"volume":1.2,"duck":0.3,"reverb":0.3},
+  {"sound":"steam","at":166,"volume":0.5,"fadeOut":20,"lowpass":2500}
+]
+- Timing: "at" is the frame the sound starts; "from" skips into the file (seconds); "length" cuts it (frames);
+  "loop" repeats it for its length (footsteps under a walk). save_edit answers with each sound's frames and seconds.
+- Level: "volume" 0–2 (1 as recorded, above 1 louder); "fadeIn"/"fadeOut" in frames; "volumeKeys" for changes
+  over time ([{"frame":0,"value":0.2},{"frame":30,"value":1}], frames from the sound's start).
+- The clip's own sound: "sourceVolume" (0.4 keeps café ambience low), "sourceKeys" to change it over OUTPUT
+  frames (fade it out at the end), and "duck" on a sound to dip the clip's sound while that sound plays.
+  "audio":"mute" silences the clip but still plays the sounds.
+- Effects (made on the server before rendering): "pan" -1 left … 1 right (follow something across the screen),
+  "pitch" in semitones (a smaller cat: +4), "speed" (changes pitch too), "reverse", "lowpass"/"highpass" in Hz
+  (muffled / tinny), "bass"/"treble" in dB, "echo" {"delay":ms,"decay"}, "reverb" 0–1, "normalize" for quiet files.
+  Echo and reverb ring on after the sound ends; the length allows for it.
+- You cannot hear the render, but get_render on a video gives its loudness every quarter second: check each sound
+  starts where you placed it (a jump from about -60 dB) and nothing is far louder than the rest.
+- Credit CC-BY sounds in the post caption; CC0 needs no credit.
 
 ## Tips
 - Layers are drawn in list order, later on top. Illustrate layers are the exception: they redraw the footage itself,
