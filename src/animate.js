@@ -18,6 +18,7 @@ import {
 import { fetchPublic } from './photos.js';
 import { MAX_MODEL, deleteModel, modelList, saveModel } from './models.js';
 import { depthEstimateSeconds, depthLimits, depthModel, makeDepth } from './depth.js';
+import http from 'node:http';
 
 const fail = (message, httpStatus = 400) => Object.assign(new Error(message), { httpStatus });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -104,7 +105,30 @@ export async function assetList(dir, id) {
   }));
 }
 
-export function createAnimator(app, store, env = process.env, { fetcher = fetch, previewWaitMs = 45000, busyWaitMs = 10000 } = {}) {
+// Node's global fetch is undici, and its headersTimeout and bodyTimeout are both 300s. Neither is
+// governed by the AbortSignal we pass, so a clip render that runs longer than five minutes is killed
+// by the CLIENT even after the render service was told to hold the connection - the caller sees
+// UND_ERR_HEADERS_TIMEOUT. node:http has no such default, so the clip call gets this transport
+// instead. It speaks just enough of the fetch response shape for the one call site, and RENDER_URL is
+// an internal http:// service, so there is no TLS to handle.
+const longFetch = (url, { method = 'GET', headers = {}, body, signal } = {}) => new Promise((ok, fail) => {
+  const u = new URL(url);
+  const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers }, res => {
+    let raw = '';
+    res.setEncoding('utf8');
+    res.on('data', c => { raw += c; });
+    res.on('end', () => ok({
+      ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode,
+      json: async () => JSON.parse(raw || '{}'), text: async () => raw,
+    }));
+  });
+  req.on('error', fail);
+  if (signal) signal.addEventListener('abort', () => req.destroy(Object.assign(new Error('Rendering took too long'), { name: 'TimeoutError' })), { once: true });
+  if (body) req.write(body);
+  req.end();
+});
+
+export function createAnimator(app, store, env = process.env, { fetcher = fetch, clipFetcher = fetcher === fetch ? longFetch : fetcher, previewWaitMs = 45000, busyWaitMs = 10000 } = {}) {
   const tracked = job => { app.locals.renders.add(job); job.finally(() => app.locals.renders.delete(job)); return job; };
   const renderUrl = () => (env.RENDER_URL || '').replace(/\/$/, '');
   const origin = (env.APP_ORIGIN || '').replace(/\/$/, ''); // links in MCP answers open the dashboard's copy
@@ -186,7 +210,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null, models } });
       let out;
       for (let waited = 0; ; waited++) {
-        const r = await fetcher(`${renderUrl()}/clip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(job.kind === 'stills' ? 5 * 60000 : 60 * 60000) });
+        const r = await clipFetcher(`${renderUrl()}/clip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(job.kind === 'stills' ? 5 * 60000 : 60 * 60000) });
         out = await r.json().catch(() => ({}));
         if (r.status === 409 && out.busy && waited < 90) { await sleep(busyWaitMs); continue; }
         if (!r.ok) throw new Error(out.error || `Render service returned HTTP ${r.status}`);
@@ -207,7 +231,8 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       if (job.kind === 'video') try { out = { ...out, sheet: await videoSheet(f.id, job.id, out) }; } catch (err) { console.error(`Frame sheet for render ${job.id}: ${err.message}`); }
       store.finishFootageRender(job.id, null, out);
     } catch (err) {
-      store.finishFootageRender(job.id, err.name === 'TimeoutError' ? 'Rendering took too long' : err.message);
+      const cause = err.cause?.code || err.cause?.message;
+      store.finishFootageRender(job.id, err.name === 'TimeoutError' ? 'Rendering took too long' : cause ? `${err.message} (${cause})` : err.message);
     }
   }
   setImmediate(pump); // renders still queued from before a restart

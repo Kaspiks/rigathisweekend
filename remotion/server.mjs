@@ -110,7 +110,7 @@ function localFile(url) {
   return null;
 }
 
-http.createServer(async (req, res) => {
+const server = http.createServer(async (req, res) => {
   try {
     const local = req.method === 'GET' && localFile(req.url);
     if (local) {
@@ -129,4 +129,15 @@ http.createServer(async (req, res) => {
   } catch (err) {
     send(res, err.status || (err.code === 'ENOENT' ? 404 : 500), { error: err.message });
   }
-}).listen(PORT, '0.0.0.0', () => console.log(`Render service on :${PORT}`));
+});
+
+// A clip render holds its connection open for the whole job, and Node's default requestTimeout of
+// 300s destroys that socket mid-render: the handler carries on working while the caller gets an
+// ECONNRESET, which undici reports only as "fetch failed". Every video render longer than five
+// minutes died this way while stills, being quicker, always survived.
+//
+// The client already owns the deadline (the app aborts a video render at 60 minutes), so this is a
+// backstop set just past it rather than 0 - a socket that somehow outlives the client still gets
+// collected instead of pinning `busy` forever.
+server.requestTimeout = 65 * 60_000;
+server.listen(PORT, '0.0.0.0', () => console.log(`Render service on :${PORT}`));
