@@ -33,7 +33,8 @@ a separate button sends a WhatsApp digest through WAHA.
 - Animated edits over your own footage (docs/chatgpt-video.md): `src/footage.js` (upload streaming, ffprobe, 30 fps
   working copy, contact sheets, gridded frames), `src/edits.js` (edit JSON schema, output↔source timeline, the guide
   ChatGPT reads), `src/animate.js` (dashboard routes, serial processing and render queues, the footage MCP tools),
-  `remotion/src/FootageEdit.tsx` + `remotion/src/edit/` (composition, SVG drawing filters, stickers, text),
+  `src/models.js` (GLB checks for 3D models), `remotion/src/FootageEdit.tsx` + `remotion/src/edit/` (composition, SVG
+  drawing filters, stickers, text, graphics, depth, `Model3D.tsx` for 3D models with Three.js),
   `remotion/server.mjs` POST /clip, `test/footage.test.js`.
 
 ## Current live state

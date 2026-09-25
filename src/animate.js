@@ -16,6 +16,7 @@ import {
   importDepth, depthAt, depthFrameName,
 } from './footage.js';
 import { fetchPublic } from './photos.js';
+import { MAX_MODEL, deleteModel, modelList, saveModel } from './models.js';
 
 const fail = (message, httpStatus = 400) => Object.assign(new Error(message), { httpStatus });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -37,7 +38,7 @@ async function storeAsset(store, id, name, buffer) {
 }
 
 // The only routes that need no login. The token is the permission: made by an authorised MCP call and
-// gone after 30 minutes. PUT or POST /u/<token> takes one picture, or a clip's per-frame depth video, and
+// gone after 30 minutes. PUT or POST /u/<token> takes one picture, 3D model or clip's per-frame depth video, and
 // works once. GET /d/<token> hands out a clip's working copy, so ChatGPT can compute depth from it.
 // Mounted before the login check in app.js.
 async function readBody(req, max) {
@@ -70,7 +71,9 @@ export function uploadLinkRoute(store) {
         } finally { await rm(incoming, { force: true }); }
         return;
       }
-      const saved = await storeAsset(store, link.footage, link.name, await readBody(req, MAX_ASSET));
+      const saved = link.kind === 'model'
+        ? { footage: link.footage, ...await saveModel(await readBody(req, MAX_MODEL), footageFiles(store.dir, store.footage(link.footage).id).models, link.name) }
+        : await storeAsset(store, link.footage, link.name, await readBody(req, MAX_ASSET));
       store.finishUploadLink(hash);
       res.status(201).json(saved);
     } catch (err) {
@@ -137,14 +140,15 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     return pumping;
   }
   const withAssets = async id => Object.fromEntries((await assetList(store.dir, id)).map(a => [a.name, { width: a.width, height: a.height }]));
+  const withModels = async id => Object.fromEntries((await modelList(footageFiles(store.dir, id).models)).map(m => [m.name, { animations: m.animations.map(a => a.name) }]));
   async function runRender(job) {
     try {
       const f = store.footage(job.footage);
       if (f.status !== 'ready') throw new Error('The footage is not ready');
-      const work = f.info.work, assets = await withAssets(f.id);
-      const { spec, plan } = planEdit(store.edit(f.id, job.version).spec, clipInfo(f), assets, store.graphics());
+      const work = f.info.work, assets = await withAssets(f.id), models = await withModels(f.id);
+      const { spec, plan } = planEdit(store.edit(f.id, job.version).spec, clipInfo(f), assets, store.graphics(), models);
       const body = JSON.stringify({ footage: f.id, render: job.id, kind: job.kind, ...job.request,
-        props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null } });
+        props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null, models } });
       let out;
       for (let waited = 0; ; waited++) {
         const r = await fetcher(`${renderUrl()}/clip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(job.kind === 'stills' ? 5 * 60000 : 60 * 60000) });
@@ -203,6 +207,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       source: f.info?.source ?? null,
       depth: f.info?.depth ? { frames: f.info.depth.frames, updated: f.info.depth.updated } : null,
       assets: await assetList(store.dir, f.id),
+      models: await modelList(footageFiles(store.dir, f.id).models),
       edits: store.edits(f.id),
       renders: store.footageRenders(f.id).slice(0, 10).map(renderSummary),
     };
@@ -219,7 +224,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   async function videoRequest(f, version, quality, from, to) {
     if (!renderUrl()) throw fail('The render service is not configured (RENDER_URL)', 409);
     const edit = store.edit(f.id, version);
-    const { plan } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics());
+    const { plan } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id));
     const last = plan.durationInFrames - 1;
     const range = from != null || to != null ? [Math.min(last, from ?? 0), Math.min(last, to ?? last)] : null;
     if (range && range[1] < range[0]) throw fail('`to` must not be before `from`');
@@ -277,6 +282,18 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     await rm(join(footageFiles(store.dir, f.id).assets, `${req.params.name}.png`), { force: true });
     res.json({ ok: true });
   });
+  // 3D models (.glb), checked before they are kept (src/models.js).
+  app.post('/api/footage/:id/models/:name', express.raw({ type: () => true, limit: MAX_MODEL }), async (req, res) => {
+    const f = store.footage(Id.parse(req.params.id)), name = String(req.params.name || '').toLowerCase();
+    if (!ASSET_NAME.test(name)) throw fail('Name the model with lowercase letters, digits and dashes (up to 32), e.g. cat');
+    res.status(201).json(await saveModel(req.body, footageFiles(store.dir, f.id).models, name));
+  });
+  app.delete('/api/footage/:id/models/:name', async (req, res) => {
+    const f = store.footage(Id.parse(req.params.id));
+    if (!ASSET_NAME.test(req.params.name)) throw fail('No such model');
+    await deleteModel(footageFiles(store.dir, f.id).models, req.params.name);
+    res.json({ ok: true });
+  });
   app.post('/api/footage/:id/renders', async (req, res) => {
     const f = ready(Id.parse(req.params.id));
     const body = z.object({ version: z.number().int().min(1).optional(), quality: z.enum(['draft', 'final']).default('final') }).parse(req.body || {});
@@ -300,7 +317,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
 
   function register(server) {
     server.registerTool('list_footage', {
-      description: 'List uploaded video clips for animated edits: id, status (processing/ready/failed), length in frames at 30 fps, size, uploaded pictures (assets), saved edit versions and recent renders.',
+      description: 'List uploaded video clips for animated edits: id, status (processing/ready/failed), length in frames at 30 fps, size, uploaded pictures (assets), 3D models with their animations, saved edit versions and recent renders.',
       inputSchema: {}, annotations: read,
     }, async () => text(await Promise.all(store.footageList().map(summary))));
 
@@ -346,7 +363,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       inputSchema: { footage: Id, version: z.number().int().min(1).optional() }, annotations: read,
     }, async ({ footage, version }) => {
       const f = ready(footage), edit = store.edit(f.id, version ?? null);
-      const { timeline, plan, warnings } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics());
+      const { timeline, plan, warnings } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id));
       return text({ footage: f.id, version: edit.version, note: edit.note, edit: toMcpEdit(edit.spec), durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, warnings, versions: store.edits(f.id) });
     });
 
@@ -355,7 +372,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       inputSchema: { footage: Id, edit: McpEditSpec, note: z.string().trim().max(200).optional().describe('What changed, for the version list') }, annotations: write,
     }, async ({ footage, edit, note }) => {
       const f = ready(footage);
-      const { spec, plan, timeline, warnings } = planEdit(fromMcpEdit(edit), clipInfo(f), await withAssets(f.id), store.graphics());
+      const { spec, plan, timeline, warnings } = planEdit(fromMcpEdit(edit), clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id));
       const saved = store.saveEdit(f.id, spec, note || null);
       return text({ footage: f.id, version: saved.version, format: spec.format, size: [plan.width, plan.height], fps: FPS, durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, warnings, next: 'preview_edit to check frames, then render_edit' });
     });
@@ -370,7 +387,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async ({ footage, version, frames, scale }) => {
       if (!renderUrl()) throw fail('The render service is not configured (RENDER_URL)');
       const f = ready(footage), edit = store.edit(f.id, version ?? null);
-      const { plan, spec } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics());
+      const { plan, spec } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id));
       const list = frames ? [...new Set(frames)].sort((a, b) => a - b) : previewFrames(plan, spec.layers, 8);
       const outside = list.find(x => x > plan.durationInFrames - 1);
       if (outside != null) throw fail(`Frame ${outside} is past the end of the edit (its last frame is ${plan.durationInFrames - 1})`);
@@ -415,17 +432,19 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async () => text(store.graphicList()));
 
     server.registerTool('create_upload_link', {
-      description: 'A one-time link for sending a file you made in your sandbox to a clip. kind picture (default): a PNG/JPEG/WebP stored as a named asset for image, sequence or depth-still use. kind depth: the clip\'s per-frame depth as a greyscale MP4 (near = white, one frame per clip frame; get the clip with create_download_link). Upload the raw file with PUT or POST as the body, e.g. curl --fail -T file "<url>". Works once, for 30 minutes.',
-      inputSchema: { footage: Id, kind: z.enum(['picture', 'depth']).default('picture'), name: AssetName.optional().describe('Required for a picture') }, annotations: write,
+      description: 'A one-time link for sending a file you made in your sandbox to a clip. kind picture (default): a PNG/JPEG/WebP stored as a named asset for image, sequence or depth-still use. kind model: a 3D model as one binary glTF (.glb, textures embedded, no Draco) for model layers; its animations are listed back. kind depth: the clip\'s per-frame depth as a greyscale MP4 (near = white, one frame per clip frame; get the clip with create_download_link). Upload the raw file with PUT or POST as the body, e.g. curl --fail -T file "<url>". Works once, for 30 minutes.',
+      inputSchema: { footage: Id, kind: z.enum(['picture', 'model', 'depth']).default('picture'), name: AssetName.optional().describe('Required for a picture or model') }, annotations: write,
     }, async ({ footage, kind, name }) => {
       const f = store.footage(footage);
-      if (kind === 'picture' && !name) throw fail('Give the picture a name');
+      if (kind !== 'depth' && !name) throw fail(`Give the ${kind} a name`);
       if (kind === 'depth' && f.status !== 'ready') throw fail('The clip is not ready yet', 409);
       const token = randomBytes(24).toString('base64url'), expires = new Date(Date.now() + LINK_MINUTES * 60000);
       store.addUploadLink(tokenHash(token), f.id, kind === 'depth' ? 'depth' : name, expires, kind);
       const url = `${origin}/u/${token}`;
       if (kind === 'depth') return text({ url, expires: expires.toISOString(), footage: f.id, kind, maxMB: MAX_DEPTH / 1048576, frames: f.info.work.frames,
         upload: `curl --fail -sS -T /path/to/depth.mp4 "${url}"`, then: 'The server checks it has one frame per clip frame, then edits can use "depth":{"video":true}; get_depth reads values.' });
+      if (kind === 'model') return text({ url, expires: expires.toISOString(), footage: f.id, kind, name, maxMB: MAX_MODEL / 1048576, upload: `curl --fail -sS -T /path/to/${name}.glb "${url}"`,
+        then: `The answer lists its animations. Use it as {"type":"model","asset":"${name}","animation":"<one of them>",...}; list_footage shows it under models.` });
       return text({ url, expires: expires.toISOString(), footage: f.id, name, maxMB: MAX_ASSET / 1048576, upload: `curl --fail -sS -T /path/to/${name}.png "${url}"`,
         then: `Use it in an edit as {"type":"image","asset":"${name}",...}; list_footage shows it with its size.` });
     });

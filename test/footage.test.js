@@ -451,3 +451,65 @@ test('ChatGPT can download a clip, send back its per-frame depth and composite w
   assert.throws(() => planEdit({ layers: [{ type: 'fog', from: 0, to: 10 }] }, { frames: 60, width: 64, height: 96 }), /no depth source/);
   assert.throws(() => planEdit({ depth: { stills: [{ from: 0, to: 10, asset: 'nope' }] } }, { frames: 60, width: 64, height: 96 }), /no picture called 'nope'/);
 });
+
+// A small GLB: one triangle and one animation (and one without a name), enough for the checks.
+function glb(extra = {}) {
+  const bin = Buffer.alloc(48);
+  [0, 0, 0, 1, 0, 0, 0, 1, 0].forEach((v, i) => bin.writeFloatLE(v, i * 4)); // positions
+  [0, 1].forEach((v, i) => bin.writeFloatLE(v, 36 + i * 4)); // key times
+  const json = {
+    asset: { version: '2.0' }, buffers: [{ byteLength: 48 }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: 36 }, { buffer: 0, byteOffset: 36, byteLength: 8 }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] }, { bufferView: 1, componentType: 5126, count: 2, type: 'SCALAR', min: [0], max: [1.5] }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }], nodes: [{ mesh: 0 }], scenes: [{ nodes: [0] }],
+    animations: [{ name: 'Walk', samplers: [{ input: 1, output: 1 }], channels: [] }, { samplers: [{ input: 1, output: 1 }], channels: [] }],
+    ...extra,
+  };
+  let text = Buffer.from(JSON.stringify(json));
+  text = Buffer.concat([text, Buffer.alloc((4 - (text.length % 4)) % 4, 0x20)]);
+  const header = Buffer.alloc(12); header.write('glTF', 0, 'latin1'); header.writeUInt32LE(2, 4); header.writeUInt32LE(12 + 8 + text.length + 8 + bin.length, 8);
+  const chunk = (type, data) => { const h = Buffer.alloc(8); h.writeUInt32LE(data.length, 0); h.writeUInt32LE(type, 4); return Buffer.concat([h, data]); };
+  return Buffer.concat([header, chunk(0x4e4f534a, text), chunk(0x004e4942, bin)]);
+}
+
+test('ChatGPT can upload a 3D model and animate it walking along a path', needsFfmpeg, async t => {
+  const { dir, base, upload, settle, mcp, calls } = await setup(t);
+  const { id } = await upload(await readFile(await rampClip(dir))).then(json); await settle();
+  const client = await mcp();
+  const unnamed = await client.callTool({ name: 'create_upload_link', arguments: { footage: id, kind: 'model' } });
+  assert.ok(unnamed.isError); assert.match(unnamed.content[0].text, /name/);
+  const link = dataOf(await client.callTool({ name: 'create_upload_link', arguments: { footage: id, kind: 'model', name: 'cat' } }));
+  assert.match(link.upload, /cat\.glb/);
+  const put = body => fetch(base + new URL(link.url).pathname, { method: 'PUT', body });
+  const refused = async (body, pattern) => { const r = await put(body); assert.equal(r.status, 400); assert.match((await r.json()).error, pattern); };
+  await refused(Buffer.from('solid cube\nendsolid'), /not a GLB/);
+  await refused(glb({ extensionsRequired: ['KHR_draco_mesh_compression'] }), /Draco/);
+  await refused(glb({ buffers: [{ byteLength: 48, uri: 'cat.bin' }] }), /separate file/);
+  await refused(glb({ images: [{ uri: 'https://example.com/fur.png' }] }), /separate file/);
+  const ok = await put(glb());
+  assert.equal(ok.status, 201, 'failed tries leave the link usable');
+  const saved = await ok.json();
+  assert.deepEqual(saved.animations, [{ name: 'Walk', seconds: 1.5 }, { name: 'animation_1', seconds: 1.5 }]);
+  assert.equal(saved.triangles, 1);
+  assert.equal((await put(glb())).status, 404, 'a link works once');
+  const listed = dataOf(await client.callTool({ name: 'list_footage', arguments: {} }))[0].models;
+  assert.deepEqual(listed.map(m => [m.name, m.animations.length]), [['cat', 2]]);
+  // Animation names are checked against the model, and the renderer is told which models there are.
+  const layer = { type: 'model', from: 0, to: 50, asset: 'cat', animation: 'Walk', facing: 'path', path: [{ frame: 0, x: 0.1, y: 0.7 }, { frame: 49, x: 0.8, y: 0.7 }] };
+  const wrong = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers: [{ ...layer, actions: [{ frame: 40, animation: 'Sit' }] }] } } });
+  assert.ok(wrong.isError); assert.match(wrong.content[0].text, /no animation called 'Sit' \(it has 'Walk', 'animation_1'\)/);
+  const missing = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers: [{ ...layer, asset: 'dog' }] } } });
+  assert.ok(missing.isError); assert.match(missing.content[0].text, /no 3D model called 'dog'/);
+  const good = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers: [{ ...layer, actions: [{ frame: 40, animation: 'animation_1', loop: false }] }] } } });
+  assert.ok(!good.isError, good.content?.[0]?.text);
+  await client.callTool({ name: 'preview_edit', arguments: { footage: id, frames: [5] } });
+  const sent = calls.at(-1).body.props;
+  assert.deepEqual(sent.models, { cat: { animations: ['Walk', 'animation_1'] } });
+  assert.deepEqual([sent.spec.layers[0].size, sent.spec.layers[0].pin, sent.spec.layers[0].blend], [0.2, 'feet', 8], 'defaults are filled in');
+  // Models can also be added and removed from the dashboard.
+  const auth = { Authorization: `Bearer ${'f'.repeat(32)}` };
+  const dash = await fetch(`${base}/api/footage/${id}/models/fox`, { method: 'POST', headers: { ...auth, 'Content-Type': 'model/gltf-binary' }, body: glb() });
+  assert.equal(dash.status, 201);
+  await fetch(`${base}/api/footage/${id}/models/fox`, { method: 'DELETE', headers: auth });
+  assert.deepEqual(dataOf(await client.callTool({ name: 'list_footage', arguments: {} }))[0].models.map(m => m.name), ['cat']);
+});

@@ -27,10 +27,14 @@ export type GraphicElement = {
 };
 export type GraphicLayer = Span & { type: 'graphic'; use?: string; viewBox?: { width: number; height: number }; loop?: number; elements?: GraphicElement[];
   at?: Place; offset?: Point; path?: PathKey[]; facing: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none' };
+export type ModelLayer = Span & { type: 'model'; asset: string; animation?: string; speed: number; loop: boolean; actions?: { frame: number; animation: string; speed?: number; loop?: boolean }[]; blend: number;
+  at?: Place; offset?: Point; path?: PathKey[]; facing: 'as-made' | 'path'; angle: number; pin: 'feet' | 'center'; size: number; turn: number; tilt: number;
+  keys?: Partial<Record<'turn' | 'tilt' | 'spin' | 'roll' | 'scale', Track>>; light: 'left' | 'right' | 'front' | 'top' | 'back'; brightness: number; shadow: number;
+  look: 'as-made' | 'toon'; boil: boolean; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none' };
 export type BlurLayer = Span & { type: 'blur'; focus: number; range: number; amount: number; near: boolean };
 export type FogLayer = Span & { type: 'fog'; color: string; strength: number; start: number };
 export type ParallaxLayer = Span & { type: 'parallax'; move: 'pan' | 'tilt' | 'orbit'; amount: number };
-export type Layer = TextLayer | StickerLayer | IllustrateLayer | ImageLayer | SequenceLayer | GraphicLayer | BlurLayer | FogLayer | ParallaxLayer | ZoomLayer | ShakeLayer | FlashLayer;
+export type Layer = TextLayer | StickerLayer | IllustrateLayer | ImageLayer | SequenceLayer | GraphicLayer | ModelLayer | BlurLayer | FogLayer | ParallaxLayer | ZoomLayer | ShakeLayer | FlashLayer;
 export type Keyframe = { frame: number; x: number; y: number };
 export type DepthSpec = { video: boolean; stills?: { from: number; to: number; asset: string }[]; near: 'white' | 'black' };
 export type Spec = { format: string; fit: 'cover' | 'contain'; background: string; audio: 'source' | 'mute'; anchors: Record<string, Keyframe[]>; layers: Layer[]; depth?: DepthSpec };
@@ -38,7 +42,7 @@ export type Segment = { from: number; to: number; source: number; hold?: boolean
 export type Plan = { width: number; height: number; fps: number; durationInFrames: number; segments: Segment[] };
 export type Asset = { src: string; width: number; height: number };
 export type DepthFrames = { base: string; frames: number };
-export type FootageEditProps = { spec: Spec; plan: Plan; video: string; assets: Record<string, Asset>; source: { width: number; height: number; frames: number }; depth?: DepthFrames | null };
+export type FootageEditProps = { spec: Spec; plan: Plan; video: string; assets: Record<string, Asset>; source: { width: number; height: number; frames: number }; depth?: DepthFrames | null; models?: Record<string, { src: string }> };
 
 export const PALETTE: Record<string, string> = { ink: '#17352d', lime: '#d4ed86', paper: '#f4f0e6', white: '#ffffff', black: '#111111', coral: '#ff6b5b', gold: '#f5c542', sky: '#7cc6fe' };
 export const colour = (c: string | undefined, fallback: string) => (c ? PALETTE[c] ?? c : fallback);
@@ -170,6 +174,17 @@ export function heading(props: FootageEditProps, cam: Camera, base: number, fram
     return { flip, tilt: back ? 0 : flip ? -lean : lean };
   }
   return { flip: false, tilt: 0 };
+}
+
+// For a 3D model on a path: which way it travels across the screen (-1 left … 1 right, eased over a few
+// frames so it turns round through facing the camera) and how much it leans into climbs and dives.
+export function travel(props: FootageEditProps, cam: Camera, base: number, frame: number, layer: Moving & { facing?: string }) {
+  if (layer.facing !== 'path' || !layer.path?.length) return { dir: 0, lean: 0 };
+  const TURN = 8;
+  let sum = 0;
+  for (let back = 0; back < TURN; back++) sum += heading(props, cam, base, frame - back, { ...layer, facing: 'path' }).flip ? -1 : 1;
+  const now = heading(props, cam, base, frame, { ...layer, facing: 'path' });
+  return { dir: sum / TURN, lean: now.tilt };
 }
 
 // Entrance and exit as style: opacity, scale and movement.

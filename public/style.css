@@ -65,6 +65,9 @@ button.small{padding:7px 11px;font-size:12px}
 .clip h4{font-size:14px;margin:18px 0 8px}
 .pictures{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
 .pictures figure{margin:0;font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:4px;align-items:flex-start}
+.models{list-style:none;padding:0;margin:0 0 8px;font-size:13px;color:var(--muted)}
+.models li{margin:4px 0}
+.models strong{color:var(--ink,inherit)}
 .pictures img{height:90px;border-radius:4px;background:repeating-conic-gradient(#eee 0 25%,#fff 0 50%) 0 0/16px 16px}
 .renders{list-style:none;padding:0;margin:0}
 .renders li{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}

@@ -268,6 +268,7 @@ function clipCard(c){
   const poster=ready?`<a href="${clipFile(c,'work.mp4')}" target="_blank" rel="noopener"><img src="${clipFile(c,'poster.jpg')}" alt="${esc(c.name)}"></a>`:'<div class="blank"></div>';
   const edit=last?`Edit version ${last.version}${last.note?` · ${esc(last.note)}`:''} · saved ${esc(riga(last.created))}`:'No edit yet. In ChatGPT, ask it to animate this clip.';
   const pictures=c.assets.map(a=>`<figure><a href="${clipFile(c,`assets/${a.name}.png`)}?v=${stamp}" target="_blank" rel="noopener"><img loading="lazy" src="${clipFile(c,`assets/${a.name}.png`)}?v=${stamp}" alt="${esc(a.name)}"></a><span>${esc(a.name)} · ${a.width}×${a.height}</span><button class="secondary small" data-unasset="${c.id}" data-name="${esc(a.name)}">Remove</button></figure>`).join('');
+  const models=(c.models||[]).map(m=>`<li><strong>${esc(m.name)}</strong> · ${m.animations.length?`animations: ${m.animations.map(a=>esc(a.name)).join(', ')}`:'no animations'} · ${m.mb} MB <button class="secondary small" data-unmodel="${c.id}" data-name="${esc(m.name)}">Remove</button></li>`).join('');
   const off=!last||!footageRenderable||busy?' disabled':'';
   return `<article class="clip">
     <div class="clip-poster">${poster}</div>
@@ -279,7 +280,9 @@ function clipCard(c){
       <div class="toolbar"><button class="small" data-clip-render="${c.id}" data-quality="final"${off}>Render video</button><button class="secondary small" data-clip-render="${c.id}" data-quality="draft"${off}>Quick draft (half size)</button></div>
       ${footageRenderable?'':'<p class="hint">The render service is not configured (RENDER_URL), so edits cannot be rendered here yet.</p>'}
       <h4>Pictures</h4><p class="hint">Images an edit can use by name: an illustrated frame to line up over the footage, a logo, a drawing. PNG keeps transparency.</p>
-      <div class="pictures">${pictures}<button class="secondary small" data-asset="${c.id}">Add picture</button></div>`:''}
+      <div class="pictures">${pictures}<button class="secondary small" data-asset="${c.id}">Add picture</button></div>
+      <h4>3D models</h4><p class="hint">Animated models (.glb, textures embedded) an edit can place in the shot, e.g. a cat that walks and sits.</p>
+      ${models?`<ul class="models">${models}</ul>`:''}<button class="secondary small" data-model="${c.id}">Add 3D model</button>`:''}
       ${c.renders.length?`<h4>Renders</h4><ul class="renders">${c.renders.map(r=>renderRow(c,r)).join('')}</ul>`:''}
       <div class="toolbar">${c.status==='failed'?`<button class="secondary small" data-clip-retry="${c.id}">Retry processing</button>`:''}<button class="secondary small" data-clip-delete="${c.id}"${busy||clipBusy(c)?' disabled':''}>Delete clip</button></div>
     </div>
@@ -288,7 +291,7 @@ function clipCard(c){
 // Redraw only when something changed, so a video you are watching is not reset by the refresh.
 function showFootage(d){
   footageRenderable=d.renderConfigured;
-  const sig=JSON.stringify(d.footage.map(c=>[c.id,c.status,c.progress,c.name,c.edits.length,c.assets,c.renders.map(r=>[r.render,r.status])]));
+  const sig=JSON.stringify(d.footage.map(c=>[c.id,c.status,c.progress,c.name,c.edits.length,c.assets,c.models,c.renders.map(r=>[r.render,r.status])]));
   if(sig===footageSig) return;
   footageSig=sig;
   $('#clips').innerHTML=d.footage.length?d.footage.map(clipCard).join(''):`<p class="empty">No footage yet. Upload a clip (up to ${d.limits.mb} MB and ${Math.round(d.limits.seconds/60)} minutes) to start.</p>`;
@@ -327,10 +330,20 @@ function footageClick(b){
     });
     return true;
   }
+  if(b.dataset.model){
+    pickFile('.glb,model/gltf-binary').then(f=>{
+      if(!f)return;
+      const suggested=f.name.replace(/\.[^.]+$/,'').toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,32)||'model';
+      const name=prompt('Name for this model (lowercase letters, digits and dashes). ChatGPT refers to it by this name.',suggested);
+      if(name) action(()=>sendFile(`/api/footage/${b.dataset.model}/models/${encodeURIComponent(name.trim())}`,f));
+    });
+    return true;
+  }
+  if(b.dataset.unmodel){if(confirm(`Remove the model "${b.dataset.name}"? Edits that use it will not render until it is back.`))action(()=>removeAt(`/api/footage/${b.dataset.unmodel}/models/${b.dataset.name}`));return true;}
   if(b.dataset.unasset){if(confirm(`Remove the picture "${b.dataset.name}"? Edits that use it will not render until it is back.`))action(()=>removeAt(`/api/footage/${b.dataset.unasset}/assets/${b.dataset.name}`));return true;}
   if(b.dataset.clipRender){action(()=>api(`/api/footage/${b.dataset.clipRender}/renders`,{quality:b.dataset.quality}));return true;}
   if(b.dataset.clipRetry){action(()=>api(`/api/footage/${b.dataset.clipRetry}/retry`,{}));return true;}
-  if(b.dataset.clipDelete){if(confirm('Delete this clip with its edits, pictures and renders? Download anything you want to keep first.'))action(()=>removeAt(`/api/footage/${b.dataset.clipDelete}`));return true;}
+  if(b.dataset.clipDelete){if(confirm('Delete this clip with its edits, pictures, models and renders? Download anything you want to keep first.'))action(()=>removeAt(`/api/footage/${b.dataset.clipDelete}`));return true;}
   return false;
 }
 load().catch(e=>{$('#status').textContent=e.message;});

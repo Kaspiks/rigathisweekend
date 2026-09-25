@@ -151,6 +151,44 @@ const Graphic = z.object({
   exit: z.enum(['pop', 'fade', 'none']).default('fade'),
 }).strict();
 
+// A 3D model (.glb uploaded for the clip) with its own animations, placed like any other layer. Angles
+// are degrees; keys count frames from the layer's start, like a graphic's.
+const Degrees = () => z.number().min(-720).max(720);
+const AnimationName = () => z.string().min(1).max(80);
+const Model = z.object({
+  type: z.literal('model'), ...Span(),
+  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of a 3D model uploaded for this footage (list_footage, under models)'),
+  animation: AnimationName().optional().describe('Which of the model\'s animations plays from the layer\'s start (names from list_footage); leave out to hold its rest pose'),
+  speed: z.number().min(0.1).max(4).default(1).describe('Animation speed; 1 is as made'),
+  loop: z.boolean().default(true).describe('Repeat the animation, or stop on its last pose'),
+  actions: z.array(z.object({
+    frame: Frame().describe('OUTPUT frame this animation takes over'),
+    animation: AnimationName(),
+    speed: z.number().min(0.1).max(4).optional(), loop: z.boolean().optional().describe('Default true; false plays once and holds the last pose (sitting down, landing)'),
+  }).strict()).max(20).optional().describe('Switch animations during the layer, e.g. walk then sit: [{"frame":130,"animation":"Sit","loop":false}]'),
+  blend: z.number().int().min(0).max(30).default(8).describe('Frames to cross-fade between animations'),
+  at: Place().optional().describe('Where it stands (with pin feet, its feet are here)'), offset: Offset().optional(), path: Path(), depth: Depth(),
+  facing: z.enum(['as-made', 'path']).default('as-made').describe('path: turns to walk or fly the way it moves along `path`, turning round through facing the camera'),
+  angle: z.number().min(0).max(90).default(65).describe('With facing path: 90 is a side view, less turns it towards the camera'),
+  pin: z.enum(['feet', 'center']).default('feet').describe('Which point of the model sits on `at`: its feet (standing on something) or its middle (flying)'),
+  size: z.number().min(0.02).max(1.5).default(0.2).describe('Height of the model as a fraction of the finished frame\'s height'),
+  turn: Degrees().default(0).describe('Turn around its vertical axis: 0 faces the camera, 90 faces right, -90 faces left, 180 away'),
+  tilt: z.number().min(-60).max(80).default(15).describe('How far we look down on it: 0 level, 30 from above like a phone over a table. Match the footage'),
+  keys: z.object({
+    turn: Track().optional().describe('Degrees, replaces turn over time'), tilt: Track().optional(),
+    spin: Track().optional().describe('Degrees added to turn, e.g. a turntable 0→360'), roll: Track().optional().describe('Degrees of sideways lean'),
+    scale: Track().optional().describe('Multiplies size'),
+  }).strict().optional().describe('Keyframed turns, tilts and scale; frames count from the layer\'s start'),
+  light: z.enum(['left', 'right', 'front', 'top', 'back']).default('left').describe('Where the main light comes from; match the light in the footage so it sits in the shot'),
+  brightness: z.number().min(0.2).max(3).default(1),
+  shadow: Unit().default(0.35).describe('Darkness of the shadow it casts on the ground under it; 0 for none (flying)'),
+  look: z.enum(['as-made', 'toon']).default('as-made').describe('toon: flat cartoon shading with an ink outline, to match illustrated moments'),
+  boil: z.boolean().default(false).describe('Hand-drawn wobble, with look toon'),
+  opacity: Unit().default(1),
+  enter: z.enum(['pop', 'fade', 'none']).default('fade'),
+  exit: z.enum(['pop', 'fade', 'none']).default('fade'),
+}).strict();
+
 // What a graphic needs beyond its schema: each shape has the fields it draws from.
 const NEEDS = { path: ['d'], circle: ['r'], ellipse: ['rx', 'ry'], rect: ['width', 'height'], line: ['x2', 'y2'], text: ['text'] };
 export function graphicErrors(def, where) {
@@ -194,7 +232,7 @@ const Zoom = z.object({
 const Shake = z.object({ type: z.literal('shake'), ...Span(), strength: Unit().default(0.4) }).strict();
 const Flash = z.object({ type: z.literal('flash'), ...Span(), color: Color().default('white') }).strict();
 
-export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Graphic, Blur, Fog, Parallax, Zoom, Shake, Flash]);
+export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Graphic, Model, Blur, Fog, Parallax, Zoom, Shake, Flash]);
 
 const Play = z.object({
   from: Frame().describe('First SOURCE frame'), to: Frame().describe('SOURCE frame to stop before'),
@@ -249,10 +287,11 @@ const fail = message => Object.assign(new Error(message), { httpStatus: 400 });
 const pos = s => typeof s === 'string' ? `anchor '${s}'` : null;
 
 // Checks an edit against the clip it animates and works out its timeline. `footage` is the working
-// copy's info ({frames, width, height}); `assets` maps asset names to {width, height}. Returns the
+// copy's info ({frames, width, height}); `assets` maps asset names to {width, height}; `models` maps model
+// names to {animations: [names]}. Returns the
 // normalised spec (defaults filled in, so a stored version renders the same later), the plan the
 // renderer follows and the output↔source mapping to show back.
-export function planEdit(input, footage, assets = {}, graphics = {}) {
+export function planEdit(input, footage, assets = {}, graphics = {}, models = {}) {
   const spec = EditSpec.parse(input);
   const errors = [], warnings = [];
   const last = footage.frames - 1;
@@ -314,7 +353,23 @@ export function planEdit(input, footage, assets = {}, graphics = {}) {
       if (layer.path[0].frame > layer.from || layer.path.at(-1).frame < layer.to - 1) warnings.push(`${where}: the path does not cover the whole layer, so it waits at its first or last point`);
       if (layer.at != null) warnings.push(`${where}: has both a path and 'at'; the path is used`);
     }
-    if ((layer.type === 'image' && layer.place === 'screen' || ['sequence', 'sticker', 'graphic'].includes(layer.type)) && layer.at == null && !layer.path) layer.at = { x: 0.5, y: 0.5 };
+    if ((layer.type === 'image' && layer.place === 'screen' || ['sequence', 'sticker', 'graphic', 'model'].includes(layer.type)) && layer.at == null && !layer.path) layer.at = { x: 0.5, y: 0.5 };
+    if (layer.type === 'model') {
+      const model = models[layer.asset];
+      if (!model) { errors.push(`${where}: no 3D model called '${layer.asset}' has been uploaded for this footage (create_upload_link kind model)`); continue; }
+      const names = model.animations || [];
+      const known = (name, here) => {
+        if (!names.includes(name)) errors.push(`${here}: '${layer.asset}' has no animation called '${name}' (${names.length ? `it has ${names.map(n => `'${n}'`).join(', ')}` : 'it has none'})`);
+      };
+      if (layer.animation) known(layer.animation, `${where}: animation`);
+      layer.actions?.sort((a, b) => a.frame - b.frame);
+      for (const [k, a] of (layer.actions || []).entries()) {
+        known(a.animation, `${where}: actions.${k}`);
+        if (a.frame < layer.from || a.frame >= layer.to) warnings.push(`${where}: actions.${k} at frame ${a.frame} is outside the layer (${layer.from}–${layer.to - 1})`);
+      }
+      if (!layer.animation && !layer.actions?.length && names.length) warnings.push(`${where}: no animation is chosen, so '${layer.asset}' holds still; it has ${names.map(n => `'${n}'`).join(', ')}`);
+      if (layer.facing === 'path' && !layer.path) warnings.push(`${where}: facing path needs a path`);
+    }
     if (layer.type === 'graphic') {
       // A saved graphic is copied in, so this version keeps rendering the same even if the library changes.
       if (layer.use && layer.elements) { errors.push(`${where}: give either use or elements, not both`); continue; }
@@ -460,6 +515,29 @@ A bird with flapping wings (looping every 8 frames), flown along a path:
 Confetti: one small rect with "repeat":{"count":30,"delay":2,"dx":9,"rotate":40} and keys on y and rotate.
 save_graphic stores a graphic by name so later edits use {"type":"graphic","use":"bird"}; list_graphics shows them.
 
+## 3D models: a cat that walks round the cup and sits down
+A model layer draws a real 3D model (.glb) in the shot, playing its own animations (walk, run, idle, sit…).
+- Get a model: an animated, low-poly GLB with everything embedded and no Draco compression. Free sources:
+  Poly Pizza (CC0 animated animals and characters by Quaternius), Sketchfab (download as glTF binary), Mixamo
+  (characters with walk cycles, converted to GLB). Or build one in your sandbox (trimesh or pygltflib; for
+  animation, export node rotation keyframes, e.g. legs swinging).
+- Upload it: create_upload_link with kind "model" and a name, then curl -T cat.glb "<url>". The answer (and
+  list_footage under models) lists its animations by name and length; use those names exactly.
+- Place it like any layer: "at" (its feet stand there with the default pin "feet"), or a path. "size" is its
+  height as a fraction of the frame height. "turn" 0 faces the camera, 90 faces right; "facing":"path" turns
+  it to walk the way it moves, turning round through facing you. "tilt" is how far we look down on it: match
+  the footage (a phone above a table is about 25). "light" says where the key light comes from: match the shot.
+  It casts a soft shadow under itself ("shadow" 0 for none).
+- Animations: "animation" plays from the layer's start; "actions" switch at OUTPUT frames, cross-fading.
+{"type":"model","asset":"cat","from":90,"to":210,"animation":"Walk","facing":"path","size":0.14,"tilt":25,"light":"right",
+ "path":[{"frame":90,"x":0.15,"y":0.62},{"frame":130,"x":0.5,"y":0.66},{"frame":160,"at":"rim"}],
+ "actions":[{"frame":160,"animation":"Sit","loop":false},{"frame":180,"animation":"Idle"}],"depth":0.72}
+  It walks across the table, turns towards the cup, reaches the rim anchor at 160, sits and idles. With depth
+  it passes behind anything nearer than 0.72.
+- "look":"toon" gives flat cartoon shading and an ink outline (add "boil":true), to match illustrated moments.
+- keys turn, tilt, spin, roll and scale animate the model itself, e.g. a product turntable: "keys":{"spin":[{"frame":0,"value":0},{"frame":90,"value":360}]}.
+- Preview a couple of frames first: size, tilt and light are what make it sit in the shot.
+
 ## Depth: things passing behind things, depth of field, fog, 2.5D moves
 Depth is a greyscale picture of how far each pixel is (near = white). Two sources:
 - Per-frame, for the whole clip: create_download_link, then in your sandbox run a monocular depth model
@@ -469,7 +547,7 @@ Depth is a greyscale picture of how far each pixel is (near = white). Two source
 - A still, for a freeze: depth of that one frame uploaded as a picture, then
   "depth": {"stills": [{"from": 88, "to": 148, "asset": "cup-depth"}]}.
 Use get_depth to read values at points (the rim might be 0.72, the window 0.15).
-- "depth": 0.6 on an image, sequence, graphic, sticker or text hides it wherever the scene is nearer
+- "depth": 0.6 on an image, sequence, graphic, model, sticker or text hides it wherever the scene is nearer
   than 0.6: a bird at 0.5 flies behind a cup at 0.7 and in front of a window at 0.2. Path keys can carry
   their own depth, so it can come from behind and land in front ({"frame":130,"at":"rim","depth":0.75}).
 - {"type":"blur","focus":0.7,"range":0.12,"amount":14}: depth of field, sharp around the focus.

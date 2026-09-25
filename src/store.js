@@ -31,7 +31,7 @@ export class Store {
     try {this.db.exec('ALTER TABLE jobs ADD COLUMN publish_at TEXT');} catch {} // when Postiz should publish it
     try {this.db.exec('ALTER TABLE jobs ADD COLUMN finished_at TEXT');} catch {}
     try {this.db.exec("ALTER TABLE grids ADD COLUMN style TEXT NOT NULL DEFAULT 'ticket'");} catch {} // added with the ticket opener
-    try {this.db.exec("ALTER TABLE upload_links ADD COLUMN kind TEXT NOT NULL DEFAULT 'picture'");} catch {} // picture, depth or download
+    try {this.db.exec("ALTER TABLE upload_links ADD COLUMN kind TEXT NOT NULL DEFAULT 'picture'");} catch {} // picture, model, depth or download
     for(const column of ['ejuz TEXT','ejuz_error TEXT','ejuz_tried TEXT','ejuz_clicks INTEGER NOT NULL DEFAULT 0','ejuz_display TEXT'])
       try {this.db.exec(`ALTER TABLE short_links ADD COLUMN ${column}`);} catch {} // ej.uz links alongside the app's own
     if(!this.db.prepare('SELECT count(*) n FROM day_locks').get().n)

@@ -56,8 +56,13 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
     if (!ASSET.test(name)) throw bad(`Invalid asset name ${name}`);
     assets[name] = { width: Number(a.width), height: Number(a.height), src: `http://127.0.0.1:${PORT}/footage/${footage}/assets/${name}.png` };
   }
+  const models = {};
+  for (const name of Object.keys(props.models || {})) {
+    if (!ASSET.test(name)) throw bad(`Invalid model name ${name}`);
+    models[name] = { src: `http://127.0.0.1:${PORT}/footage/${footage}/models/${name}.glb` };
+  }
   const depth = props.depth?.frames > 0 ? { frames: Number(props.depth.frames), base: `http://127.0.0.1:${PORT}/footage/${footage}/depth` } : null;
-  const inputProps = { spec: props.spec, plan: props.plan, source: props.source, assets, depth, video: `http://127.0.0.1:${PORT}/footage/${footage}/work.mp4` };
+  const inputProps = { spec: props.spec, plan: props.plan, source: props.source, assets, depth, models, video: `http://127.0.0.1:${PORT}/footage/${footage}/work.mp4` };
   const k = Math.min(1, Math.max(0.2, Number(scale) || 1));
   const out = join(dir, 'renders');
   await mkdir(out, { recursive: true });
@@ -90,7 +95,7 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
   }
 }
 
-// Files Chrome reads while rendering: the day's grid, a clip's working copy, its pictures and depth frames.
+// Files Chrome reads while rendering: the day's grid, a clip's working copy, its pictures, 3D models and depth frames.
 function localFile(url) {
   const grid = url.match(/^\/grid\/([a-f0-9]{24})\/(\d{4}-\d{2}-\d{2})\.png$/);
   if (grid) return { file: join(DATA, 'media', grid[1], `grid-${grid[2]}.png`), type: 'image/png' };
@@ -100,6 +105,8 @@ function localFile(url) {
   if (depth) return { file: join(DATA, 'footage', depth[1], 'depth', `${depth[2]}.jpg`), type: 'image/jpeg' };
   const asset = url.match(/^\/footage\/([a-f0-9]{24})\/assets\/([a-z0-9][a-z0-9-]{0,31})\.png$/);
   if (asset) return { file: join(DATA, 'footage', asset[1], 'assets', `${asset[2]}.png`), type: 'image/png' };
+  const model = url.match(/^\/footage\/([a-f0-9]{24})\/models\/([a-z0-9][a-z0-9-]{0,31})\.glb$/);
+  if (model) return { file: join(DATA, 'footage', model[1], 'models', `${model[2]}.glb`), type: 'model/gltf-binary' };
   return null;
 }
 
@@ -108,7 +115,7 @@ http.createServer(async (req, res) => {
     const local = req.method === 'GET' && localFile(req.url);
     if (local) {
       const { size } = await stat(local.file);
-      // CORS so the page can load depth pictures as its own (see src/edit/depth.ts); this service is internal only.
+      // CORS so the page can fetch depth pictures and models (src/edit/depth.ts, Model3D.tsx); this service is internal only.
       res.writeHead(200, { 'Content-Type': local.type, 'Content-Length': size, 'Access-Control-Allow-Origin': '*' });
       return createReadStream(local.file).pipe(res);
     }

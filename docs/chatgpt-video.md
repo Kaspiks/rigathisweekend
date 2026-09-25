@@ -50,8 +50,9 @@ What ChatGPT can do in an edit:
 | `illustrate` | Redraw the footage as a drawing (cel, ink, sketch, watercolor, duotone, posterize), with a fade, wipe or iris in and out, and a hand-drawn "boil" |
 | `image` | A picture you uploaded, either on screen or lined up exactly over the footage |
 | `sequence` | Frame-by-frame animation from an uploaded sprite sheet (all frames in one row): flapping wings, a turntable of a 3D object, a hand-drawn flicker |
-| `path` (on images, sequences and stickers) | Flies it through the frame along smoothed keyframes, even during a freeze; the last key can land exactly on an anchor, and `facing: "path"` turns it the way it flies |
+| `path` (on images, sequences, graphics, models and stickers) | Flies it through the frame along smoothed keyframes, even during a freeze; the last key can land exactly on an anchor, and `facing: "path"` turns it the way it flies |
 | `graphic` | Shapes ChatGPT draws and animates itself (keyframed position, rotation around a pivot, scale, opacity, draw-on, repeats for particles); `save_graphic` keeps one by name for reuse |
+| `model` | A 3D model (.glb) placed in the shot and played through its own animations (walk, idle, sit…), switching between them at set frames; it can walk along a path facing the way it goes, is lit from the side you choose, casts a soft shadow, and can be drawn as a toon with an ink outline |
 | `depth` (on the edit and on moving layers) | With a depth source (per-frame depth for the clip, or a depth picture for a freeze), things pass behind nearer parts of the shot |
 | `blur`, `fog`, `parallax` | Depth effects: depth of field around a focus, haze that thickens with distance, and a 2.5D camera move |
 | `zoom` | Push in towards, or follow, an anchor |
@@ -94,10 +95,20 @@ The drawing styles are filters: they need no image generation and cost nothing e
 | `save_graphic`, `list_graphics` | saves / no | A library of animated graphics reused by name |
 | `create_download_link` | makes a link | The clip's working copy for 30 minutes, e.g. to compute depth in ChatGPT's sandbox |
 | `get_depth` | no | Depth values (0 far – 1 near) at points, plus the depth picture |
-| `create_upload_link` | makes a link | One-time link for ChatGPT to upload a picture, or the clip's per-frame depth video, from its sandbox |
+| `create_upload_link` | makes a link | One-time link for ChatGPT to upload a picture, a 3D model (.glb), or the clip's per-frame depth video, from its sandbox |
 | `add_picture` | stores a picture | A file from the conversation, or a public HTTPS link |
 
-Uploading footage, deleting and downloading stay on the dashboard, behind your login. The upload link is the only route without a login, and it accepts nothing but one picture.
+Uploading footage, deleting and downloading stay on the dashboard, behind your login. The upload link is the only route without a login, and it accepts nothing but the one picture, model or depth video it was made for.
+
+## 3D models
+
+A model layer draws a real 3D model in the shot with Three.js, inside the same render. It suits a character that has to move believably: a cat walking round the cup and sitting on the saucer, a bird landing, a product turning on a turntable.
+
+1. Get an animated, low-poly model as one binary glTF file (`.glb`, textures embedded). Free sources: [Poly Pizza](https://poly.pizza) (CC0 animals and characters, many by Quaternius with walk, idle and sit animations), Sketchfab (download as glTF binary; check the licence), Mixamo (characters with walk cycles, converted to GLB in Blender). ChatGPT can also build simple ones in its sandbox.
+2. ChatGPT uploads it with `create_upload_link` kind `model` (or you add it on the dashboard under the clip's **3D models**). The server checks it and lists its animations by name.
+3. The edit places it with `at` or a `path`, picks animations by name and switches between them with `actions`, and sets `size`, `tilt` (how far the camera looks down, to match the footage), `light` (where the light in the shot comes from) and `shadow`. `look: "toon"` draws it like a cartoon with an ink outline, to match illustrated moments.
+
+Models are checked on upload: at most 50 MB and 400,000 triangles, everything inside the one file, and no Draco or KTX2 compression (the renderer cannot decode them; re-export without compression). There is no camera tracking: a model follows anchors and paths on screen, and does not match a moving camera's perspective. It works best on a still or slowly moving shot, or on a freeze. On a 4-core test machine a 4 s draft with two models rendered in about 40 s.
 
 ## Depth
 

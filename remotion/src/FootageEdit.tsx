@@ -10,7 +10,8 @@ import type { CSSProperties } from 'react';
 import { AbsoluteFill, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
 import { BoilFilter, IllustrationFilter } from './edit/filters';
 import type { BlurLayer, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
-import { PALETTE, baseScale, cameraAt, colour, depthSource, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace } from './edit/model';
+import { PALETTE, baseScale, cameraAt, colour, depthSource, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, travel } from './edit/model';
+import { ModelView } from './edit/Model3D';
 import { useLocalImage } from './edit/depth';
 import { GraphicView } from './edit/Graphics';
 import { Sticker } from './edit/Stickers';
@@ -103,7 +104,7 @@ export const FootageEdit = (props: FootageEditProps) => {
     layerPoint(props, cam, base, frame, layer as never, fallback);
   const active = (l: Layer) => frame >= l.from && frame < l.to;
   const drawings = spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'illustrate' && active(l));
-  const boils = spec.layers.some((l) => l.type === 'image' && l.motion === 'boil' && active(l));
+  const boils = spec.layers.some((l) => (l.type === 'image' && l.motion === 'boil' || l.type === 'model' && l.boil) && active(l));
 
   // Depth: one greyscale picture for this frame, laid exactly over the footage (so it follows zooms), turned
   // by colour matrices into masks and maps. A soft edge K wide keeps the cut-outs from looking jagged.
@@ -215,6 +216,11 @@ export const FootageEdit = (props: FootageEditProps) => {
           case 'sequence': {
             const p = at(l, { x: 0.5, y: 0.5 });
             return <Sprite key={i} layer={l} props={props} x={p.x} y={p.y} frame={frame} turn={heading(props, cam, base, frame, l)} />;
+          }
+          case 'model': {
+            const p = at(l, { x: 0.5, y: 0.5 });
+            return <ModelView key={i} layer={l} src={props.models?.[l.asset]?.src ?? null} pose={{ x: p.x, y: p.y, frame, ...travel(props, cam, base, frame, l) }}
+              width={plan.width} height={plan.height} filter={l.boil ? 'url(#boil-img)' : undefined} />;
           }
           case 'flash': {
             // Full strength two frames in, gone by the end of the layer.
