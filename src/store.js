@@ -20,6 +20,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS grids(edition TEXT NOT NULL, date TEXT NOT NULL, picks TEXT NOT NULL, kicker TEXT NOT NULL, category TEXT NOT NULL, hold_seconds REAL NOT NULL DEFAULT 6, status TEXT NOT NULL DEFAULT 'built', error TEXT, updated TEXT NOT NULL, PRIMARY KEY(edition,date));
       CREATE TABLE IF NOT EXISTS footage(id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, error TEXT, progress REAL, info TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS footage_edits(footage TEXT NOT NULL, version INTEGER NOT NULL, spec TEXT NOT NULL, note TEXT, created TEXT NOT NULL, PRIMARY KEY(footage,version));
+      CREATE TABLE IF NOT EXISTS upload_links(token TEXT PRIMARY KEY, footage TEXT NOT NULL, name TEXT NOT NULL, expires TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open');
       CREATE TABLE IF NOT EXISTS footage_renders(id INTEGER PRIMARY KEY, footage TEXT NOT NULL, version INTEGER NOT NULL, kind TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', error TEXT, result TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);`);
     // Instagram posts are per day, so the approval rule moved from one edition per weekend
     // to one per weekend day. Editions approved under the old rule keep their days.
@@ -244,6 +245,16 @@ export class Store {
   // Back in the queue when the renderer is busy with a story video; nothing was made.
   requeueFootageRender(id) {this.db.prepare("UPDATE footage_renders SET status='queued',updated=? WHERE id=?").run(new Date().toISOString(),id);}
   finishFootageRender(id,error,result=null) {this.db.prepare('UPDATE footage_renders SET status=?,error=?,result=?,updated=? WHERE id=?').run(error?'failed':'ready',error,result?JSON.stringify(result):null,new Date().toISOString(),id);}
+  // One-time upload links, so ChatGPT can send a file it made straight from its sandbox. Only a hash of
+  // the token is kept; a link works once, for one named picture of one clip, until it expires.
+  addUploadLink(hash,footage,name,expires) {
+    this.db.prepare("DELETE FROM upload_links WHERE expires<?").run(new Date().toISOString());
+    this.db.prepare('INSERT INTO upload_links(token,footage,name,expires) VALUES(?,?,?,?)').run(hash,footage,name,expires.toISOString());
+  }
+  // Claimed before the upload is read, so two uploads to one link cannot both land.
+  claimUploadLink(hash,now=new Date()) {return this.db.prepare("UPDATE upload_links SET state='receiving' WHERE token=? AND state='open' AND expires>? RETURNING *").get(hash,now.toISOString())||null;}
+  releaseUploadLink(hash) {this.db.prepare("UPDATE upload_links SET state='open' WHERE token=? AND state='receiving'").run(hash);}
+  finishUploadLink(hash) {this.db.prepare("UPDATE upload_links SET state='used' WHERE token=?").run(hash);}
   // Only the app processes clips and runs their renders, so only its start-up clears what a restart cut short.
   recoverFootage() {
     this.db.prepare("UPDATE footage SET status='failed', error='The upload was interrupted; delete this clip and upload it again', progress=NULL WHERE status='uploading'").run();

@@ -15,7 +15,7 @@ import { researchInto } from './research.js';
 import { prepareLinks, captionLinker, linkSummary } from './shortlinks.js';
 import { request, gridVideo } from './providers.js';
 import { createOAuthProvider } from './oauth.js';
-import { createAnimator } from './animate.js';
+import { createAnimator, uploadLinkRoute } from './animate.js';
 
 function equal(a,b) {const aa=Buffer.from(a||''),bb=Buffer.from(b||'');return aa.length===bb.length&&timingSafeEqual(aa,bb);}
 export function createApp(store,env=process.env,{fetcher=fetch,animator:animatorOptions={}}={}) {
@@ -33,6 +33,8 @@ export function createApp(store,env=process.env,{fetcher=fetch,animator:animator
     res.set('Cache-Control','no-store'); res.set('Referrer-Policy','no-referrer');
     res.redirect(302,url);
   });
+  // One-time upload links for pictures ChatGPT sends from its sandbox: the token is the permission.
+  app.use(uploadLinkRoute(store));
   const link=captionLinker(store,env);
   const hasPhoto=(e,i)=>existsSync(uploadPath(store.dir,e.id,i))||existsSync(resolve(store.dir,'media',e.id,`photo-${i}.jpg`));
   const gridsFor=e=>eventsByDay(e.data,e.approved?e.selected:null).map(({date,items})=>{

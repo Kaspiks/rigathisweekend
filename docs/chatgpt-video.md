@@ -59,11 +59,11 @@ The format is checked before it is saved. An edit is data, never code, so ChatGP
 The drawing styles are filters: they need no image generation and cost nothing extra. For a real illustration of a moment:
 
 1. Ask ChatGPT for `get_frame` of the frame to illustrate, with `grid: false`.
-2. Have ChatGPT's image generation redraw it at the same shape (a vertical frame stays vertical). Download the image.
-3. On the dashboard, under the clip's **Pictures**, add it with a name such as `pasta-drawn`.
+2. Have ChatGPT redraw it at the same shape (a vertical frame stays vertical), with image generation or with code in its sandbox.
+3. ChatGPT sends it to the server itself: it asks `create_upload_link` for a one-time link and uploads the file from its sandbox (`curl --fail -T picture.png "<link>"`). The link needs no login, takes one picture for one clip, and expires after 30 minutes. Only a hash of it is stored. In a Work session this was tested: the sandbox can make outbound uploads, and generated images are saved there as files.
 4. Ask ChatGPT to use it: `{"type": "image", "asset": "pasta-drawn", "place": "footage", …}`. It then lines up with the footage exactly, and can cross-fade in and out on a freeze.
 
-ChatGPT cannot pass an image it generated to the server directly, so this step goes through you.
+`add_picture` is a second route. It takes a file from the conversation (through ChatGPT's file parameters) or a public HTTPS link, and fetches it with the same guards as event posters. ChatGPT's file handover is documented but has known gaps, so the upload link is the one to rely on. You can still add pictures by hand on the dashboard, under the clip's **Pictures**.
 
 ## Limits
 
@@ -86,5 +86,7 @@ ChatGPT cannot pass an image it generated to the server directly, so this step g
 | `preview_edit` | renders stills | Real renders of chosen OUTPUT frames, as one sheet |
 | `render_edit` | renders a video | Draft (half size) or final MP4 in the background |
 | `get_render` | no | Progress, and frames from the result when ready |
+| `create_upload_link` | makes a link | One-time link for ChatGPT to upload a picture from its sandbox |
+| `add_picture` | stores a picture | A file from the conversation, or a public HTTPS link |
 
-Uploading, pictures, deleting and downloading stay on the dashboard, behind your login.
+Uploading footage, deleting and downloading stay on the dashboard, behind your login. The upload link is the only route without a login, and it accepts nothing but one picture.

@@ -3,6 +3,7 @@
 // edit (src/edits.js) and rendered by the render service one job at a time. Nothing is published from
 // here: a finished video waits on the dashboard to be downloaded.
 import express from 'express';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -13,10 +14,50 @@ import {
   ASSET_NAME, FOOTAGE_ID, FPS, cleanName, contactSheet, describe, footageFiles, frameWithGrid, grabFrame, limits,
   newFootageId, probe, receive, sampleSheet, saveAsset, secondsOf, spread, transcode, writePoster,
 } from './footage.js';
+import { fetchPublic } from './photos.js';
 
 const fail = (message, httpStatus = 400) => Object.assign(new Error(message), { httpStatus });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const Id = z.string().regex(FOOTAGE_ID).describe('Footage id from list_footage');
+const AssetName = z.string().regex(ASSET_NAME).describe('Name edits use for the picture: lowercase letters, digits and dashes, e.g. pasta-drawn');
+const MAX_ASSET = 15 * 1048576, LINK_MINUTES = 30;
+const tokenHash = token => createHash('sha256').update(token).digest('hex');
+
+// Stores a picture for a clip, whichever way it arrived: dashboard, upload link or ChatGPT file.
+async function storeAsset(store, id, name, buffer) {
+  const f = store.footage(id);
+  if (!ASSET_NAME.test(name)) throw fail('Name the picture with lowercase letters, digits and dashes (up to 32), e.g. pasta-drawn');
+  if (!Buffer.isBuffer(buffer) || !buffer.length) throw fail('Send the picture itself as the body');
+  const folder = footageFiles(store.dir, f.id).assets;
+  await mkdir(folder, { recursive: true });
+  return { footage: f.id, name, ...await saveAsset(buffer, join(folder, `${name}.png`)) };
+}
+
+// PUT or POST /u/<token>: the one route that needs no login. The token is the permission: made by an
+// authorised MCP call, good for one picture of one clip, and gone after one use or 30 minutes. Mounted
+// before the login check in app.js.
+export function uploadLinkRoute(store) {
+  const handler = async (req, res) => {
+    const hash = tokenHash(req.params[0]);
+    res.set('Cache-Control', 'no-store');
+    const link = store.claimUploadLink(hash);
+    if (!link) return res.status(404).json({ error: 'This upload link does not exist, was already used or has expired; ask for a new one' });
+    try {
+      if (/multipart\/form-data/i.test(req.headers['content-type'] || '')) throw fail('Send the file itself as the body (curl --data-binary @file or -T file), not as a form');
+      const saved = await storeAsset(store, link.footage, link.name, req.body);
+      store.finishUploadLink(hash);
+      res.status(201).json(saved);
+    } catch (err) {
+      if (err.httpStatus === 404) store.finishUploadLink(hash); else store.releaseUploadLink(hash);
+      res.status(err.httpStatus || 400).json({ error: err.message });
+    }
+  };
+  const route = express.Router();
+  const raw = express.raw({ type: () => true, limit: MAX_ASSET });
+  route.put(/^\/u\/([A-Za-z0-9_-]{32})$/, raw, handler);
+  route.post(/^\/u\/([A-Za-z0-9_-]{32})$/, raw, handler);
+  return route;
+}
 
 export async function assetList(dir, id) {
   const folder = footageFiles(dir, id).assets;
@@ -182,13 +223,8 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   });
   // Pictures for an edit: an illustrated frame to line up over the footage, a logo, a hand-drawn element.
   app.post('/api/footage/:id/assets/:name', express.raw({ type: ['image/*', 'application/octet-stream'], limit: '15mb' }), async (req, res) => {
-    const f = store.footage(Id.parse(req.params.id));
-    const name = String(req.params.name || '').toLowerCase();
-    if (!ASSET_NAME.test(name)) throw fail('Name the picture with lowercase letters, digits and dashes (up to 32), e.g. pasta-drawn');
-    if (!Buffer.isBuffer(req.body) || !req.body.length) throw fail('Choose an image to upload');
-    const folder = footageFiles(store.dir, f.id).assets;
-    await mkdir(folder, { recursive: true });
-    res.status(201).json({ name, ...await saveAsset(req.body, join(folder, `${name}.png`)) });
+    const { footage, ...saved } = await storeAsset(store, Id.parse(req.params.id), String(req.params.name || '').toLowerCase(), req.body);
+    res.status(201).json(saved);
   });
   app.delete('/api/footage/:id/assets/:name', async (req, res) => {
     const f = store.footage(Id.parse(req.params.id));
@@ -321,6 +357,35 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const job = await videoRequest(f, version ?? null, quality, from, to);
       const ahead = store.db.prepare("SELECT count(*) n FROM footage_renders WHERE status IN ('queued','rendering') AND id<?").get(job.id).n;
       return text({ ...renderSummary(job), ahead, note: 'Poll get_render with this render id every 20–30 s. Expect roughly a minute per 10 s of video at full size, more while the footage is redrawn as a drawing or when other renders are waiting.' });
+    });
+
+    server.registerTool('create_upload_link', {
+      description: 'A one-time link for sending a picture you made (in your sandbox, or generated) to a clip as a named asset, for edits to use. Upload the raw file with PUT or POST as the request body, e.g. curl --fail -T /path/picture.png "<url>". Works once, for 30 minutes. PNG keeps transparency; JPEG and WebP work too.',
+      inputSchema: { footage: Id, name: AssetName }, annotations: write,
+    }, async ({ footage, name }) => {
+      const f = store.footage(footage);
+      const token = randomBytes(24).toString('base64url'), expires = new Date(Date.now() + LINK_MINUTES * 60000);
+      store.addUploadLink(tokenHash(token), f.id, name, expires);
+      const url = `${origin}/u/${token}`;
+      return text({ url, expires: expires.toISOString(), footage: f.id, name, maxMB: MAX_ASSET / 1048576, upload: `curl --fail -sS -T /path/to/${name}.png "${url}"`,
+        then: `Use it in an edit as {"type":"image","asset":"${name}",...}; list_footage shows it with its size.` });
+    });
+
+    server.registerTool('add_picture', {
+      description: 'Add a picture to a clip as a named asset, from a file in this conversation (attached or generated) or from a public HTTPS link. If the file does not arrive, use create_upload_link instead.',
+      inputSchema: {
+        footage: Id, name: AssetName,
+        file: z.object({ download_url: z.string().url(), file_id: z.string(), mime_type: z.string().optional(), file_name: z.string().optional() }).optional().describe('The picture as a ChatGPT file'),
+        url: z.string().url().max(2000).optional().describe('Or a public HTTPS link to the picture'),
+      },
+      annotations: { ...write, openWorldHint: true },
+      _meta: { 'openai/fileParams': ['file'] },
+    }, async ({ footage, name, file, url }) => {
+      const source = file?.download_url || url;
+      if (!source) throw fail('No file arrived. Ask for create_upload_link and upload the picture there');
+      let got;
+      try { got = await fetchPublic(source, 'image/*', MAX_ASSET, fetcher); } catch (err) { throw fail(`Could not fetch the picture (${err.message}). Use create_upload_link instead`); }
+      return text(await storeAsset(store, footage, name, got.buffer));
     });
 
     server.registerTool('get_render', {

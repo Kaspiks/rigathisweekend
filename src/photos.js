@@ -50,6 +50,8 @@ async function get(url, accept, maxBytes, fetcher) {
   }
   throw new Error('Too many redirects');
 }
+// The same guarded download serves pictures handed over for animated edits (src/animate.js).
+export { get as fetchPublic };
 export function pictureUrl(html, pageUrl) {
   const patterns = [
     /<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i,

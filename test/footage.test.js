@@ -93,6 +93,11 @@ async function setup(t, { renderUrl = 'http://render:3200', busy = 0, failRender
   const store = new Store(dir);
   const calls = [];
   const fetcher = async (url, opts) => {
+    // Anything but the render service is a picture being fetched for add_picture.
+    if (!String(url).endsWith('/clip')) {
+      const png = await sharp({ create: { width: 300, height: 200, channels: 3, background: '#d4ed86' } }).png().toBuffer();
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'image/png', 'content-length': String(png.length) }), arrayBuffer: async () => png };
+    }
     const body = JSON.parse(opts.body);
     calls.push({ url, body });
     if (busy-- > 0) return { ok: false, status: 409, json: async () => ({ error: 'Another video is rendering', busy: true }) };
@@ -256,4 +261,37 @@ test('Without a render service, editing still works but nothing is queued', need
   const render = await client.callTool({ name: 'render_edit', arguments: { footage: id } });
   assert.ok(render.isError); assert.match(render.content[0].text, /RENDER_URL/);
   assert.equal(store.footageRenders(id).length, 0);
+});
+
+test('ChatGPT can send a picture from its sandbox through a one-time upload link, or hand over a file or link', needsFfmpeg, async t => {
+  const { dir, store, base, upload, settle, mcp } = await setup(t);
+  const { id } = await upload(await readFile(await rampClip(dir))).then(json); await settle();
+  const client = await mcp();
+  const link = dataOf(await client.callTool({ name: 'create_upload_link', arguments: { footage: id, name: 'cube-drawn' } }));
+  assert.match(link.url, /^http:\/\/localhost:3100\/u\/[A-Za-z0-9_-]{32}$/);
+  const path = new URL(link.url).pathname;
+  const png = await sharp({ create: { width: 400, height: 400, channels: 4, background: { r: 30, g: 90, b: 200, alpha: 1 } } }).png().toBuffer();
+  const send = (body, type = 'image/png', method = 'PUT') => fetch(base + path, { method, headers: { 'Content-Type': type }, body });
+  assert.equal((await send(Buffer.from('not a picture'))).status, 400, 'no login needed, but it must be a picture');
+  assert.equal((await send(png, 'multipart/form-data; boundary=x')).status, 400, 'a form is refused with a hint');
+  const ok = await send(png);
+  assert.equal(ok.status, 201, 'a failed try leaves the link usable');
+  assert.deepEqual(await ok.json(), { footage: id, name: 'cube-drawn', width: 400, height: 400 });
+  assert.equal((await send(png)).status, 404, 'a link works once');
+  assert.equal((await send(png, 'image/png', 'POST')).status, 404);
+  assert.ok(existsSync(join(footageFiles(dir, id).assets, 'cube-drawn.png')));
+  assert.ok(!store.db.prepare('SELECT 1 FROM upload_links WHERE token=?').get(path.slice(3)), 'only a hash of the token is kept');
+  // Expired links are refused.
+  const old = dataOf(await client.callTool({ name: 'create_upload_link', arguments: { footage: id, name: 'late' } }));
+  store.db.prepare("UPDATE upload_links SET expires='2000-01-01T00:00:00.000Z' WHERE name='late'").run();
+  assert.equal((await fetch(base + new URL(old.url).pathname, { method: 'PUT', body: png })).status, 404);
+  // A file handed over by ChatGPT, or a public link, is fetched with the same guards as posters.
+  const tools = (await client.listTools()).tools;
+  assert.deepEqual(tools.find(x => x.name === 'add_picture')._meta, { 'openai/fileParams': ['file'] });
+  const added = await client.callTool({ name: 'add_picture', arguments: { footage: id, name: 'from-chat', file: { download_url: 'https://93.184.216.34/f.png', file_id: 'file-1' } } });
+  assert.deepEqual(dataOf(added), { footage: id, name: 'from-chat', width: 300, height: 200 });
+  const local = await client.callTool({ name: 'add_picture', arguments: { footage: id, name: 'sneaky', url: 'https://127.0.0.1/secret.png' } });
+  assert.ok(local.isError); assert.match(local.content[0].text, /Non-public address/);
+  const none = await client.callTool({ name: 'add_picture', arguments: { footage: id, name: 'nothing' } });
+  assert.ok(none.isError); assert.match(none.content[0].text, /create_upload_link/);
 });
