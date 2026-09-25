@@ -38,7 +38,12 @@ function shape(layer: StickerLayer, t: number, draw: number, color: string, uid:
       return [0, 1, 2].map((i) => {
         const x0 = 30 + i * 20, pts: string[] = [];
         for (let y = 96; y >= 4; y -= 4) pts.push(`${(x0 + 6 * Math.sin(y / 13 + t / 7 + i * 1.7) * (1 - y / 140)).toFixed(2)},${y}`);
-        return <polyline key={i} points={pts.join(' ')} fill="none" stroke={color} strokeWidth={6.5} strokeLinecap="round" strokeDasharray="34 22" strokeDashoffset={-(t * 1.6 + i * 19)} opacity={0.85} mask={`url(#${uid}-fade)`} />;
+        // A faint dark edge under each wisp keeps white steam visible over milk foam or a pale cup.
+        const wisp = { points: pts.join(' '), fill: 'none', strokeLinecap: 'round' as const, strokeDasharray: '34 22', strokeDashoffset: -(t * 1.6 + i * 19), mask: `url(#${uid}-fade)` };
+        return (<g key={i}>
+          <polyline {...wisp} stroke={outline} strokeOpacity={0.3} strokeWidth={11} />
+          <polyline {...wisp} stroke={color} strokeWidth={7.5} />
+        </g>);
       });
     case 'hearts':
       return [0, 1, 2].map((i) => {

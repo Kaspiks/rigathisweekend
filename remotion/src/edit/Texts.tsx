@@ -15,7 +15,7 @@ function look(layer: TextLayer, size: number): CSSProperties {
   const bg = layer.background === 'none' ? 'transparent' : undefined;
   switch (layer.style) {
     case 'title':
-      return { fontFamily: serif, fontWeight: 700, fontSize: size, lineHeight: 1.02, color: colour(layer.color, PALETTE.paper), background: bg ?? colour(layer.background, 'transparent'), textShadow: '0 6px 30px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.45)', letterSpacing: '0.01em' };
+      return { fontFamily: serif, fontWeight: 700, fontSize: size, lineHeight: 1.02, color: colour(layer.color, PALETTE.paper), background: bg ?? colour(layer.background, 'transparent'), textShadow: '0 1px 2px rgba(0,0,0,0.7), 0 3px 10px rgba(0,0,0,0.6), 0 10px 44px rgba(0,0,0,0.55)', letterSpacing: '0.01em' };
     case 'caption':
       return { fontFamily: serif, fontWeight: 700, fontSize: size, lineHeight: 1.12, color: colour(layer.color, PALETTE.ink), background: bg ?? colour(layer.background, PALETTE.paper), padding: '0.2em 0.55em 0.26em', borderRadius: size * 0.3, boxShadow: '0 10px 30px rgba(0,0,0,0.3)' };
     case 'callout':

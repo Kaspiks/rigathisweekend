@@ -16,23 +16,36 @@ const Posterize = ({ input, n, result }: { input: string; n: number; result: str
   </feComponentTransfer>
 );
 
+// Flat colour areas without the false hues of flattening each channel on its own (greys turning
+// purple): the flattened picture is mixed back with a little of the smooth one.
+const Flat = ({ input, n, result }: { input: string; n: number; result: string }) => (
+  <>
+    <Posterize input={input} n={n} result={`${result}-steps`} />
+    <feComposite in={`${result}-steps`} in2={input} operator="arithmetic" k2={0.72} k3={0.28} result={result} />
+  </>
+);
+
 // Outlines, drawn the way a cartoonist would: where the picture is darker than its surroundings (the
 // difference of a fine and a coarse blur of its brightness), strong enough to matter. `weight` sets how
 // bold the lines are, `detail` how much small texture turns into lines, `alpha` their strongest opacity.
-const Lines = ({ weight, detail, color, alpha = 1, result }: { weight: number; detail: number; color: string; alpha?: number; result: string }) => {
+// The blurs are wide enough that phone-camera grain and wood grain do not become lines.
+const Lines = ({ weight, detail, color, alpha = 1, fine = 2.6, coarse = 5.5, result }: { weight: number; detail: number; color: string; alpha?: number; fine?: number; coarse?: number; result: string }) => {
   const [r, g, b] = rgb(color);
   const gain = 5, k = weight * alpha, t = (1 - detail) * 0.7 * alpha;
   return (
     <>
       <feColorMatrix in="SourceGraphic" type="matrix" values="0.3 0.59 0.11 0 0  0.3 0.59 0.11 0 0  0.3 0.59 0.11 0 0  0 0 0 1 0" result={`${result}-grey`} />
-      <feGaussianBlur in={`${result}-grey`} stdDeviation={1.1} result={`${result}-fine`} />
-      <feGaussianBlur in={`${result}-grey`} stdDeviation={3} result={`${result}-coarse`} />
+      <feGaussianBlur in={`${result}-grey`} stdDeviation={fine} result={`${result}-fine`} />
+      <feGaussianBlur in={`${result}-grey`} stdDeviation={coarse} result={`${result}-coarse`} />
       <feComponentTransfer in={`${result}-coarse`} result={`${result}-inverse`}>
         <feFuncR type="linear" slope={-1} intercept={1} /><feFuncG type="linear" slope={-1} intercept={1} /><feFuncB type="linear" slope={-1} intercept={1} />
       </feComponentTransfer>
       {/* 0.5 where nothing changes, darker where the fine blur is darker than the coarse one. */}
       <feComposite in={`${result}-fine`} in2={`${result}-inverse`} operator="arithmetic" k2={gain} k3={gain} k4={0.5 - gain} result={`${result}-dog`} />
-      <feColorMatrix in={`${result}-dog`} type="matrix" values={`0 0 0 0 ${r}  0 0 0 0 ${g}  0 0 0 0 ${b}  ${-k} 0 0 0 ${(0.5 * k - t).toFixed(3)}`} result={result} />
+      <feColorMatrix in={`${result}-dog`} type="matrix" values={`0 0 0 0 ${r}  0 0 0 0 ${g}  0 0 0 0 ${b}  ${-k} 0 0 0 ${(0.5 * k - t).toFixed(3)}`} result={`${result}-raw`} />
+      {/* Shrinking the lines and growing them back removes lone specks of grain but keeps real strokes. */}
+      <feMorphology in={`${result}-raw`} operator="erode" radius={1} result={`${result}-thin`} />
+      <feMorphology in={`${result}-thin`} operator="dilate" radius={1.2} result={result} />
     </>
   );
 };
@@ -59,16 +72,16 @@ function body(layer: IllustrateLayer, seed: number): ReactNode {
   switch (layer.style) {
     case 'ink':
       return (<>
-        <feGaussianBlur in="SourceGraphic" stdDeviation={1.4} result="soft" />
+        <feGaussianBlur in="SourceGraphic" stdDeviation={3.5} result="soft" />
         <feColorMatrix in="soft" type="saturate" values="1.05" result="sat" />
-        <Posterize input="sat" n={6} result="flat" />
+        <Flat input="sat" n={7} result="flat" />
         <Lines weight={9} detail={0.55} color={PALETTE.black} result="lines" />
         <feComposite in="lines" in2="flat" operator="over" result="drawn" />
       </>);
     case 'sketch':
       return (<>
-        <feGaussianBlur in="SourceGraphic" stdDeviation={1.3} result="soft" />
-        <Lines weight={10} detail={0.7} color="#262626" result="lines" />
+        <feGaussianBlur in="SourceGraphic" stdDeviation={3.5} result="soft" />
+        <Lines weight={10} detail={0.6} color="#262626" result="lines" />
         <feColorMatrix in="soft" type="matrix" values="0.3 0.59 0.11 0 0  0.3 0.59 0.11 0 0  0.3 0.59 0.11 0 0  0 0 0 1 0" result="grey" />
         <feComponentTransfer in="grey" result="shade">
           <feFuncR type="discrete" tableValues="0.5 0.74 0.94" /><feFuncG type="discrete" tableValues="0.5 0.74 0.94" /><feFuncB type="discrete" tableValues="0.5 0.74 0.94" />
@@ -80,9 +93,9 @@ function body(layer: IllustrateLayer, seed: number): ReactNode {
       </>);
     case 'watercolor':
       return (<>
-        <feGaussianBlur in="SourceGraphic" stdDeviation={3.2} result="soft" />
-        <feColorMatrix in="soft" type="saturate" values="1.3" result="sat" />
-        <Posterize input="sat" n={6} result="flat" />
+        <feGaussianBlur in="SourceGraphic" stdDeviation={5} result="soft" />
+        <feColorMatrix in="soft" type="saturate" values="1.2" result="sat" />
+        <Flat input="sat" n={6} result="flat" />
         <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves={3} seed={seed + 11} result="bleed-noise" />
         <feDisplacementMap in="flat" in2="bleed-noise" scale={16} xChannelSelector="R" yChannelSelector="G" result="bleed" />
         <Lines weight={6} detail={0.4} color={PALETTE.ink} alpha={0.55} result="lines" />
@@ -92,7 +105,7 @@ function body(layer: IllustrateLayer, seed: number): ReactNode {
     case 'duotone': {
       const [dark, light] = [colour(layer.colors?.[0], PALETTE.ink), colour(layer.colors?.[1], PALETTE.lime)].map(rgb);
       return (<>
-        <feGaussianBlur in="SourceGraphic" stdDeviation={1.2} result="soft" />
+        <feGaussianBlur in="SourceGraphic" stdDeviation={2.5} result="soft" />
         <feColorMatrix in="soft" type="matrix" values="0.3 0.59 0.11 0 0  0.3 0.59 0.11 0 0  0.3 0.59 0.11 0 0  0 0 0 1 0" result="grey" />
         <feComponentTransfer in="grey" result="drawn">
           <feFuncR type="table" tableValues={`${dark[0]} ${light[0]}`} />
@@ -103,16 +116,17 @@ function body(layer: IllustrateLayer, seed: number): ReactNode {
     }
     case 'posterize':
       return (<>
-        <feColorMatrix in="SourceGraphic" type="saturate" values="1.3" result="sat" />
+        <feGaussianBlur in="SourceGraphic" stdDeviation={3.5} result="soft" />
+        <feColorMatrix in="soft" type="saturate" values="1.2" result="sat" />
         <Posterize input="sat" n={4} result="drawn" />
       </>);
     case 'cel':
     default:
       return (<>
-        <feGaussianBlur in="SourceGraphic" stdDeviation={2.8} result="soft" />
-        <feColorMatrix in="soft" type="saturate" values="1.12" result="sat" />
-        <Posterize input="sat" n={5} result="flat" />
-        <Lines weight={7} detail={0.45} color={PALETTE.ink} result="lines" />
+        <feGaussianBlur in="SourceGraphic" stdDeviation={5} result="soft" />
+        <feColorMatrix in="soft" type="saturate" values="1.05" result="sat" />
+        <Flat input="sat" n={6} result="flat" />
+        <Lines weight={7} detail={0.4} color={PALETTE.ink} result="lines" />
         <feComposite in="lines" in2="flat" operator="over" result="drawn" />
       </>);
   }
