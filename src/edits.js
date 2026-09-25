@@ -60,7 +60,7 @@ const Illustrate = z.object({
   transition: z.enum(['fade', 'wipe', 'iris']).default('wipe').describe('How the drawing takes over and hands back; iris opens from `at`'),
   at: Place().optional().describe('Centre of an iris transition'),
   boil: z.boolean().default(true).describe('Hand-drawn wobble that changes every third frame, like drawn animation'),
-  colors: z.tuple([Color(), Color()]).optional().describe('Dark and light colour for duotone'),
+  colors: z.array(Color()).length(2).optional().describe('Two colours for duotone: dark, then light'),
 }).strict();
 
 const Image = z.object({
@@ -103,7 +103,9 @@ export const EditSpec = z.object({
   audio: z.enum(['source', 'mute']).default('source'),
   timeline: z.array(z.union([Play, Hold])).min(1).max(40).optional()
     .describe('The cut, in order: {from,to[,speed]} plays source frames, {hold,frames} freezes one. Leave out to play the whole clip once'),
-  anchors: z.record(z.string().regex(ANCHOR), z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(900))
+  // Anchor names are checked in planEdit: a key pattern in the schema becomes propertyNames, which
+  // ChatGPT's tool-schema check rejects.
+  anchors: z.record(z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(900))
     .refine(a => Object.keys(a).length <= 40, 'At most 40 anchors').default({}).describe('Named points on things in the footage, keyframed on SOURCE frames in 0–1 of the footage; positions between keyframes are interpolated, and held before the first and after the last'),
   layers: z.array(Layer).max(80).default([]).describe('Drawn in order, later layers on top; illustrate layers always sit right over the footage, under every other layer'),
 }).strict();
@@ -140,6 +142,7 @@ export function planEdit(input, footage, assets = {}) {
   if (duration > MAX_OUTPUT_FRAMES) errors.push(`The edit runs ${(duration / FPS).toFixed(1)} s; keep it under ${MAX_OUTPUT_FRAMES / FPS} s`);
 
   for (const [name, keys] of Object.entries(spec.anchors)) {
+    if (!ANCHOR.test(name)) { errors.push(`anchors.${name}: use lowercase letters, digits, - and _ (up to 24), starting with a letter`); continue; }
     keys.sort((a, b) => a.frame - b.frame);
     if (keys.some((k, i) => i && k.frame === keys[i - 1].frame)) errors.push(`anchors.${name}: two keyframes on frame ${keys.find((k, i) => i && k.frame === keys[i - 1].frame).frame}`);
     if (keys.at(-1).frame > last) errors.push(`anchors.${name}: frame ${keys.at(-1).frame} is past the end of the clip (its last frame is ${last})`);

@@ -183,6 +183,8 @@ test('ChatGPT can look at a clip, save an edit, preview it and render it over MC
   const { id } = await upload(await readFile(await rampClip(dir))).then(json); await settle();
   const client = await mcp();
   const names = (await client.listTools()).tools.map(x => x.name);
+  // ChatGPT refuses a tool whose schema uses $ref, tuple-style items or propertyNames ("Invalid MCP tool schema").
+  for (const tool of (await client.listTools()).tools) assert.doesNotMatch(JSON.stringify(tool.inputSchema), /"\$ref"|"items":\[|"propertyNames"/, tool.name);
   for (const name of ['list_footage', 'sample_footage', 'get_frame', 'get_edit_guide', 'get_edit', 'save_edit', 'preview_edit', 'render_edit', 'get_render']) assert.ok(names.includes(name), name);
   assert.equal(dataOf(await client.callTool({ name: 'list_footage', arguments: {} }))[0].id, id);
 
