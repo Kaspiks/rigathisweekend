@@ -1,0 +1,137 @@
+// An animated edit over your own footage, rendered from the JSON edit the app has checked (src/edits.js).
+// The clip plays through its timeline (cuts, freezes, speed changes) under a camera that can zoom towards
+// or follow an anchor; layers are drawn over it in order: text, stickers, pictures, flashes, and moments
+// where the footage itself is redrawn as a drawing.
+import '@fontsource/cormorant-garamond/500.css';
+import '@fontsource/cormorant-garamond/600.css';
+import '@fontsource/cormorant-garamond/700.css';
+import '@fontsource/great-vibes/400.css';
+import type { CSSProperties } from 'react';
+import { AbsoluteFill, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
+import { BoilFilter, IllustrationFilter } from './edit/filters';
+import type { FootageEditProps, IllustrateLayer, ImageLayer, Layer } from './edit/model';
+import { PALETTE, baseScale, cameraAt, colour, footageRect, motionStyle, phase, screenPlace } from './edit/model';
+import { Sticker } from './edit/Stickers';
+import { DEFAULT_AT, TextBox } from './edit/Texts';
+
+const fonts = delayRender('Loading edit fonts');
+Promise.all([
+  document.fonts.load('700 60px "Cormorant Garamond"'),
+  document.fonts.load('600 60px "Cormorant Garamond"'),
+  document.fonts.load('60px "Great Vibes"'),
+]).then(() => continueRender(fonts));
+
+type Rect = { left: number; top: number; width: number; height: number };
+
+// The clip through its timeline. Rendered once as the picture and again, muted, under each drawing layer.
+const Footage = ({ props, rect, muted, style }: { props: FootageEditProps; rect: Rect; muted: boolean; style?: CSSProperties }) => {
+  if (!props.video) return null;
+  const place: CSSProperties = { position: 'absolute', left: rect.left, top: rect.top, width: rect.width, height: rect.height, objectFit: 'fill', maxWidth: 'none' };
+  return (
+    <AbsoluteFill style={{ overflow: 'hidden', ...style }}>
+      {props.plan.segments.map((s, i) => (
+        <Sequence key={i} from={s.from} durationInFrames={s.to - s.from} layout="none">
+          {s.hold
+            // Remotion keeps a video's frame inside its sequence, so a freeze stops at the sequence's first
+            // frame and the trim picks the source frame to show.
+            ? <Freeze frame={0}><OffthreadVideo src={props.video} trimBefore={s.source || undefined} muted style={place} /></Freeze>
+            : <OffthreadVideo src={props.video} trimBefore={s.source || undefined} playbackRate={s.speed ?? 1} muted={muted || (s.speed ?? 1) !== 1} style={place} />}
+        </Sequence>
+      ))}
+    </AbsoluteFill>
+  );
+};
+
+// How much of the drawing shows during its entrance and exit: a fade, a wipe from the left, or an iris.
+function reveal(layer: IllustrateLayer, frame: number, centre: { x: number; y: number }, w: number, h: number): CSSProperties {
+  const p = phase(layer, frame);
+  const e = Easing.inOut(Easing.cubic)(p.enter), x = Easing.inOut(Easing.cubic)(p.exit);
+  if (layer.transition === 'fade') return { opacity: e * (1 - x) };
+  if (layer.transition === 'wipe') return { clipPath: `inset(0 ${((1 - e) * 100).toFixed(2)}% 0 ${(x * 100).toFixed(2)}%)` };
+  const far = Math.hypot(Math.max(centre.x, w - centre.x), Math.max(centre.y, h - centre.y));
+  return { clipPath: `circle(${(far * e * (1 - x)).toFixed(1)}px at ${centre.x.toFixed(1)}px ${centre.y.toFixed(1)}px)` };
+}
+
+const Picture = ({ layer, props, rect, x, y, frame, boilId }: { layer: ImageLayer; props: FootageEditProps; rect: Rect; x: number; y: number; frame: number; boilId: string }) => {
+  const asset = props.assets[layer.asset];
+  const p = phase(layer, frame);
+  if (!asset || !p.on) return null;
+  const m = motionStyle(layer.enter, layer.exit, p.enter, p.exit);
+  const t = p.local;
+  const motion = layer.motion === 'float' ? `translateY(${(Math.sin(t / 14) * 12).toFixed(2)}px)`
+    : layer.motion === 'sway' ? `rotate(${(Math.sin(t / 18) * 3).toFixed(2)}deg)`
+      : layer.motion === 'pulse' ? `scale(${(1 + Math.sin(t / 8) * 0.04).toFixed(4)})`
+        : layer.motion === 'spin' ? `rotate(${(t * 6) % 360}deg)` : '';
+  const wipe = layer.enter === 'wipe' ? { clipPath: `inset(0 ${((1 - Easing.inOut(Easing.cubic)(p.enter)) * 100).toFixed(2)}% 0 0)` } : {};
+  const common: CSSProperties = { position: 'absolute', opacity: m.opacity * layer.opacity, filter: layer.motion === 'boil' ? `url(#${boilId})` : undefined, ...wipe };
+  if (layer.place === 'footage')
+    return <Img src={asset.src} style={{ ...common, left: rect.left, top: rect.top, width: rect.width, height: rect.height, objectFit: 'cover', transform: `scale(${m.scale}) ${motion}` }} />;
+  const width = layer.size * props.plan.width, height = (width * asset.height) / asset.width;
+  return <Img src={asset.src} style={{ ...common, left: x - width / 2, top: y - height / 2, width, height, transform: `translate(${m.dx}px, ${m.dy}px) scale(${m.scale}) ${motion}` }} />;
+};
+
+export const FootageEdit = (props: FootageEditProps) => {
+  const frame = useCurrentFrame();
+  const { spec, plan } = props;
+  const base = baseScale(props);
+  const cam = cameraAt(props, frame, base, (seed) => random(seed));
+  const rect = footageRect(props, cam, base);
+  const at = (layer: Layer & { at?: unknown; offset?: { x: number; y: number } }, fallback: { x: number; y: number }) =>
+    screenPlace(props, cam, base, frame, layer.at as never, layer.offset, fallback);
+  const active = (l: Layer) => frame >= l.from && frame < l.to;
+  const drawings = spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'illustrate' && active(l));
+  const boils = spec.layers.some((l) => l.type === 'image' && l.motion === 'boil' && active(l));
+
+  return (
+    <AbsoluteFill style={{ background: colour(spec.background, PALETTE.ink), overflow: 'hidden' }}>
+      <svg width={0} height={0} style={{ position: 'absolute' }} aria-hidden>
+        <defs>
+          {drawings.map(([l, i]) => <IllustrationFilter key={i} id={`drawn-${i}`} layer={l as IllustrateLayer} frame={frame} />)}
+          {boils ? <BoilFilter id="boil-img" frame={frame} /> : null}
+        </defs>
+      </svg>
+      <Footage props={props} rect={rect} muted={spec.audio === 'mute'} />
+      {/* Drawings replace the footage, so they sit right over it and under everything else, whatever their
+          place in the list. The filter works on a screen-sized layer: a zoomed-in picture costs no more. */}
+      {drawings.map(([l, i]) => (
+        <Footage key={`drawn-${i}`} props={props} rect={rect} muted style={{ filter: `url(#drawn-${i})`, ...reveal(l as IllustrateLayer, frame, at(l, { x: 0.5, y: 0.5 }), plan.width, plan.height) }} />
+      ))}
+      {spec.layers.map((l, i) => {
+        if (!active(l)) return null;
+        switch (l.type) {
+          case 'text': {
+            const p = at(l, DEFAULT_AT[l.style]);
+            const anchor = typeof l.at === 'string' ? screenPlace(props, cam, base, frame, l.at, undefined, { x: 0.5, y: 0.5 }) : null;
+            return <TextBox key={i} layer={l} x={p.x} y={p.y} anchor={anchor} frame={frame} width={plan.width} />;
+          }
+          case 'sticker': {
+            const p = at(l, { x: 0.5, y: 0.5 });
+            return <Sticker key={i} uid={`sticker-${i}`} layer={l} x={p.x} y={p.y} frame={frame} />;
+          }
+          case 'image': {
+            const p = at(l, { x: 0.5, y: 0.5 });
+            return <Picture key={i} layer={l} props={props} rect={rect} x={p.x} y={p.y} frame={frame} boilId="boil-img" />;
+          }
+          case 'flash': {
+            // Full strength two frames in, gone by the end of the layer.
+            const t = frame - l.from, len = l.to - l.from;
+            const o = t < 2 ? (t + 1) / 3 : 1 - Easing.out(Easing.quad)(Math.min(1, (t - 2) / Math.max(1, len - 2)));
+            return <AbsoluteFill key={i} style={{ background: colour(l.color, PALETTE.white), opacity: o }} />;
+          }
+          default:
+            return null; // drawings are above; zoom and shake move the camera and draw nothing themselves
+        }
+      })}
+    </AbsoluteFill>
+  );
+};
+
+// Shown in the Studio, where there is no uploaded footage.
+export const emptyEdit: FootageEditProps = {
+  spec: { format: 'vertical', fit: 'cover', background: 'ink', audio: 'source', anchors: {}, layers: [
+    { type: 'text', from: 0, to: 90, in: 10, out: 10, text: 'Upload footage on\nthe dashboard', style: 'title', pointer: false, align: 'center', enter: 'rise', exit: 'fade' },
+    { type: 'sticker', from: 10, to: 90, in: 12, out: 8, shape: 'sparkles', at: { x: 0.5, y: 0.5 }, size: 320, color: 'lime', rotate: 0, enter: 'pop', exit: 'fade' },
+  ] },
+  plan: { width: 1080, height: 1920, fps: 30, durationInFrames: 90, segments: [{ from: 0, to: 90, source: 0, sourceTo: 90, speed: 1 }] },
+  video: '', assets: {}, source: { width: 1080, height: 1920, frames: 90 },
+};
