@@ -527,6 +527,13 @@ test('ChatGPT can upload a 3D model and animate it walking along a path', needsF
   // A model can ride along with the table as a handheld camera drifts, and plain models can be tinted.
   const riding = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { anchors: [{ name: 'table', keys: [{ frame: 0, x: 0.5, y: 0.8 }, { frame: 50, x: 0.45, y: 0.82 }] }], layers: [{ ...layer, follow: 'table', color: 'gold' }] } } });
   assert.ok(!riding.isError, riding.content?.[0]?.text);
+  // Ground-contact depth, distance-driven walking and a model built facing sideways.
+  const noDepth = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers: [{ ...layer, depth: 'auto' }] } } });
+  assert.ok(noDepth.isError); assert.match(noDepth.content[0].text, /no depth source/);
+  const still = await sharp({ create: { width: 64, height: 96, channels: 3, background: '#808080' } }).png().toBuffer();
+  assert.equal((await fetch(`${base}/api/footage/${id}/assets/depth-still`, { method: 'POST', headers: { Authorization: `Bearer ${'f'.repeat(32)}`, 'Content-Type': 'image/png' }, body: still })).status, 201);
+  const walker = dataOf(await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { depth: { stills: [{ from: 0, to: 50, asset: 'depth-still' }] }, layers: [{ ...layer, depth: 'auto', stride: 1.2, front: 'right', actions: [{ frame: 30, animation: 'animation_1', stride: 2.5 }] }] } } }));
+  assert.ok(walker.version, JSON.stringify(walker));
   const lost = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers: [{ ...layer, follow: 'table' }] } } });
   assert.ok(lost.isError); assert.match(lost.content[0].text, /follow: there is no anchor 'table'/);
   // Models can also be added and removed from the dashboard.

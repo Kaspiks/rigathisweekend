@@ -57,11 +57,11 @@ function valueAt(track: Track | undefined, frame: number, fallback: number) {
 
 // Which animations play at an output frame and how strongly: the layer's own from its start, then each
 // action from its frame, cross-fading over `blend` frames.
-type Play = { name: string; start: number; speed: number; loop: boolean };
+type Play = { name: string; start: number; speed: number; loop: boolean; stride?: number };
 function playing(layer: ModelLayer, frame: number) {
   const plays: Play[] = [];
-  if (layer.animation) plays.push({ name: layer.animation, start: layer.from, speed: layer.speed, loop: layer.loop });
-  for (const a of layer.actions ?? []) plays.push({ name: a.animation, start: a.frame, speed: a.speed ?? layer.speed, loop: a.loop ?? true });
+  if (layer.animation) plays.push({ name: layer.animation, start: layer.from, speed: layer.speed, loop: layer.loop, stride: layer.stride });
+  for (const a of layer.actions ?? []) plays.push({ name: a.animation, start: a.frame, speed: a.speed ?? layer.speed, loop: a.loop ?? true, stride: a.stride });
   const started = plays.filter((p) => frame >= p.start);
   const now = started[started.length - 1], before = started[started.length - 2];
   if (!now) return [];
@@ -107,7 +107,10 @@ function makeToon(root: THREE.Object3D, outline: number) {
   }
 }
 
-export type ModelPose = { x: number; y: number; frame: number; dir: number; lean: number };
+// walked(frame): pixels moved along the path by then, for walk cycles tied to distance (stride).
+export type ModelPose = { x: number; y: number; frame: number; dir: number; lean: number; walked: (frame: number) => number };
+// The turn that makes a model face the camera, from the way it faces as made.
+const FRONT: Record<ModelLayer['front'], number> = { camera: 0, away: 180, right: -90, left: 90 };
 
 // Inside the canvas: the model, its light and floor, posed for the current frame before the canvas draws.
 const Stage = ({ gltf, layer, pose, width, height }: { gltf: GLTF; layer: ModelLayer; pose: ModelPose; width: number; height: number }) => {
@@ -152,7 +155,13 @@ const Stage = ({ gltf, layer, pose, width, height }: { gltf: GLTF; layer: ModelL
     sun.shadow.mapSize.set(1024, 1024);
     sun.shadow.radius = 4; sun.shadow.bias = -0.0005;
     tilt.add(sun, sun.target);
-    tilt.add(new THREE.HemisphereLight('#ffffff', '#8a7d6b', 1.1 * layer.brightness));
+    tilt.add(new THREE.HemisphereLight('#ffffff', '#8a7d6b', 0.9 * layer.brightness));
+    // A soft fill from the camera's side, as a room's bounce light would give: a model lit from behind
+    // should read as backlit, not as a black cut-out.
+    const fill = new THREE.DirectionalLight('#fff6ea', (layer.light === 'back' ? 1.1 : 0.6) * layer.brightness);
+    fill.position.set(0, reach * 1.2 + floor.position.y, reach * 3);
+    fill.target.position.set(0, floor.position.y, 0);
+    tilt.add(fill, fill.target);
     const mixer = new THREE.AnimationMixer(model);
     const actions = new Map<string, THREE.AnimationAction>();
     for (const clip of gltf.animations) {
@@ -187,13 +196,17 @@ const Stage = ({ gltf, layer, pose, width, height }: { gltf: GLTF; layer: ModelL
   Object.assign(shadow.camera, { left: -box, right: box, top: box, bottom: -box, near: box * 0.01, far: box * 4 });
   shadow.camera.updateProjectionMatrix();
   shadow.normalBias = rig.reach * scale * 0.004;
-  const facing = layer.facing === 'path' ? pose.dir * layer.angle : 0;
+  const facing = (layer.facing === 'path' ? pose.dir * layer.angle : 0) + FRONT[layer.front ?? 'camera'];
   rig.yaw.rotation.set(0, ((valueAt(k.turn, p.local, layer.turn) + facing + valueAt(k.spin, p.local, 0)) * Math.PI) / 180, (valueAt(k.roll, p.local, 0) * Math.PI) / 180);
   for (const a of rig.actions.values()) a.setEffectiveWeight(0);
   for (const { play, weight } of playing(layer, pose.frame)) {
     const a = rig.actions.get(play.name);
     if (!a) continue;
-    const d = a.getClip().duration, t = Math.max(0, ((pose.frame - play.start) / 30) * play.speed);
+    const d = a.getClip().duration;
+    // With a stride the animation runs on distance: one loop per stride (a multiple of its height) moved.
+    const t = play.stride
+      ? (Math.max(0, pose.walked(pose.frame) - pose.walked(play.start)) / (play.stride * layer.size * height)) * d
+      : Math.max(0, ((pose.frame - play.start) / 30) * play.speed);
     a.enabled = true; a.paused = false;
     a.time = d > 0 ? (play.loop ? t % d : Math.min(t, d)) : 0;
     a.setEffectiveWeight(weight);

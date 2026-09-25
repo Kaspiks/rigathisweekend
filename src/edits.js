@@ -167,9 +167,16 @@ const Model = z.object({
     frame: Frame().describe('OUTPUT frame this animation takes over'),
     animation: AnimationName(),
     speed: z.number().min(0.1).max(4).optional(), loop: z.boolean().optional().describe('Default true; false plays once and holds the last pose (sitting down, landing)'),
+    stride: z.number().min(0.05).max(10).optional().describe('Like the layer\'s stride, for this animation (a run after a walk)'),
   }).strict()).max(20).optional().describe('Switch animations during the layer, e.g. walk then sit: [{"frame":130,"animation":"Sit","loop":false}]'),
   blend: z.number().int().min(0).max(30).default(8).describe('Frames to cross-fade between animations'),
-  at: Place().optional().describe('Where it stands (with pin feet, its feet are here)'), offset: Offset().optional(), path: Path(), follow: Follow(), depth: Depth(),
+  at: Place().optional().describe('Where it stands (with pin feet, its feet are here)'), offset: Offset().optional(), path: Path(), follow: Follow(),
+  depth: z.union([Unit(), z.literal('auto')]).optional()
+    .describe('"auto" (best for something walking on a surface): each frame it takes the depth of the ground under its feet, so it is never cut off by the table it stands on but still goes behind nearer things. Or a fixed 0 far – 1 near. Needs depth on the edit'),
+  stride: z.number().min(0.05).max(10).optional()
+    .describe('Ties the animation to how far it moves along its path: the distance covered in one loop of the animation, in multiples of its height (about 1 for a walk, 2–3 for a run). Feet then stay planted instead of sliding, and it stops stepping when it stops. Raise it if the feet slide backwards, lower it if they slide forwards'),
+  front: z.enum(['camera', 'away', 'right', 'left']).default('camera')
+    .describe('Which way the model faces as made, before any turn. glTF models normally face the camera; if a preview with turn 0 shows it facing another way, say which, and facing path will then walk it forwards'),
   facing: z.enum(['as-made', 'path']).default('as-made').describe('path: turns to walk or fly the way it moves along `path`, turning round through facing the camera'),
   angle: z.number().min(0).max(90).default(65).describe('With facing path: 90 is a side view, less turns it towards the camera'),
   pin: z.enum(['feet', 'center']).default('feet').describe('Which point of the model sits on `at`: its feet (standing on something) or its middle (flying)'),
@@ -547,7 +554,13 @@ A model layer draws a real 3D model (.glb) in the shot, playing its own animatio
   - Light: look where the light comes from in the footage (a window behind the cup is "back") and match it.
   - During an illustrate layer, use a second model layer with "look":"toon" for that stretch, so it is drawn too.
   - A plain model without colours of its own renders grey; give it "color", or better, use a textured model.
-  - With depth (make_depth), set "depth" so it passes behind the cup instead of floating in front of everything.
+  - With depth (make_depth), use "depth":"auto": it takes the depth of the ground under its feet each frame,
+    so the table never cuts off its legs, yet it goes behind anything nearer (the cup). A fixed number only
+    suits something that does not move towards or away from the camera.
+  - Walking: "stride" ties the steps to the distance moved ("stride":1 for a walk, 2–3 for a run), so the feet
+    do not slide and stepping stops when it stops. Switch to an idle or sit animation where the path ends.
+  - Check which way it faces: preview with turn 0 and facing as-made. If it is not facing you, set "front"
+    ("away", "right" or "left") to the way it faces as made; otherwise facing path walks it backwards or sideways.
 - Preview a couple of frames first: size, tilt and light are what make it sit in the shot.
 
 ## Depth: things passing behind things, depth of field, fog, 2.5D moves

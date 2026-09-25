@@ -27,7 +27,8 @@ export type GraphicElement = {
 };
 export type GraphicLayer = Span & { type: 'graphic'; use?: string; viewBox?: { width: number; height: number }; loop?: number; elements?: GraphicElement[];
   at?: Place; offset?: Point; path?: PathKey[]; facing: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none' };
-export type ModelLayer = Span & { type: 'model'; asset: string; animation?: string; speed: number; loop: boolean; actions?: { frame: number; animation: string; speed?: number; loop?: boolean }[]; blend: number;
+export type ModelLayer = Span & { type: 'model'; asset: string; animation?: string; speed: number; loop: boolean; actions?: { frame: number; animation: string; speed?: number; loop?: boolean; stride?: number }[]; blend: number;
+  depth?: number | 'auto'; stride?: number; front: 'camera' | 'away' | 'right' | 'left';
   at?: Place; offset?: Point; path?: PathKey[]; facing: 'as-made' | 'path'; angle: number; pin: 'feet' | 'center'; size: number; turn: number; tilt: number;
   keys?: Partial<Record<'turn' | 'tilt' | 'spin' | 'roll' | 'scale', Track>>; light: 'left' | 'right' | 'front' | 'top' | 'back'; brightness: number; shadow: number;
   color?: string; follow?: string; look: 'as-made' | 'toon'; boil: boolean; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none' };
@@ -197,6 +198,27 @@ export function travel(props: FootageEditProps, cam: Camera, base: number, frame
   for (let back = 0; back < TURN; back++) sum += heading(props, cam, base, frame - back, { ...layer, facing: 'path' }).flip ? -1 : 1;
   const now = heading(props, cam, base, frame, { ...layer, facing: 'path' });
   return { dir: sum / TURN, lean: now.tilt };
+}
+
+// How far along its path (in pixels of the finished frame) a layer has moved by each frame, for walk
+// cycles that keep pace with the walking. Worked out once per layer, from the path alone (not camera
+// shake or `follow`), the same in every render tab, so frames rendered apart still agree.
+const walkedCache = new WeakMap<object, Float64Array>();
+export function walked(props: FootageEditProps, base: number, layer: Span & Moving, frame: number, rand: (seed: string) => number): number {
+  if (!layer.path?.length) return 0;
+  let table = walkedCache.get(layer);
+  if (!table) {
+    table = new Float64Array(Math.max(1, layer.to - layer.from));
+    let last: Point | null = null;
+    for (let i = 0; i < table.length; i++) {
+      const f = layer.from + i, cam = { ...cameraAt(props, f, base, rand), dx: 0, dy: 0 };
+      const p = pathPoint(props, cam, base, f, layer.path);
+      table[i] = (i ? table[i - 1] : 0) + (last ? Math.hypot(p.x - last.x, p.y - last.y) : 0);
+      last = p;
+    }
+    walkedCache.set(layer, table);
+  }
+  return table[Math.min(table.length - 1, Math.max(0, Math.round(frame - layer.from)))];
 }
 
 // Entrance and exit as style: opacity, scale and movement.

@@ -10,9 +10,9 @@ import type { CSSProperties } from 'react';
 import { AbsoluteFill, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
 import { BoilFilter, IllustrationFilter } from './edit/filters';
 import type { BlurLayer, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
-import { PALETTE, baseScale, cameraAt, colour, depthSource, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, travel } from './edit/model';
+import { PALETTE, baseScale, cameraAt, colour, depthSource, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, travel, walked } from './edit/model';
 import { ModelView } from './edit/Model3D';
-import { useLocalImage } from './edit/depth';
+import { depthNear, useLocalImage } from './edit/depth';
 import { GraphicView } from './edit/Graphics';
 import { Sticker } from './edit/Stickers';
 import { DEFAULT_AT, TextBox } from './edit/Texts';
@@ -115,7 +115,17 @@ export const FootageEdit = (props: FootageEditProps) => {
   const flat = (id: string, values: string) => (
     <filter id={id} x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB"><feColorMatrix type="matrix" values={values} /></filter>
   );
-  const nearness = spec.layers.map((l, i) => (depthSrc && active(l) ? layerDepth(l as never, frame) : undefined));
+  const depthUrl = depthSource(props, frame);
+  const nearness = spec.layers.map((l) => {
+    if (!depthSrc || !active(l)) return undefined;
+    // depth "auto": the ground under its feet, a little nearer, so the surface it stands on never covers it.
+    if (l.type === 'model' && l.depth === 'auto' && !l.path?.some((k) => k.depth != null)) {
+      const p = at(l, { x: 0.5, y: 0.5 });
+      const g = depthNear(depthUrl, (p.x - rect.left) / rect.width, (p.y - rect.top) / rect.height, near);
+      return g == null ? undefined : Math.min(1, g + 0.03);
+    }
+    return layerDepth(l as never, frame);
+  });
   const blurs = depthSrc ? spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'blur' && active(l)) as (readonly [BlurLayer, number])[] : [];
   const fogs = depthSrc ? spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'fog' && active(l)) as (readonly [FogLayer, number])[] : [];
   const parallax = depthSrc ? spec.layers.find((l): l is ParallaxLayer => l.type === 'parallax' && active(l)) : undefined;
@@ -221,7 +231,8 @@ export const FootageEdit = (props: FootageEditProps) => {
           }
           case 'model': {
             const p = at(l, { x: 0.5, y: 0.5 });
-            return <ModelView key={i} layer={l} src={props.models?.[l.asset]?.src ?? null} pose={{ x: p.x, y: p.y, frame, ...travel(props, cam, base, frame, l) }}
+            const pose = { x: p.x, y: p.y, frame, ...travel(props, cam, base, frame, l), walked: (f: number) => walked(props, base, l, f, (seed) => random(seed)) };
+            return <ModelView key={i} layer={l} src={props.models?.[l.asset]?.src ?? null} pose={pose}
               width={plan.width} height={plan.height} filter={l.boil ? 'url(#boil-img)' : undefined} />;
           }
           case 'flash': {
