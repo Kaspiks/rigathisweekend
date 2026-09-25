@@ -96,6 +96,8 @@ const Hold = z.object({
   frames: z.number().int().min(1).max(30 * FPS).describe('How many OUTPUT frames the freeze lasts (silent)'),
 }).strict();
 
+const AnchorKeys = () => z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(900);
+
 export const EditSpec = z.object({
   format: z.enum(Object.keys(FORMATS)).default('vertical').describe('vertical 1080×1920 (Reels, Stories), portrait 1080×1350, square 1080×1080, landscape 1920×1080'),
   fit: z.enum(['cover', 'contain']).default('cover').describe('cover fills the frame and crops; contain shows the whole clip on the background'),
@@ -109,6 +111,24 @@ export const EditSpec = z.object({
     .refine(a => Object.keys(a).length <= 40, 'At most 40 anchors').default({}).describe('Named points on things in the footage, keyframed on SOURCE frames in 0–1 of the footage; positions between keyframes are interpolated, and held before the first and after the last'),
   layers: z.array(Layer).max(80).default([]).describe('Drawn in order, later layers on top; illustrate layers always sit right over the footage, under every other layer'),
 }).strict();
+
+// MCP tool importers do not consistently accept open-ended object keys. Keep the stored edit format
+// unchanged, but advertise anchors as a named list on the MCP boundary.
+export const McpEditSpec = EditSpec.omit({ anchors: true }).extend({
+  anchors: z.array(z.object({
+    name: z.string().regex(ANCHOR).describe('Anchor name, starting with a lowercase letter'),
+    keys: AnchorKeys().describe('Positions on SOURCE frames, in 0–1 of the footage'),
+  }).strict()).max(40).superRefine((anchors, ctx) => {
+    const seen = new Set();
+    for (const [i, anchor] of anchors.entries()) {
+      if (seen.has(anchor.name)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'name'], message: `Duplicate anchor '${anchor.name}'` });
+      seen.add(anchor.name);
+    }
+  }).default([]).describe('Named points on things in the footage; use an empty list when no anchors are needed'),
+}).strict();
+
+export const fromMcpEdit = edit => ({ ...edit, anchors: Object.fromEntries(edit.anchors.map(({ name, keys }) => [name, keys])) });
+export const toMcpEdit = edit => ({ ...edit, anchors: Object.entries(edit.anchors).map(([name, keys]) => ({ name, keys })) });
 
 const fail = message => Object.assign(new Error(message), { httpStatus: 400 });
 const pos = s => typeof s === 'string' ? `anchor '${s}'` : null;
@@ -240,7 +260,8 @@ Nothing is published from here: the finished MP4 is on the dashboard for the own
   save_edit returns the mapping, e.g. output [0,88] = source [30,118], output [88,148] = hold on 118.
 
 ## Coordinates
-- Anchors: {x,y} in 0–1 of the FOOTAGE picture (0,0 top left). Layers with at: "anchorName" stick to it.
+- In save_edit and get_edit, anchors are a list of {name,keys}. Each key has {frame,x,y}; x and y are
+  in 0–1 of the FOOTAGE picture (0,0 top left). Layers with at: "anchorName" stick to it.
 - at: {x,y} on a layer means 0–1 of the FINISHED frame and stays put on screen.
 - Zoom focus {x,y} is in footage coordinates, like anchors.
 
@@ -248,7 +269,7 @@ Nothing is published from here: the finished MP4 is on the dashboard for the own
 {
   "format": "vertical",
   "timeline": [ {"from": 30, "to": 118}, {"hold": 118, "frames": 60}, {"from": 118, "to": 240} ],
-  "anchors": { "fork": [ {"frame": 96, "x": 0.52, "y": 0.64}, {"frame": 110, "x": 0.54, "y": 0.52}, {"frame": 118, "x": 0.55, "y": 0.45} ] },
+  "anchors": [ {"name": "fork", "keys": [ {"frame": 96, "x": 0.52, "y": 0.64}, {"frame": 110, "x": 0.54, "y": 0.52}, {"frame": 118, "x": 0.55, "y": 0.45} ]} ],
   "layers": [
     {"type": "zoom", "from": 60, "to": 150, "scale": 1.35, "focus": "fork", "in": 20, "out": 16},
     {"type": "illustrate", "from": 84, "to": 156, "style": "cel", "transition": "iris", "at": "fork", "in": 10, "out": 10},

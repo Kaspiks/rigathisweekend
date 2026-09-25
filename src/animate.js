@@ -9,7 +9,7 @@ import { mkdir, readdir, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import sharp from 'sharp';
 import { z } from 'zod';
-import { EditSpec, GUIDE, planEdit, previewFrames, sourceFrameAt } from './edits.js';
+import { GUIDE, McpEditSpec, fromMcpEdit, toMcpEdit, planEdit, previewFrames, sourceFrameAt } from './edits.js';
 import {
   ASSET_NAME, FOOTAGE_ID, FPS, cleanName, contactSheet, describe, footageFiles, frameWithGrid, grabFrame, limits,
   newFootageId, probe, receive, sampleSheet, saveAsset, secondsOf, spread, transcode, writePoster,
@@ -307,15 +307,15 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async ({ footage, version }) => {
       const f = ready(footage), edit = store.edit(f.id, version ?? null);
       const { timeline, plan, warnings } = planEdit(edit.spec, f.info.work, await withAssets(f.id));
-      return text({ footage: f.id, version: edit.version, note: edit.note, edit: edit.spec, durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, warnings, versions: store.edits(f.id) });
+      return text({ footage: f.id, version: edit.version, note: edit.note, edit: toMcpEdit(edit.spec), durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, warnings, versions: store.edits(f.id) });
     });
 
     server.registerTool('save_edit', {
       description: 'Save an animated edit for a clip as a new version (read get_edit_guide first). Checked against the clip and its pictures; answers with the output↔source timeline and warnings. Saving renders nothing and publishes nothing.',
-      inputSchema: { footage: Id, edit: EditSpec, note: z.string().trim().max(200).optional().describe('What changed, for the version list') }, annotations: write,
+      inputSchema: { footage: Id, edit: McpEditSpec, note: z.string().trim().max(200).optional().describe('What changed, for the version list') }, annotations: write,
     }, async ({ footage, edit, note }) => {
       const f = ready(footage);
-      const { spec, plan, timeline, warnings } = planEdit(edit, f.info.work, await withAssets(f.id));
+      const { spec, plan, timeline, warnings } = planEdit(fromMcpEdit(edit), f.info.work, await withAssets(f.id));
       const saved = store.saveEdit(f.id, spec, note || null);
       return text({ footage: f.id, version: saved.version, format: spec.format, size: [plan.width, plan.height], fps: FPS, durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, warnings, next: 'preview_edit to check frames, then render_edit' });
     });

@@ -7,8 +7,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Store } from '../src/store.js';
+import { createAnimator } from '../src/animate.js';
 import { createApp } from '../src/app.js';
 import { describe, grabFrame, probe, transcode, footageFiles } from '../src/footage.js';
 import { planEdit, previewFrames, sourceFrameAt } from '../src/edits.js';
@@ -81,6 +84,8 @@ test('Edits that do not fit the clip are refused with the reason', () => {
   refuse({ anchors: { a: [{ frame: 1, x: 0.5, y: 0.5 }] }, layers: [{ type: 'zoom', from: 0, to: 50, scale: 2, focus: 'a' }, { type: 'zoom', from: 40, to: 90, scale: 1.5, focus: { x: 0.2, y: 0.2 } }] }, /one zoom at a time/);
   refuse({ layers: [{ type: 'text', from: 0, to: 10, text: 'a\nb\nc\nd' }] }, /three lines/);
   refuse({ layers: [{ type: 'text', from: 0, to: 10, text: 'x', color: 'url(javascript:1)' }] }, /palette name|#rrggbb|Invalid/);
+  refuse({ anchors: { 'Bad Name': [{ frame: 1, x: 0.5, y: 0.5 }] } }, /Invalid/);
+  refuse({ layers: [{ type: 'illustrate', from: 0, to: 10, colors: ['ink'] }] }, /exactly 2/);
   refuse({ layers: [{ type: 'script', from: 0, to: 10 }] }, /Invalid discriminator|type/);
   refuse({ layers: [{ type: 'text', from: 0, to: 10, text: 'x', css: 'position:fixed' }] }, /Unrecognized key/);
   const ok = planEdit({ layers: [{ type: 'image', from: 0, to: 10, asset: 'drawn', place: 'footage' }] }, footage, { drawn: { width: 1000, height: 1000 } });
@@ -178,6 +183,57 @@ test('Pictures for an edit are stored as PNG under a safe name', needsFfmpeg, as
   assert.equal(store.footage(id).status, 'ready');
 });
 
+test('save_edit advertises a compatible MCP input schema', async t => {
+  const fixtureId = 'a'.repeat(24);
+  let saved;
+  const store = {
+    dir: join(tmpdir(), 'riga-schema-check'),
+    recoverFootage() {},
+    footage: id => ({ id, status: 'ready', info: { work: { frames: 120, width: 1080, height: 1920, duration: 4 } } }),
+    saveEdit: (_id, spec, note) => (saved = { version: 1, spec, note }),
+    edit: () => saved,
+    edits: () => [{ version: 1 }],
+  };
+  const app = { locals: { renders: new Set() }, get() {}, post() {}, patch() {}, delete() {} };
+  const server = new McpServer({ name: 'schema-check', version: '1' });
+  createAnimator(app, store, { APP_ORIGIN: 'http://localhost' }).register(server);
+  const client = new Client({ name: 'schema-check', version: '1' });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  t.after(async () => { await client.close(); await server.close(); });
+  const tools = (await client.listTools()).tools;
+  const schema = tools.find(x => x.name === 'save_edit').inputSchema;
+  const walk = value => {
+    if (!value || typeof value !== 'object') return;
+    assert.ok(!('propertyNames' in value), 'the MCP schema must not advertise propertyNames');
+    if ('items' in value) assert.ok(!Array.isArray(value.items), 'array items must be one schema, not a tuple');
+    if ('additionalProperties' in value) assert.equal(typeof value.additionalProperties, 'boolean', 'the MCP schema must not advertise arbitrary keyed records');
+    for (const child of Object.values(value)) walk(child);
+  };
+  walk(schema);
+  assert.equal(schema.properties.edit.type, 'object');
+  assert.equal(schema.properties.edit.properties.anchors.type, 'array');
+  assert.equal(schema.properties.edit.properties.anchors.items.properties.name.type, 'string');
+  const result = await client.callTool({ name: 'save_edit', arguments: {
+    footage: fixtureId, edit: {
+      anchors: [{ name: 'cup', keys: [{ frame: 8, x: 0.5, y: 0.6 }] }],
+      layers: [{ type: 'illustrate', from: 0, to: 30, style: 'duotone', colors: ['ink', '#d4ed86'], at: 'cup' }],
+    },
+  } });
+  assert.ok(!result.isError, result.content[0]?.text);
+  assert.deepEqual(saved.spec.anchors, { cup: [{ frame: 8, x: 0.5, y: 0.6 }] });
+  assert.deepEqual(saved.spec.layers[0].colors, ['ink', '#d4ed86']);
+  const fetched = await client.callTool({ name: 'get_edit', arguments: { footage: fixtureId } });
+  assert.deepEqual(dataOf(fetched).edit.anchors, [{ name: 'cup', keys: [{ frame: 8, x: 0.5, y: 0.6 }] }]);
+  const duplicate = await client.callTool({ name: 'save_edit', arguments: {
+    footage: fixtureId, edit: { anchors: [
+      { name: 'cup', keys: [{ frame: 8, x: 0.5, y: 0.6 }] },
+      { name: 'cup', keys: [{ frame: 9, x: 0.6, y: 0.6 }] },
+    ] },
+  } });
+  assert.ok(duplicate.isError);
+});
+
 test('ChatGPT can look at a clip, save an edit, preview it and render it over MCP', needsFfmpeg, async t => {
   const { dir, store, upload, settle, calls, mcp } = await setup(t, { busy: 1 });
   const { id } = await upload(await readFile(await rampClip(dir))).then(json); await settle();
@@ -205,13 +261,15 @@ test('ChatGPT can look at a clip, save an edit, preview it and render it over MC
   const bad = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers: [{ type: 'sticker', from: 0, to: 10, shape: 'steam', at: 'cup' }] } } });
   assert.ok(bad.isError);
   assert.match(bad.content[0].text, /no anchor 'cup'/);
-  const edit = { timeline: [{ from: 10, to: 40 }, { hold: 40, frames: 15 }], anchors: { cup: [{ frame: 10, x: 0.4, y: 0.5 }, { frame: 40, x: 0.6, y: 0.4 }] },
+  const edit = { timeline: [{ from: 10, to: 40 }, { hold: 40, frames: 15 }], anchors: [{ name: 'cup', keys: [{ frame: 10, x: 0.4, y: 0.5 }, { frame: 40, x: 0.6, y: 0.4 }] }],
     layers: [{ type: 'illustrate', from: 25, to: 45, style: 'ink', transition: 'iris', at: 'cup' }, { type: 'text', from: 30, to: 45, text: 'Crema', style: 'callout', at: 'cup', offset: { x: -0.2, y: 0.2 }, pointer: true }] };
   const saved = dataOf(await client.callTool({ name: 'save_edit', arguments: { footage: id, edit, note: 'first cut' } }));
   assert.equal(saved.version, 1);
   assert.equal(saved.durationFrames, 45);
   assert.deepEqual(saved.timeline, [{ output: [0, 30], source: [10, 40] }, { output: [30, 45], hold: 40 }]);
-  assert.equal(dataOf(await client.callTool({ name: 'get_edit', arguments: { footage: id } })).edit.layers[1].text, 'Crema');
+  const fetched = dataOf(await client.callTool({ name: 'get_edit', arguments: { footage: id } })).edit;
+  assert.equal(fetched.layers[1].text, 'Crema');
+  assert.deepEqual(fetched.anchors, edit.anchors);
 
   // The renderer is busy with a story at first: the preview waits its turn instead of failing.
   const preview = await client.callTool({ name: 'preview_edit', arguments: { footage: id, frames: [44, 5, 30] } });
