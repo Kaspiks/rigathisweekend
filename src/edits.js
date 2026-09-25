@@ -31,7 +31,7 @@ const Path = () => z.array(z.object({
 const Facing = () => z.enum(['as-drawn', 'flip', 'path']).default('as-drawn')
   .describe('path: turns to face the way it moves along `path` and leans into turns (draw it facing right); flip: mirrored');
 const Follow = () => z.string().regex(ANCHOR).optional()
-  .describe('An anchor on something that stays put in the scene (the table): the layer\'s at and path move with it as the camera moves, so a handheld shot does not leave it sliding. Positions are as they are when the anchor is at its first keyframe');
+  .describe('An anchor on something that stays put in the scene (the table): the layer\'s at and path move with it as the camera moves, so a handheld shot does not leave it sliding. Positions are as they are when the anchor is at its first keyframe; path keys on an anchor (at) already move with it');
 const Depth = () => Unit().optional().describe('How near it is, 0 far – 1 near (get_depth): it is hidden wherever the scene is nearer, so it can pass behind things. Needs depth on the edit');
 const Span = () => ({
   from: Frame().describe('First OUTPUT frame the layer is on'),

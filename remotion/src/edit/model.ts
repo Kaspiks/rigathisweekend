@@ -144,8 +144,13 @@ export function screenPlace(props: FootageEditProps, cam: Camera, base: number, 
 // Where a layer is at a frame: along its path when it has one (smoothed through the keys, and a key
 // naming an anchor sits wherever that anchor is at this frame), otherwise at `at`.
 type Moving = { at?: Place; offset?: Point; path?: PathKey[]; follow?: string };
-function pathPoint(props: FootageEditProps, cam: Camera, base: number, frame: number, path: PathKey[]): Point {
-  const key = (k: PathKey) => screenPlace(props, cam, base, frame, k.at ?? { x: k.x ?? 0.5, y: k.y ?? 0.5 }, undefined, { x: 0.5, y: 0.5 });
+// `shift` (from follow) moves the x/y keys only: a key on an anchor already moves with the footage.
+function pathPoint(props: FootageEditProps, cam: Camera, base: number, frame: number, path: PathKey[], shift: Point = { x: 0, y: 0 }): Point {
+  const key = (k: PathKey) => {
+    if (k.at) return screenPlace(props, cam, base, frame, k.at, undefined, { x: 0.5, y: 0.5 });
+    const p = screenPlace(props, cam, base, frame, { x: k.x ?? 0.5, y: k.y ?? 0.5 }, undefined, { x: 0.5, y: 0.5 });
+    return { x: p.x + shift.x, y: p.y + shift.y };
+  };
   if (frame <= path[0].frame) return key(path[0]);
   const last = path.length - 1;
   if (frame >= path[last].frame) return key(path[last]);
@@ -160,10 +165,10 @@ export function layerPoint(props: FootageEditProps, cam: Camera, base: number, f
   const shift = followShift(props, cam, base, frame, layer.follow);
   if (!layer.path?.length) {
     const p = screenPlace(props, cam, base, frame, layer.at, layer.offset, fallback);
-    return { x: p.x + shift.x, y: p.y + shift.y };
+    return typeof layer.at === 'string' ? p : { x: p.x + shift.x, y: p.y + shift.y };
   }
-  const p = pathPoint(props, cam, base, frame, layer.path);
-  return { x: p.x + shift.x + (layer.offset?.x ?? 0) * props.plan.width, y: p.y + shift.y + (layer.offset?.y ?? 0) * props.plan.height };
+  const p = pathPoint(props, cam, base, frame, layer.path, shift);
+  return { x: p.x + (layer.offset?.x ?? 0) * props.plan.width, y: p.y + (layer.offset?.y ?? 0) * props.plan.height };
 }
 // How far, on screen, the followed anchor has moved since its first keyframe: the camera's drift, which
 // the layer then shares so it stays put on the table instead of on the screen.
