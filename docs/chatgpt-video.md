@@ -49,6 +49,8 @@ What ChatGPT can do in an edit:
 | `sticker` | Steam, sparkles, hearts, stars, circle, arrow, underline, squiggle, burst, pulse, all animated |
 | `illustrate` | Redraw the footage as a drawing (cel, ink, sketch, watercolor, duotone, posterize), with a fade, wipe or iris in and out, and a hand-drawn "boil" |
 | `image` | A picture you uploaded, either on screen or lined up exactly over the footage |
+| `sequence` | Frame-by-frame animation from an uploaded sprite sheet (all frames in one row): flapping wings, a turntable of a 3D object, a hand-drawn flicker |
+| `path` (on images, sequences and stickers) | Flies it through the frame along smoothed keyframes, even during a freeze; the last key can land exactly on an anchor, and `facing: "path"` turns it the way it flies |
 | `zoom` | Push in towards, or follow, an anchor |
 | `shake`, `flash` | Camera shake and a flash, for moments of impact |
 

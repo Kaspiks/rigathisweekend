@@ -7,13 +7,16 @@ export type Point = { x: number; y: number };
 export type Place = string | Point;
 type Span = { from: number; to: number; in: number; out: number };
 export type TextLayer = Span & { type: 'text'; text: string; style: 'title' | 'callout' | 'caption' | 'label' | 'script' | 'band'; at?: Place; offset?: Point; pointer: boolean; size?: number; color?: string; background?: string; align: 'left' | 'center' | 'right'; enter: 'pop' | 'fade' | 'rise' | 'type' | 'slide' | 'none'; exit: 'fade' | 'pop' | 'sink' | 'none' };
-export type StickerLayer = Span & { type: 'sticker'; shape: 'sparkles' | 'steam' | 'hearts' | 'stars' | 'circle' | 'arrow' | 'burst' | 'pulse' | 'underline' | 'squiggle'; at: Place; offset?: Point; size: number; color: string; rotate: number; enter: 'draw' | 'pop' | 'fade' | 'none'; exit: 'fade' | 'pop' | 'none' };
+export type PathKey = { frame: number; x?: number; y?: number; at?: string };
+export type Facing = 'as-drawn' | 'flip' | 'path';
+export type StickerLayer = Span & { type: 'sticker'; shape: 'sparkles' | 'steam' | 'hearts' | 'stars' | 'circle' | 'arrow' | 'burst' | 'pulse' | 'underline' | 'squiggle'; at?: Place; offset?: Point; path?: PathKey[]; size: number; color: string; rotate: number; enter: 'draw' | 'pop' | 'fade' | 'none'; exit: 'fade' | 'pop' | 'none' };
 export type IllustrateLayer = Span & { type: 'illustrate'; style: 'cel' | 'ink' | 'sketch' | 'watercolor' | 'duotone' | 'posterize'; transition: 'fade' | 'wipe' | 'iris'; at?: Place; boil: boolean; colors?: [string, string] };
-export type ImageLayer = Span & { type: 'image'; asset: string; place: 'footage' | 'screen'; at?: Place; offset?: Point; size: number; opacity: number; enter: 'pop' | 'fade' | 'wipe' | 'none'; exit: 'pop' | 'fade' | 'none'; motion: 'none' | 'float' | 'boil' | 'sway' | 'pulse' | 'spin' };
+export type ImageLayer = Span & { type: 'image'; asset: string; place: 'footage' | 'screen'; at?: Place; offset?: Point; path?: PathKey[]; facing?: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'wipe' | 'none'; exit: 'pop' | 'fade' | 'none'; motion: 'none' | 'float' | 'boil' | 'sway' | 'pulse' | 'spin' };
 export type ZoomLayer = Span & { type: 'zoom'; scale: number; focus: Place };
 export type ShakeLayer = Span & { type: 'shake'; strength: number };
 export type FlashLayer = Span & { type: 'flash'; color: string };
-export type Layer = TextLayer | StickerLayer | IllustrateLayer | ImageLayer | ZoomLayer | ShakeLayer | FlashLayer;
+export type SequenceLayer = Span & { type: 'sequence'; asset: string; count: number; fps: number; loop: boolean; at?: Place; offset?: Point; path?: PathKey[]; facing: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none'; motion: 'none' | 'bob' | 'sway' };
+export type Layer = TextLayer | StickerLayer | IllustrateLayer | ImageLayer | SequenceLayer | ZoomLayer | ShakeLayer | FlashLayer;
 export type Keyframe = { frame: number; x: number; y: number };
 export type Spec = { format: string; fit: 'cover' | 'contain'; background: string; audio: 'source' | 'mute'; anchors: Record<string, Keyframe[]>; layers: Layer[] };
 export type Segment = { from: number; to: number; source: number; hold?: boolean; sourceTo?: number; speed?: number };
@@ -115,6 +118,42 @@ export function screenPlace(props: FootageEditProps, cam: Camera, base: number, 
     : typeof at === 'string' ? toScreen(props, cam, base, footagePoint(spec, at, sourceAt(plan.segments, frame)))
       : { x: at.x * plan.width, y: at.y * plan.height };
   return { x: p.x + (offset?.x ?? 0) * plan.width, y: p.y + (offset?.y ?? 0) * plan.height };
+}
+
+// Where a layer is at a frame: along its path when it has one (smoothed through the keys, and a key
+// naming an anchor sits wherever that anchor is at this frame), otherwise at `at`.
+type Moving = { at?: Place; offset?: Point; path?: PathKey[] };
+function pathPoint(props: FootageEditProps, cam: Camera, base: number, frame: number, path: PathKey[]): Point {
+  const key = (k: PathKey) => screenPlace(props, cam, base, frame, k.at ?? { x: k.x ?? 0.5, y: k.y ?? 0.5 }, undefined, { x: 0.5, y: 0.5 });
+  if (frame <= path[0].frame) return key(path[0]);
+  const last = path.length - 1;
+  if (frame >= path[last].frame) return key(path[last]);
+  const i = path.findIndex((k, n) => frame >= k.frame && frame < path[n + 1].frame);
+  const p0 = key(path[Math.max(0, i - 1)]), p1 = key(path[i]), p2 = key(path[i + 1]), p3 = key(path[Math.min(last, i + 2)]);
+  const t = (frame - path[i].frame) / (path[i + 1].frame - path[i].frame);
+  // Catmull-Rom: a curve through every key, so a flight path bends instead of zig-zagging.
+  const cr = (a: number, b: number, c: number, d: number) => 0.5 * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (-a + 3 * b - 3 * c + d) * t * t * t);
+  return { x: cr(p0.x, p1.x, p2.x, p3.x), y: cr(p0.y, p1.y, p2.y, p3.y) };
+}
+export function layerPoint(props: FootageEditProps, cam: Camera, base: number, frame: number, layer: Moving, fallback: Point): Point {
+  if (!layer.path?.length) return screenPlace(props, cam, base, frame, layer.at, layer.offset, fallback);
+  const p = pathPoint(props, cam, base, frame, layer.path);
+  return { x: p.x + (layer.offset?.x ?? 0) * props.plan.width, y: p.y + (layer.offset?.y ?? 0) * props.plan.height };
+}
+// Which way a thing on a path faces, and how much it leans: it looks the way it is going (drawn facing
+// right), keeps its last direction while hovering, and tilts up to 20° into climbs and dives.
+export function heading(props: FootageEditProps, cam: Camera, base: number, frame: number, layer: Moving & { facing?: Facing }) {
+  if (layer.facing === 'flip') return { flip: true, tilt: 0 };
+  if (layer.facing !== 'path' || !layer.path?.length) return { flip: false, tilt: 0 };
+  const at = (f: number) => pathPoint(props, cam, base, f, layer.path!);
+  for (let back = 0; back < 30; back++) {
+    const a = at(frame - back - 2), b = at(frame - back + 2), dx = b.x - a.x, dy = b.y - a.y;
+    if (Math.abs(dx) + Math.abs(dy) < 1) continue;
+    const flip = dx < 0;
+    const lean = Math.max(-20, Math.min(20, (Math.atan2(dy, Math.abs(dx)) * 180) / Math.PI));
+    return { flip, tilt: back ? 0 : flip ? -lean : lean };
+  }
+  return { flip: false, tilt: 0 };
 }
 
 // Entrance and exit as style: opacity, scale and movement.

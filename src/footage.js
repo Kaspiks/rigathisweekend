@@ -242,7 +242,8 @@ export async function saveAsset(buffer, file) {
   try { meta = await sharp(buffer).metadata(); } catch { throw fail('That file is not an image this server can read. Export it as PNG, JPEG or WebP'); }
   if (Math.max(meta.width || 0, meta.height || 0) < 64) throw fail('That image is too small to use');
   const tmp = `${file}.part`;
-  const out = await sharp(buffer).rotate().resize(2160, 2160, { fit: 'inside', withoutEnlargement: true }).png().toFile(tmp);
+  // Up to 2160 tall and 8192 wide, so a sprite sheet of many frames side by side keeps its frame size.
+  const out = await sharp(buffer).rotate().resize(8192, 2160, { fit: 'inside', withoutEnlargement: true }).png().toFile(tmp);
   await rename(tmp, file);
   return { width: out.width, height: out.height };
 }

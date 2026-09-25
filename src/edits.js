@@ -19,6 +19,16 @@ const Place = () => z.union([z.string().regex(ANCHOR), z.object({ x: Unit(), y: 
   .describe('An anchor name (sticks to that thing in the footage, following its movement and any zoom) or {x,y} in 0–1 of the finished frame (fixed on screen)');
 const Offset = () => z.object({ x: z.number().min(-1).max(1), y: z.number().min(-1).max(1) }).strict()
   .describe('Shift from `at`, in fractions of the finished frame (x: -0.2 is a fifth of the width to the left)');
+// A flight path in OUTPUT frames, so things can move even during a freeze. Positions between keys are
+// smoothed into curves. A key can name an anchor instead of x/y, to land exactly on something in the shot.
+const Path = () => z.array(z.object({
+  frame: Frame().describe('OUTPUT frame'),
+  x: Unit().optional(), y: Unit().optional(),
+  at: z.string().regex(ANCHOR).optional().describe('Instead of x/y: an anchor name, to arrive exactly on it'),
+}).strict()).min(2).max(600).optional()
+  .describe('Moves the layer along keyframes {frame,x,y} in 0–1 of the finished frame (or {frame,at:"anchor"}), smoothed into curves; used instead of `at`');
+const Facing = () => z.enum(['as-drawn', 'flip', 'path']).default('as-drawn')
+  .describe('path: turns to face the way it moves along `path` and leans into turns (draw it facing right); flip: mirrored');
 const Span = () => ({
   from: Frame().describe('First OUTPUT frame the layer is on'),
   to: Frame().describe('OUTPUT frame the layer is gone by (exclusive)'),
@@ -45,7 +55,7 @@ const Sticker = z.object({
   type: z.literal('sticker'), ...Span(),
   shape: z.enum(['sparkles', 'steam', 'hearts', 'stars', 'circle', 'arrow', 'burst', 'pulse', 'underline', 'squiggle'])
     .describe('Animated drawing. steam rises and sparkles twinkle for as long as they are on; circle, arrow, underline and squiggle draw themselves on; burst and pulse radiate'),
-  at: Place(), offset: Offset().optional(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(),
   size: z.number().int().min(40).max(1200).default(240).describe('Width in pixels on a 1080-wide frame'),
   color: Color().default('lime'),
   rotate: z.number().min(-180).max(180).default(0).describe('Degrees; an arrow points right at 0'),
@@ -68,12 +78,28 @@ const Image = z.object({
   asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of an image uploaded for this footage (see list_footage)'),
   place: z.enum(['footage', 'screen']).default('screen')
     .describe('footage: cover the video exactly and move with it (an illustration drawn over a frame of this clip); screen: a picture placed at `at`'),
-  at: Place().optional(), offset: Offset().optional(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(),
   size: z.number().min(0.05).max(2).default(0.4).describe('Width as a fraction of the finished frame (screen placement)'),
   opacity: Unit().default(1),
   enter: z.enum(['pop', 'fade', 'wipe', 'none']).default('fade'),
   exit: z.enum(['pop', 'fade', 'none']).default('fade'),
   motion: z.enum(['none', 'float', 'boil', 'sway', 'pulse', 'spin']).default('none'),
+}).strict();
+
+// Frame-by-frame animation from a sprite sheet: every frame side by side in one row, equal widths,
+// on a transparent background. A flapping bird, a hand-drawn flicker, a turntable of a 3D object.
+const Sequence = z.object({
+  type: z.literal('sequence'), ...Span(),
+  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of an uploaded sprite sheet: all frames side by side in one row, equal widths'),
+  count: z.number().int().min(2).max(64).describe('How many frames the sheet holds'),
+  fps: z.number().int().min(1).max(30).default(12).describe('How fast the frames play; 8–12 feels hand-drawn, 24–30 smooth'),
+  loop: z.boolean().default(true).describe('Repeat the frames, or stop on the last one'),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(),
+  size: z.number().min(0.03).max(2).default(0.2).describe('Width of one frame as a fraction of the finished frame'),
+  opacity: Unit().default(1),
+  enter: z.enum(['pop', 'fade', 'none']).default('fade'),
+  exit: z.enum(['pop', 'fade', 'none']).default('fade'),
+  motion: z.enum(['none', 'bob', 'sway']).default('none').describe('bob: gentle up and down, like hovering'),
 }).strict();
 
 const Zoom = z.object({
@@ -85,7 +111,7 @@ const Zoom = z.object({
 const Shake = z.object({ type: z.literal('shake'), ...Span(), strength: Unit().default(0.4) }).strict();
 const Flash = z.object({ type: z.literal('flash'), ...Span(), color: Color().default('white') }).strict();
 
-export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Zoom, Shake, Flash]);
+export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Zoom, Shake, Flash]);
 
 const Play = z.object({
   from: Frame().describe('First SOURCE frame'), to: Frame().describe('SOURCE frame to stop before'),
@@ -188,7 +214,23 @@ export function planEdit(input, footage, assets = {}) {
     needAnchor(where, layer.at);
     if (layer.type === 'zoom') { needAnchor(where, layer.focus); zooms.push({ ...layer, i }); }
     if (layer.type === 'text' && layer.pointer && (typeof layer.at !== 'string' || !layer.offset)) warnings.push(`${where}: a pointer needs an anchor in 'at' and an 'offset' to point from`);
-    if (layer.type === 'image' && layer.place === 'screen' && layer.at == null) layer.at = { x: 0.5, y: 0.5 };
+    if (layer.path) {
+      layer.path.sort((a, b) => a.frame - b.frame);
+      for (const [k, key] of layer.path.entries()) {
+        const here = `${where}: path.${k}`;
+        if (key.at != null ? key.x != null || key.y != null : key.x == null || key.y == null) errors.push(`${here}: give either x and y, or at`);
+        needAnchor(here, key.at);
+        if (k && key.frame === layer.path[k - 1].frame) errors.push(`${here}: two keys on frame ${key.frame}`);
+      }
+      if (layer.path[0].frame > layer.from || layer.path.at(-1).frame < layer.to - 1) warnings.push(`${where}: the path does not cover the whole layer, so it waits at its first or last point`);
+      if (layer.at != null) warnings.push(`${where}: has both a path and 'at'; the path is used`);
+    }
+    if ((layer.type === 'image' && layer.place === 'screen' || layer.type === 'sequence' || layer.type === 'sticker') && layer.at == null && !layer.path) layer.at = { x: 0.5, y: 0.5 };
+    if (layer.type === 'sequence') {
+      const sheet = assets[layer.asset];
+      if (!sheet) { errors.push(`${where}: no sprite sheet called '${layer.asset}' has been uploaded for this footage`); continue; }
+      if (sheet.width % layer.count) warnings.push(`${where}: '${layer.asset}' is ${sheet.width} px wide, which does not split evenly into ${layer.count} frames; check the count`);
+    }
     if (layer.type === 'image') {
       const asset = assets[layer.asset];
       if (!asset) { errors.push(`${where}: no image called '${layer.asset}' has been uploaded for this footage`); continue; }
@@ -281,6 +323,16 @@ Nothing is published from here: the finished MP4 is on the dashboard for the own
 }
 Here the clip plays from source 30, freezes on 118 (the forkful) for two seconds while it turns into a cel drawing with
 steam and a callout, then carries on. Layer times are OUTPUT frames: the freeze covers output 88–148.
+
+## Moving pictures and frame-by-frame animation
+- Upload a sprite sheet (all frames side by side in one row, equal widths, transparent background) with
+  create_upload_link, then {"type":"sequence","asset":"bird-flap","count":8,"fps":12,...} plays it as a loop.
+  Make every frame on the same canvas with the subject in the same place, or it jitters.
+- path moves an image, sequence or sticker through the FINISHED frame, even during a freeze:
+  "path": [{"frame":90,"x":0.1,"y":0.3},{"frame":110,"x":0.6,"y":0.2},{"frame":130,"at":"rim"}]
+  The last key lands exactly on the "rim" anchor. "facing":"path" turns it to face the way it flies (draw it facing right).
+- A bird that lands: a flapping sequence along a path ending on the rim, then an image of it perched at "rim"
+  starting on the landing frame (sequence exit "none", out 0; perched image enter "none" or "pop").
 
 ## Tips
 - Layers are drawn in list order, later on top. Illustrate layers are the exception: they redraw the footage itself,

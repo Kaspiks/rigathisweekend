@@ -84,7 +84,7 @@ test('Edits that do not fit the clip are refused with the reason', () => {
   refuse({ anchors: { a: [{ frame: 1, x: 0.5, y: 0.5 }] }, layers: [{ type: 'zoom', from: 0, to: 50, scale: 2, focus: 'a' }, { type: 'zoom', from: 40, to: 90, scale: 1.5, focus: { x: 0.2, y: 0.2 } }] }, /one zoom at a time/);
   refuse({ layers: [{ type: 'text', from: 0, to: 10, text: 'a\nb\nc\nd' }] }, /three lines/);
   refuse({ layers: [{ type: 'text', from: 0, to: 10, text: 'x', color: 'url(javascript:1)' }] }, /palette name|#rrggbb|Invalid/);
-  refuse({ anchors: { 'Bad Name': [{ frame: 1, x: 0.5, y: 0.5 }] } }, /Invalid/);
+  refuse({ anchors: { 'Bad Name': [{ frame: 1, x: 0.5, y: 0.5 }] } }, /anchors.Bad Name: use lowercase/);
   refuse({ layers: [{ type: 'illustrate', from: 0, to: 10, colors: ['ink'] }] }, /exactly 2/);
   refuse({ layers: [{ type: 'script', from: 0, to: 10 }] }, /Invalid discriminator|type/);
   refuse({ layers: [{ type: 'text', from: 0, to: 10, text: 'x', css: 'position:fixed' }] }, /Unrecognized key/);
@@ -356,4 +356,36 @@ test('ChatGPT can send a picture from its sandbox through a one-time upload link
   assert.ok(local.isError); assert.match(local.content[0].text, /Non-public address/);
   const none = await client.callTool({ name: 'add_picture', arguments: { footage: id, name: 'nothing' } });
   assert.ok(none.isError); assert.match(none.content[0].text, /create_upload_link/);
+});
+
+test('Animations move: sprite sheets play frame by frame along a path that can land on an anchor', async t => {
+  const footage = { frames: 120, width: 1080, height: 1920 }, assets = { 'bird-flap': { width: 2400, height: 240 }, 'bird-perch': { width: 300, height: 240 } };
+  const { spec, warnings } = planEdit({
+    timeline: [{ from: 0, to: 60 }, { hold: 60, frames: 60 }],
+    anchors: { rim: [{ frame: 60, x: 0.5, y: 0.3 }] },
+    layers: [
+      { type: 'sequence', from: 40, to: 100, asset: 'bird-flap', count: 8, facing: 'path', path: [{ frame: 99, at: 'rim' }, { frame: 40, x: 0.05, y: 0.1 }, { frame: 70, x: 0.8, y: 0.4 }] },
+      { type: 'image', from: 100, to: 120, asset: 'bird-perch', at: 'rim' },
+      { type: 'sticker', from: 60, to: 90, shape: 'hearts', path: [{ frame: 60, x: 0.2, y: 0.8 }, { frame: 89, x: 0.8, y: 0.8 }] },
+    ],
+  }, footage, assets);
+  assert.deepEqual(spec.layers[0].path.map(k => k.frame), [40, 70, 99], 'path keys are put in order');
+  assert.deepEqual([spec.layers[0].fps, spec.layers[0].loop], [12, true]);
+  assert.equal(spec.layers[2].at, undefined, 'a sticker on a path needs no fixed position');
+  assert.deepEqual(warnings, []);
+  const refuse = (layer, pattern, a = assets) => assert.throws(() => planEdit({ layers: [layer] }, footage, a), pattern);
+  refuse({ type: 'sequence', from: 0, to: 10, asset: 'missing', count: 4 }, /no sprite sheet called 'missing'/);
+  refuse({ type: 'sequence', from: 0, to: 10, asset: 'bird-flap', count: 8, path: [{ frame: 0, x: 0.1 }, { frame: 9, x: 0.2, y: 0.2 }] }, /either x and y, or at/);
+  refuse({ type: 'image', from: 0, to: 10, asset: 'bird-perch', path: [{ frame: 0, at: 'nest' }, { frame: 9, x: 0.2, y: 0.2 }] }, /no anchor 'nest'/);
+  refuse({ type: 'sequence', from: 0, to: 10, asset: 'bird-flap', count: 1 }, /2|count/);
+  const uneven = planEdit({ layers: [{ type: 'sequence', from: 0, to: 10, asset: 'bird-flap', count: 7 }] }, footage, assets);
+  assert.match(uneven.warnings.join(), /does not split evenly into 7 frames/);
+});
+
+test('A wide sprite sheet keeps its frame size when stored', async t => {
+  const { saveAsset } = await import('../src/footage.js');
+  const dir = await mkdtemp(join(tmpdir(), 'riga-sheet-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const sheet = await sharp({ create: { width: 3200, height: 300, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png().toBuffer();
+  assert.deepEqual(await saveAsset(sheet, join(dir, 'bird-flap.png')), { width: 3200, height: 300 });
 });

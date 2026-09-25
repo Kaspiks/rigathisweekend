@@ -9,8 +9,8 @@ import '@fontsource/great-vibes/400.css';
 import type { CSSProperties } from 'react';
 import { AbsoluteFill, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
 import { BoilFilter, IllustrationFilter } from './edit/filters';
-import type { FootageEditProps, IllustrateLayer, ImageLayer, Layer } from './edit/model';
-import { PALETTE, baseScale, cameraAt, colour, footageRect, motionStyle, phase, screenPlace } from './edit/model';
+import type { FootageEditProps, IllustrateLayer, ImageLayer, Layer, SequenceLayer } from './edit/model';
+import { PALETTE, baseScale, cameraAt, colour, footageRect, heading, layerPoint, motionStyle, phase, screenPlace } from './edit/model';
 import { Sticker } from './edit/Stickers';
 import { DEFAULT_AT, TextBox } from './edit/Texts';
 
@@ -52,7 +52,10 @@ function reveal(layer: IllustrateLayer, frame: number, centre: { x: number; y: n
   return { clipPath: `circle(${(far * e * (1 - x)).toFixed(1)}px at ${centre.x.toFixed(1)}px ${centre.y.toFixed(1)}px)` };
 }
 
-const Picture = ({ layer, props, rect, x, y, frame, boilId }: { layer: ImageLayer; props: FootageEditProps; rect: Rect; x: number; y: number; frame: number; boilId: string }) => {
+type Turn = { flip: boolean; tilt: number };
+const turned = (t: Turn) => `rotate(${t.tilt.toFixed(2)}deg)${t.flip ? ' scaleX(-1)' : ''}`;
+
+const Picture = ({ layer, props, rect, x, y, frame, boilId, turn }: { layer: ImageLayer; props: FootageEditProps; rect: Rect; x: number; y: number; frame: number; boilId: string; turn: Turn }) => {
   const asset = props.assets[layer.asset];
   const p = phase(layer, frame);
   if (!asset || !p.on) return null;
@@ -67,7 +70,25 @@ const Picture = ({ layer, props, rect, x, y, frame, boilId }: { layer: ImageLaye
   if (layer.place === 'footage')
     return <Img src={asset.src} style={{ ...common, left: rect.left, top: rect.top, width: rect.width, height: rect.height, objectFit: 'cover', transform: `scale(${m.scale}) ${motion}` }} />;
   const width = layer.size * props.plan.width, height = (width * asset.height) / asset.width;
-  return <Img src={asset.src} style={{ ...common, left: x - width / 2, top: y - height / 2, width, height, transform: `translate(${m.dx}px, ${m.dy}px) scale(${m.scale}) ${motion}` }} />;
+  return <Img src={asset.src} style={{ ...common, left: x - width / 2, top: y - height / 2, width, height, transform: `translate(${m.dx}px, ${m.dy}px) scale(${m.scale}) ${motion} ${turned(turn)}` }} />;
+};
+
+// Frame-by-frame animation from a sprite sheet: the sheet slides behind a one-frame window.
+const Sprite = ({ layer, props, x, y, frame, turn }: { layer: SequenceLayer; props: FootageEditProps; x: number; y: number; frame: number; turn: Turn }) => {
+  const sheet = props.assets[layer.asset];
+  const p = phase(layer, frame);
+  if (!sheet || !p.on) return null;
+  const m = motionStyle(layer.enter, layer.exit, p.enter, p.exit);
+  const step = Math.floor((p.local * layer.fps) / props.plan.fps);
+  const index = layer.loop ? step % layer.count : Math.min(step, layer.count - 1);
+  const width = layer.size * props.plan.width, height = (width * sheet.height * layer.count) / sheet.width;
+  const motion = layer.motion === 'bob' ? `translateY(${(Math.sin(p.local / 9) * 10).toFixed(2)}px)` : layer.motion === 'sway' ? `rotate(${(Math.sin(p.local / 16) * 4).toFixed(2)}deg)` : '';
+  return (
+    <div style={{ position: 'absolute', left: x - width / 2, top: y - height / 2, width, height, overflow: 'hidden', opacity: m.opacity * layer.opacity,
+      transform: `translate(${m.dx}px, ${m.dy}px) scale(${m.scale}) ${motion} ${turned(turn)}` }}>
+      <Img src={sheet.src} style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${layer.count * 100}%`, maxWidth: 'none', transform: `translateX(${(-100 * index) / layer.count}%)` }} />
+    </div>
+  );
 };
 
 export const FootageEdit = (props: FootageEditProps) => {
@@ -77,7 +98,7 @@ export const FootageEdit = (props: FootageEditProps) => {
   const cam = cameraAt(props, frame, base, (seed) => random(seed));
   const rect = footageRect(props, cam, base);
   const at = (layer: Layer & { at?: unknown; offset?: { x: number; y: number } }, fallback: { x: number; y: number }) =>
-    screenPlace(props, cam, base, frame, layer.at as never, layer.offset, fallback);
+    layerPoint(props, cam, base, frame, layer as never, fallback);
   const active = (l: Layer) => frame >= l.from && frame < l.to;
   const drawings = spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'illustrate' && active(l));
   const boils = spec.layers.some((l) => l.type === 'image' && l.motion === 'boil' && active(l));
@@ -110,7 +131,11 @@ export const FootageEdit = (props: FootageEditProps) => {
           }
           case 'image': {
             const p = at(l, { x: 0.5, y: 0.5 });
-            return <Picture key={i} layer={l} props={props} rect={rect} x={p.x} y={p.y} frame={frame} boilId="boil-img" />;
+            return <Picture key={i} layer={l} props={props} rect={rect} x={p.x} y={p.y} frame={frame} boilId="boil-img" turn={heading(props, cam, base, frame, l)} />;
+          }
+          case 'sequence': {
+            const p = at(l, { x: 0.5, y: 0.5 });
+            return <Sprite key={i} layer={l} props={props} x={p.x} y={p.y} frame={frame} turn={heading(props, cam, base, frame, l)} />;
           }
           case 'flash': {
             // Full strength two frames in, gone by the end of the layer.
