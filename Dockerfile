@@ -1,8 +1,10 @@
 FROM node:24-bookworm-slim AS base
 RUN apt-get update && apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+COPY package*.json .npmrc ./
+# .npmrc skips onnxruntime's GPU download; the Windows and macOS builds it ships are not needed here either.
+RUN npm ci --omit=dev && npm cache clean --force \
+ && rm -rf node_modules/onnxruntime-node/bin/napi-v6/win32 node_modules/onnxruntime-node/bin/napi-v6/darwin
 COPY src ./src
 COPY public ./public
 RUN mkdir /app/data && chown node:node /app/data

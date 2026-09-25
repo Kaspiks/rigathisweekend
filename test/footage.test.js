@@ -26,6 +26,9 @@ async function rampClip(dir, { fps = 30, seconds = 2, size = '64x96' } = {}) {
   ffmpeg(['-f', 'lavfi', '-i', `color=black:s=${size}:r=${fps},geq=lum='16+N*3':cb=128:cr=128`, '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100', '-t', String(seconds), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '8', '-c:a', 'aac', '-shortest', file]);
   return file;
 }
+// Stands in for the depth model in tests: same input and output as Depth Anything, and its "depth" is
+// just each pixel's brightness, so a clip that brightens left to right has depth growing left to right.
+const STANDIN_DEPTH = new URL('./fixtures/standin-depth.onnx', import.meta.url).pathname;
 const frameOf = async jpeg => Math.round((await sharp(jpeg).stats()).channels[0].mean / (3 * 255 / 219));
 
 test('Clips are described upright, with HDR and sound noted, and files without video are refused', () => {
@@ -126,7 +129,7 @@ async function setup(t, { renderUrl = 'http://render:3200', busy = 0, failRender
     return { ok: true, status: 200, json: async () => ({ file: `${body.render}.mp4`, seconds: 2, width: 540, height: 960 }) };
   };
   const token = 'f'.repeat(32);
-  const app = createApp(store, { ADMIN_TOKEN: token, RENDER_URL: renderUrl, APP_ORIGIN: 'http://localhost:3100', FOOTAGE_MAX_MB: '2' }, { fetcher, animator: { previewWaitMs: 5000, busyWaitMs: 10 } });
+  const app = createApp(store, { ADMIN_TOKEN: token, RENDER_URL: renderUrl, APP_ORIGIN: 'http://localhost:3100', FOOTAGE_MAX_MB: '2', DEPTH_MODEL: STANDIN_DEPTH }, { fetcher, animator: { previewWaitMs: 5000, busyWaitMs: 10 } });
   const server = app.listen(0, '127.0.0.1'); await new Promise(r => server.once('listening', r));
   const settle = async () => { while (app.locals.renders.size) await Promise.all([...app.locals.renders]); };
   t.after(async () => { await settle(); await new Promise(r => server.close(r)); store.close(); await rm(dir, { recursive: true, force: true }); });
@@ -198,6 +201,7 @@ test('save_edit advertises a compatible MCP input schema', async t => {
     edit: () => saved,
     edits: () => [{ version: 1 }],
     graphics: () => ({}),
+    footageList: () => [],
   };
   const app = { locals: { renders: new Set() }, get() {}, post() {}, patch() {}, delete() {} };
   const server = new McpServer({ name: 'schema-check', version: '1' });
@@ -520,10 +524,46 @@ test('ChatGPT can upload a 3D model and animate it walking along a path', needsF
   assert.ok(inside.isError); assert.match(inside.content[0].text, /Non-public address/);
   const notModel = await client.callTool({ name: 'add_model', arguments: { footage: id, name: 'flat', url: 'https://93.184.216.34/cat.png' } });
   assert.ok(notModel.isError); assert.match(notModel.content[0].text, /not a GLB/);
+  // A model can ride along with the table as a handheld camera drifts, and plain models can be tinted.
+  const riding = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { anchors: [{ name: 'table', keys: [{ frame: 0, x: 0.5, y: 0.8 }, { frame: 50, x: 0.45, y: 0.82 }] }], layers: [{ ...layer, follow: 'table', color: 'gold' }] } } });
+  assert.ok(!riding.isError, riding.content?.[0]?.text);
+  const lost = await client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers: [{ ...layer, follow: 'table' }] } } });
+  assert.ok(lost.isError); assert.match(lost.content[0].text, /follow: there is no anchor 'table'/);
   // Models can also be added and removed from the dashboard.
   const auth = { Authorization: `Bearer ${'f'.repeat(32)}` };
   const dash = await fetch(`${base}/api/footage/${id}/models/fox`, { method: 'POST', headers: { ...auth, 'Content-Type': 'model/gltf-binary' }, body: glb() });
   assert.equal(dash.status, 201);
   await fetch(`${base}/api/footage/${id}/models/fox`, { method: 'DELETE', headers: auth });
   assert.deepEqual(dataOf(await client.callTool({ name: 'list_footage', arguments: {} }))[0].models.map(m => m.name), ['cat', 'kitten']);
+});
+
+test('The server makes per-frame depth for a clip in the background', needsFfmpeg, async t => {
+  const { dir, base, auth, upload, settle, mcp, store } = await setup(t);
+  const clip = join(dir, 'gradient.mp4');
+  ffmpeg(['-f', 'lavfi', '-i', "color=black:s=64x96:r=30,geq=lum='X*255/64':cb=128:cr=128", '-frames:v', '45', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clip]);
+  const { id } = await upload(await readFile(clip)).then(json); await settle();
+  const client = await mcp();
+  const started = dataOf(await client.callTool({ name: 'make_depth', arguments: { footage: id } }));
+  assert.ok(['queued', 'running'].includes(started.depthJob.status), JSON.stringify(started));
+  assert.equal(dataOf(await client.callTool({ name: 'make_depth', arguments: { footage: id } })).depthJob.status !== 'failed', true, 'asking again while it runs only reports');
+  const busy = await fetch(`${base}/api/footage/${id}`, { method: 'DELETE', headers: auth });
+  assert.equal(busy.status, 409, 'a clip is not deleted from under its depth job');
+  await settle();
+  const listed = dataOf(await client.callTool({ name: 'list_footage', arguments: {} }))[0];
+  assert.equal(listed.depthJob, null);
+  assert.deepEqual([listed.depth.frames, listed.depth.source], [45, 'server']);
+  const read = dataOf(await client.callTool({ name: 'get_depth', arguments: { footage: id, frame: 20, points: [{ x: 0.05, y: 0.5 }, { x: 0.5, y: 0.5 }, { x: 0.95, y: 0.5 }] } }));
+  const [left, middle, right] = read.points.map(p => p.depth);
+  assert.ok(left < 0.1 && Math.abs(middle - 0.5) < 0.1 && right > 0.9, JSON.stringify(read.points));
+  // The dashboard can start it too, and shows a depth frame.
+  const frame = await fetch(`${base}/footage/${id}/depth/00020.jpg`, { headers: auth });
+  assert.equal(frame.status, 200);
+  assert.equal((await fetch(`${base}/api/footage/${id}/depth`, { method: 'POST', headers: auth })).status, 202);
+  await settle();
+  assert.ok(existsSync(join(footageFiles(dir, id).depth, '00044.jpg')));
+  // A job cut short by a restart says so instead of waiting forever.
+  store.updateFootage(id, { info: { ...store.footage(id).info, depthJob: { status: 'running', progress: 0.3 } } });
+  const routes = () => {};
+  createAnimator({ get: routes, post: routes, patch: routes, delete: routes, locals: { renders: new Set() } }, store, {});
+  assert.match(store.footage(id).info.depthJob.error, /restart/);
 });

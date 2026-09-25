@@ -30,6 +30,8 @@ const Path = () => z.array(z.object({
   .describe('Moves the layer along keyframes {frame,x,y} in 0–1 of the finished frame (or {frame,at:"anchor"}), smoothed into curves; used instead of `at`');
 const Facing = () => z.enum(['as-drawn', 'flip', 'path']).default('as-drawn')
   .describe('path: turns to face the way it moves along `path` and leans into turns (draw it facing right); flip: mirrored');
+const Follow = () => z.string().regex(ANCHOR).optional()
+  .describe('An anchor on something that stays put in the scene (the table): the layer\'s at and path move with it as the camera moves, so a handheld shot does not leave it sliding. Positions are as they are when the anchor is at its first keyframe');
 const Depth = () => Unit().optional().describe('How near it is, 0 far – 1 near (get_depth): it is hidden wherever the scene is nearer, so it can pass behind things. Needs depth on the edit');
 const Span = () => ({
   from: Frame().describe('First OUTPUT frame the layer is on'),
@@ -44,7 +46,7 @@ const Text = z.object({
   style: z.enum(['title', 'callout', 'caption', 'label', 'script', 'band']).default('caption')
     .describe('title: big serif headline; callout: paper card, pairs with pointer; caption: bold subtitle; label: small tag; script: handwritten accent; band: full-width bar'),
   at: Place().optional().describe('Where the text sits. Defaults: title near the top, caption and band near the bottom, others at the centre'),
-  offset: Offset().optional(), depth: Depth(),
+  offset: Offset().optional(), follow: Follow(), depth: Depth(),
   pointer: z.boolean().default(false).describe('Draw a line from the text back to `at`; use with an anchor and an offset for a callout'),
   size: z.number().int().min(20).max(220).optional().describe('Type size in pixels on a 1080-wide frame'),
   color: Color().optional(), background: z.union([Color(), z.literal('none')]).optional(),
@@ -57,7 +59,7 @@ const Sticker = z.object({
   type: z.literal('sticker'), ...Span(),
   shape: z.enum(['sparkles', 'steam', 'hearts', 'stars', 'circle', 'arrow', 'burst', 'pulse', 'underline', 'squiggle'])
     .describe('Animated drawing. steam rises and sparkles twinkle for as long as they are on; circle, arrow, underline and squiggle draw themselves on; burst and pulse radiate'),
-  at: Place().optional(), offset: Offset().optional(), path: Path(), depth: Depth(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), follow: Follow(), depth: Depth(),
   size: z.number().int().min(40).max(1200).default(240).describe('Width in pixels on a 1080-wide frame'),
   color: Color().default('lime'),
   rotate: z.number().min(-180).max(180).default(0).describe('Degrees; an arrow points right at 0'),
@@ -80,7 +82,7 @@ const Image = z.object({
   asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of an image uploaded for this footage (see list_footage)'),
   place: z.enum(['footage', 'screen']).default('screen')
     .describe('footage: cover the video exactly and move with it (an illustration drawn over a frame of this clip); screen: a picture placed at `at`'),
-  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(), depth: Depth(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), follow: Follow(), facing: Facing(), depth: Depth(),
   size: z.number().min(0.05).max(2).default(0.4).describe('Width as a fraction of the finished frame (screen placement)'),
   opacity: Unit().default(1),
   enter: z.enum(['pop', 'fade', 'wipe', 'none']).default('fade'),
@@ -96,7 +98,7 @@ const Sequence = z.object({
   count: z.number().int().min(2).max(64).describe('How many frames the sheet holds'),
   fps: z.number().int().min(1).max(30).default(12).describe('How fast the frames play; 8–12 feels hand-drawn, 24–30 smooth'),
   loop: z.boolean().default(true).describe('Repeat the frames, or stop on the last one'),
-  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(), depth: Depth(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), follow: Follow(), facing: Facing(), depth: Depth(),
   size: z.number().min(0.03).max(2).default(0.2).describe('Width of one frame as a fraction of the finished frame'),
   opacity: Unit().default(1),
   enter: z.enum(['pop', 'fade', 'none']).default('fade'),
@@ -144,7 +146,7 @@ const Graphic = z.object({
   type: z.literal('graphic'), ...Span(),
   use: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).optional().describe('Name of a saved graphic (list_graphics), instead of elements'),
   ...GraphicFields(),
-  at: Place().optional(), offset: Offset().optional(), path: Path(), facing: Facing(), depth: Depth(),
+  at: Place().optional(), offset: Offset().optional(), path: Path(), follow: Follow(), facing: Facing(), depth: Depth(),
   size: z.number().int().min(10).max(4000).default(300).describe('Width in pixels on a 1080-wide frame'),
   opacity: Unit().default(1),
   enter: z.enum(['pop', 'fade', 'none']).default('fade'),
@@ -167,7 +169,7 @@ const Model = z.object({
     speed: z.number().min(0.1).max(4).optional(), loop: z.boolean().optional().describe('Default true; false plays once and holds the last pose (sitting down, landing)'),
   }).strict()).max(20).optional().describe('Switch animations during the layer, e.g. walk then sit: [{"frame":130,"animation":"Sit","loop":false}]'),
   blend: z.number().int().min(0).max(30).default(8).describe('Frames to cross-fade between animations'),
-  at: Place().optional().describe('Where it stands (with pin feet, its feet are here)'), offset: Offset().optional(), path: Path(), depth: Depth(),
+  at: Place().optional().describe('Where it stands (with pin feet, its feet are here)'), offset: Offset().optional(), path: Path(), follow: Follow(), depth: Depth(),
   facing: z.enum(['as-made', 'path']).default('as-made').describe('path: turns to walk or fly the way it moves along `path`, turning round through facing the camera'),
   angle: z.number().min(0).max(90).default(65).describe('With facing path: 90 is a side view, less turns it towards the camera'),
   pin: z.enum(['feet', 'center']).default('feet').describe('Which point of the model sits on `at`: its feet (standing on something) or its middle (flying)'),
@@ -182,6 +184,7 @@ const Model = z.object({
   light: z.enum(['left', 'right', 'front', 'top', 'back']).default('left').describe('Where the main light comes from; match the light in the footage so it sits in the shot'),
   brightness: z.number().min(0.2).max(3).default(1),
   shadow: Unit().default(0.35).describe('Darkness of the shadow it casts on the ground under it; 0 for none (flying)'),
+  color: Color().optional().describe('Tints the whole model; for a plain model without colours of its own'),
   look: z.enum(['as-made', 'toon']).default('as-made').describe('toon: flat cartoon shading with an ink outline, to match illustrated moments'),
   boil: z.boolean().default(false).describe('Hand-drawn wobble, with look toon'),
   opacity: Unit().default(1),
@@ -340,6 +343,7 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
       warnings.push(`${where}: entrance and exit were longer than the layer, so they were shortened`);
     }
     needAnchor(where, layer.at);
+    needAnchor(`${where}: follow`, layer.follow);
     if (layer.type === 'zoom') { needAnchor(where, layer.focus); zooms.push({ ...layer, i }); }
     if (layer.type === 'text' && layer.pointer && (typeof layer.at !== 'string' || !layer.offset)) warnings.push(`${where}: a pointer needs an anchor in 'at' and an 'offset' to point from`);
     if (layer.path) {
@@ -537,11 +541,20 @@ A model layer draws a real 3D model (.glb) in the shot, playing its own animatio
   it passes behind anything nearer than 0.72.
 - "look":"toon" gives flat cartoon shading and an ink outline (add "boil":true), to match illustrated moments.
 - keys turn, tilt, spin, roll and scale animate the model itself, e.g. a product turntable: "keys":{"spin":[{"frame":0,"value":0},{"frame":90,"value":360}]}.
+- Make it sit in the shot, or it looks pasted on:
+  - Handheld footage drifts: add an anchor on a spot of the table that stays put (keyframed through the clip)
+    and give the model "follow": "table". Its at and path then move with the table instead of the screen.
+  - Light: look where the light comes from in the footage (a window behind the cup is "back") and match it.
+  - During an illustrate layer, use a second model layer with "look":"toon" for that stretch, so it is drawn too.
+  - A plain model without colours of its own renders grey; give it "color", or better, use a textured model.
+  - With depth (make_depth), set "depth" so it passes behind the cup instead of floating in front of everything.
 - Preview a couple of frames first: size, tilt and light are what make it sit in the shot.
 
 ## Depth: things passing behind things, depth of field, fog, 2.5D moves
-Depth is a greyscale picture of how far each pixel is (near = white). Two sources:
-- Per-frame, for the whole clip: create_download_link, then in your sandbox run a monocular depth model
+Depth is a greyscale picture of how far each pixel is (near = white). Sources:
+- Easiest: make_depth. The server runs a depth model over every frame in the background (a few minutes;
+  list_footage shows depthJob progress, then depth). Then "depth": {"video": true}.
+- Per-frame, computed by you instead: create_download_link, then in your sandbox run a monocular depth model
   (e.g. Depth Anything V2) on every frame, normalise the whole clip with one min/max (per-frame
   normalising flickers), encode a greyscale MP4 with exactly the clip's frame count, and upload it with
   create_upload_link kind "depth". Then "depth": {"video": true}. It follows cuts and freezes like the footage.

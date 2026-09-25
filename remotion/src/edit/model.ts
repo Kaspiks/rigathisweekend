@@ -30,7 +30,7 @@ export type GraphicLayer = Span & { type: 'graphic'; use?: string; viewBox?: { w
 export type ModelLayer = Span & { type: 'model'; asset: string; animation?: string; speed: number; loop: boolean; actions?: { frame: number; animation: string; speed?: number; loop?: boolean }[]; blend: number;
   at?: Place; offset?: Point; path?: PathKey[]; facing: 'as-made' | 'path'; angle: number; pin: 'feet' | 'center'; size: number; turn: number; tilt: number;
   keys?: Partial<Record<'turn' | 'tilt' | 'spin' | 'roll' | 'scale', Track>>; light: 'left' | 'right' | 'front' | 'top' | 'back'; brightness: number; shadow: number;
-  look: 'as-made' | 'toon'; boil: boolean; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none' };
+  color?: string; follow?: string; look: 'as-made' | 'toon'; boil: boolean; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none' };
 export type BlurLayer = Span & { type: 'blur'; focus: number; range: number; amount: number; near: boolean };
 export type FogLayer = Span & { type: 'fog'; color: string; strength: number; start: number };
 export type ParallaxLayer = Span & { type: 'parallax'; move: 'pan' | 'tilt' | 'orbit'; amount: number };
@@ -142,7 +142,7 @@ export function screenPlace(props: FootageEditProps, cam: Camera, base: number, 
 
 // Where a layer is at a frame: along its path when it has one (smoothed through the keys, and a key
 // naming an anchor sits wherever that anchor is at this frame), otherwise at `at`.
-type Moving = { at?: Place; offset?: Point; path?: PathKey[] };
+type Moving = { at?: Place; offset?: Point; path?: PathKey[]; follow?: string };
 function pathPoint(props: FootageEditProps, cam: Camera, base: number, frame: number, path: PathKey[]): Point {
   const key = (k: PathKey) => screenPlace(props, cam, base, frame, k.at ?? { x: k.x ?? 0.5, y: k.y ?? 0.5 }, undefined, { x: 0.5, y: 0.5 });
   if (frame <= path[0].frame) return key(path[0]);
@@ -156,9 +156,21 @@ function pathPoint(props: FootageEditProps, cam: Camera, base: number, frame: nu
   return { x: cr(p0.x, p1.x, p2.x, p3.x), y: cr(p0.y, p1.y, p2.y, p3.y) };
 }
 export function layerPoint(props: FootageEditProps, cam: Camera, base: number, frame: number, layer: Moving, fallback: Point): Point {
-  if (!layer.path?.length) return screenPlace(props, cam, base, frame, layer.at, layer.offset, fallback);
+  const shift = followShift(props, cam, base, frame, layer.follow);
+  if (!layer.path?.length) {
+    const p = screenPlace(props, cam, base, frame, layer.at, layer.offset, fallback);
+    return { x: p.x + shift.x, y: p.y + shift.y };
+  }
   const p = pathPoint(props, cam, base, frame, layer.path);
-  return { x: p.x + (layer.offset?.x ?? 0) * props.plan.width, y: p.y + (layer.offset?.y ?? 0) * props.plan.height };
+  return { x: p.x + shift.x + (layer.offset?.x ?? 0) * props.plan.width, y: p.y + shift.y + (layer.offset?.y ?? 0) * props.plan.height };
+}
+// How far, on screen, the followed anchor has moved since its first keyframe: the camera's drift, which
+// the layer then shares so it stays put on the table instead of on the screen.
+function followShift(props: FootageEditProps, cam: Camera, base: number, frame: number, follow: string | undefined): Point {
+  const keys = follow ? props.spec.anchors[follow] : undefined;
+  if (!keys?.length) return { x: 0, y: 0 };
+  const now = anchorAt(keys, sourceAt(props.plan.segments, frame)), r = footageRect(props, cam, base);
+  return { x: (now.x - keys[0].x) * r.width, y: (now.y - keys[0].y) * r.height };
 }
 // Which way a thing on a path faces, and how much it leans: it looks the way it is going (drawn facing
 // right), keeps its last direction while hovering, and tilts up to 20° into climbs and dives.

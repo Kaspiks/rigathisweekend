@@ -17,6 +17,7 @@ import {
 } from './footage.js';
 import { fetchPublic } from './photos.js';
 import { MAX_MODEL, deleteModel, modelList, saveModel } from './models.js';
+import { depthEstimateSeconds, depthLimits, depthModel, makeDepth } from './depth.js';
 
 const fail = (message, httpStatus = 400) => Object.assign(new Error(message), { httpStatus });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -61,6 +62,7 @@ export function uploadLinkRoute(store) {
       if (link.kind === 'depth') {
         const f = store.footage(link.footage);
         if (f.status !== 'ready') throw fail('The clip is not ready yet', 409);
+        if (['queued', 'running'].includes(f.info.depthJob?.status)) throw fail('Depth is being made for this clip on the server; wait for it to finish', 409);
         const files = footageFiles(store.dir, f.id), incoming = join(files.dir, 'depth-upload.mp4');
         try {
           await receive(req, incoming, MAX_DEPTH);
@@ -124,6 +126,39 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }
   }
   const queueProcessing = id => tracked(processing = processing.then(() => processClip(id)));
+
+  // Depth made here (src/depth.js), one clip at a time. Its state lives in the clip's info as depthJob
+  // while it is waiting or running, or failed with the reason; finished depth replaces info.depth.
+  const setInfo = (id, patch) => store.updateFootage(id, { info: { ...store.footage(id).info, ...patch } });
+  for (const f of store.footageList()) if (['queued', 'running'].includes(f.info?.depthJob?.status)) setInfo(f.id, { depthJob: { status: 'failed', error: 'Interrupted by a restart; ask again' } });
+  let depthWork = Promise.resolve();
+  function queueDepth(f) {
+    const job = f.info.depthJob;
+    if (['queued', 'running'].includes(job?.status)) return job;
+    const max = depthLimits(env);
+    if (f.info.work.duration > max.seconds) throw fail(`Depth is made on the server for clips up to ${max.seconds} s (DEPTH_MAX_SECONDS); this one is ${Math.round(f.info.work.duration)} s`);
+    setInfo(f.id, { depthJob: { status: 'queued', progress: 0, requested: new Date().toISOString() } });
+    tracked(depthWork = depthWork.then(async () => {
+      const id = f.id;
+      try {
+        setInfo(id, { depthJob: { status: 'running', progress: 0, started: new Date().toISOString() } });
+        const model = await depthModel(store.dir, env);
+        const files = footageFiles(store.dir, id);
+        let shown = 0;
+        const depth = await makeDepth(files.work, files.depth, store.footage(id).info.work, model, { detail: max.detail, onProgress: p => {
+          if (p - shown < 0.02) return;
+          shown = p;
+          try { setInfo(id, { depthJob: { ...store.footage(id).info.depthJob, progress: Math.round(p * 100) / 100 } }); } catch {}
+        } });
+        const { depthJob, ...info } = store.footage(id).info;
+        store.updateFootage(id, { info: { ...info, depth } });
+      } catch (err) {
+        try { setInfo(id, { depthJob: { status: 'failed', error: err.message } }); } catch {}
+      }
+    }));
+    return store.footage(f.id).info.depthJob;
+  }
+  const depthState = f => f.info?.depthJob ? { ...f.info.depthJob, ...(f.info.depthJob.status !== 'failed' ? { estimateSeconds: depthEstimateSeconds(f.info.work.frames) } : {}) } : null;
 
   // Renders run one at a time, in the order asked for. The render service also makes story videos, so
   // when it is busy the job waits its turn instead of failing.
@@ -205,7 +240,8 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       id: f.id, name: f.name, status: f.status, error: f.error, progress: f.progress, created: f.created,
       ...(work ? { frames: work.frames, fps: FPS, seconds: work.duration, width: work.width, height: work.height, orientation: work.width > work.height ? 'landscape' : work.width < work.height ? 'portrait' : 'square', audio: work.audio } : {}),
       source: f.info?.source ?? null,
-      depth: f.info?.depth ? { frames: f.info.depth.frames, updated: f.info.depth.updated } : null,
+      depth: f.info?.depth ? { frames: f.info.depth.frames, updated: f.info.depth.updated, source: f.info.depth.source || 'upload' } : null,
+      depthJob: depthState(f),
       assets: await assetList(store.dir, f.id),
       models: await modelList(footageFiles(store.dir, f.id).models),
       edits: store.edits(f.id),
@@ -267,6 +303,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     const f = store.footage(Id.parse(req.params.id));
     if (['uploading', 'processing'].includes(f.status)) throw fail('This clip is still being processed; delete it once that has finished', 409);
     if (store.footageRenders(f.id).some(r => ['queued', 'rendering'].includes(r.status))) throw fail('This clip has a render in progress; delete it once that has finished', 409);
+    if (['queued', 'running'].includes(f.info?.depthJob?.status)) throw fail('Depth is being made for this clip; delete it once that has finished', 409);
     store.deleteFootage(f.id);
     await rm(footageFiles(store.dir, f.id).dir, { recursive: true, force: true });
     res.json({ ok: true });
@@ -294,13 +331,18 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     await deleteModel(footageFiles(store.dir, f.id).models, req.params.name);
     res.json({ ok: true });
   });
+  app.post('/api/footage/:id/depth', async (req, res) => {
+    const f = ready(Id.parse(req.params.id));
+    queueDepth(f);
+    res.status(202).json(await summary(store.footage(f.id)));
+  });
   app.post('/api/footage/:id/renders', async (req, res) => {
     const f = ready(Id.parse(req.params.id));
     const body = z.object({ version: z.number().int().min(1).optional(), quality: z.enum(['draft', 'final']).default('final') }).parse(req.body || {});
     res.status(202).json(renderSummary(await videoRequest(f, body.version ?? null, body.quality)));
   });
   // The working copy, poster, pictures and renders, for the dashboard. The original upload is not served.
-  app.get(/^\/footage\/([a-f0-9]{24})\/(work\.mp4|poster\.jpg|assets\/[a-z0-9][a-z0-9-]{0,31}\.png|renders\/[0-9]+(?:-sheet|-f[0-9]+)?\.(?:jpg|mp4))$/, (req, res, next) => {
+  app.get(/^\/footage\/([a-f0-9]{24})\/(work\.mp4|poster\.jpg|assets\/[a-z0-9][a-z0-9-]{0,31}\.png|depth\/\d{5}\.jpg|renders\/[0-9]+(?:-sheet|-f[0-9]+)?\.(?:jpg|mp4))$/, (req, res, next) => {
     const [id, file] = [req.params[0], req.params[1]];
     res.sendFile(file, { root: resolve(footageFiles(store.dir, id).dir), dotfiles: 'deny' }, err => { if (err) next(err.statusCode === 404 || err.code === 'ENOENT' ? undefined : err); });
   });
@@ -449,8 +491,17 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         then: `Use it in an edit as {"type":"image","asset":"${name}",...}; list_footage shows it with its size.` });
     });
 
+    server.registerTool('make_depth', {
+      description: 'Make per-frame depth for a clip on the server (Depth Anything V2 Small, near = white), for edits with "depth": {"video": true}. Runs in the background and takes a few minutes (under a second a frame); list_footage shows depthJob progress, then depth. Asking again while it runs just reports progress; asking after it is done makes it again.',
+      inputSchema: { footage: Id }, annotations: write,
+    }, async ({ footage }) => {
+      const f = ready(footage), job = queueDepth(f);
+      return text({ footage: f.id, depthJob: depthState(store.footage(f.id)) ?? job, frames: f.info.work.frames,
+        then: 'Check list_footage until depth is there (depthJob disappears), then use get_depth to read values and "depth": {"video": true} in the edit.' });
+    });
+
     server.registerTool('create_download_link', {
-      description: 'A link to download the clip\'s working copy (H.264 MP4, 30 fps, the exact frames edits use), valid for 30 minutes. For computing per-frame depth in your sandbox: run a monocular depth model on every frame, normalise the whole clip with one min/max so it does not flicker, near = white, and encode a greyscale MP4 with the same number of frames; then create_upload_link with kind depth.',
+      description: 'A link to download the clip\'s working copy (H.264 MP4, 30 fps, the exact frames edits use), valid for 30 minutes. Depth is easiest with make_depth; this is for computing it yourself in your sandbox: run a monocular depth model on every frame, normalise the whole clip with one min/max so it does not flicker, near = white, and encode a greyscale MP4 with the same number of frames; then create_upload_link with kind depth.',
       inputSchema: { footage: Id }, annotations: { ...read, openWorldHint: false },
     }, async ({ footage }) => {
       const f = ready(footage);

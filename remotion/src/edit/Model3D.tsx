@@ -4,7 +4,7 @@
 // at the model's depth is one pixel of the finished frame, so it lands exactly on `at` or its path.
 import { ThreeCanvas } from '@remotion/three';
 import { useThree } from '@react-three/fiber';
-import { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
@@ -12,28 +12,34 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { cancelRender, continueRender, delayRender } from 'remotion';
 import type { ModelLayer, Track } from './model';
-import { PALETTE, motionStyle, phase } from './model';
+import { PALETTE, colour, motionStyle, phase } from './model';
 
 const FOV = 20;
 const loaded = new Map<string, GLTF>();
+const loading = new Map<string, Promise<GLTF>>();
+const load = (url: string) => {
+  if (!loading.has(url)) loading.set(url, fetch(url)
+    .then((r) => { if (!r.ok) throw new Error(`3D model ${url}: HTTP ${r.status}`); return r.arrayBuffer(); })
+    .then((buffer) => new Promise<GLTF>((ok, fail) => new GLTFLoader().setMeshoptDecoder(MeshoptDecoder).parse(buffer, '', ok, fail)))
+    .then((gltf) => { loaded.set(url, gltf); return gltf; }));
+  return loading.get(url)!;
+};
 
-// Each model file is fetched and parsed once per page; every layer showing it gets its own copy.
+// Each model file is fetched and parsed once per page; every layer showing it gets its own copy. A view
+// holds the frame until its model is on screen, and lets go if it is taken away before that.
 function useGltf(url: string | null): GLTF | null {
-  const [, redraw] = useState(0);
-  const waiting = useRef<{ url: string; handle: number } | null>(null);
-  if (url && !loaded.has(url) && waiting.current?.url !== url) {
-    const handle = delayRender(`Loading 3D model ${url}`, { timeoutInMilliseconds: 120000 });
-    waiting.current = { url, handle };
-    fetch(url)
-      .then((r) => { if (!r.ok) throw new Error(`3D model ${url}: HTTP ${r.status}`); return r.arrayBuffer(); })
-      .then((buffer) => new Promise<GLTF>((ok, fail) => new GLTFLoader().setMeshoptDecoder(MeshoptDecoder).parse(buffer, '', ok, fail)))
-      .then((gltf) => { loaded.set(url, gltf); redraw((n) => n + 1); })
-      .catch((err) => cancelRender(err));
-  }
-  const gltf = url ? loaded.get(url) ?? null : null;
-  useLayoutEffect(() => {
-    if (gltf && waiting.current?.url === url) { continueRender(waiting.current.handle); waiting.current = null; }
-  }, [gltf, url]);
+  const [gltf, setGltf] = useState<GLTF | null>(() => (url ? loaded.get(url) ?? null : null));
+  const hold = useRef<number | null>(null);
+  if (url && !gltf && hold.current == null) hold.current = delayRender(`Loading 3D model ${url}`, { timeoutInMilliseconds: 120000 });
+  const release = () => { if (hold.current != null) { continueRender(hold.current); hold.current = null; } };
+  useEffect(() => {
+    if (!url || gltf) return;
+    let live = true;
+    load(url).then((g) => { if (live) setGltf(g); }).catch((err) => cancelRender(err));
+    return () => { live = false; };
+  }, [url, gltf]);
+  useLayoutEffect(() => { if (gltf) release(); }, [gltf]);
+  useEffect(() => release, []);
   return gltf;
 }
 
@@ -112,6 +118,16 @@ const Stage = ({ gltf, layer, pose, width, height }: { gltf: GLTF; layer: ModelL
     const box = new THREE.Box3().setFromObject(model, true);
     const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
     const fit = (layer.size * height) / Math.max(1e-6, size.y || size.x);
+    // A tint gets its own copies of the materials: the loaded model is shared with other layers.
+    if (layer.color) {
+      const tint = new THREE.Color(colour(layer.color, PALETTE.paper));
+      model.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const recolour = (m: THREE.Material) => { const c = m.clone() as THREE.MeshStandardMaterial; c.color?.copy(tint); return c; };
+        mesh.material = Array.isArray(mesh.material) ? mesh.material.map(recolour) : recolour(mesh.material);
+      });
+    }
     if (layer.look === 'toon') makeToon(model, (3.2 * height) / 1920 / fit);
     model.traverse((o) => { if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.frustumCulled = false; } });
     const pivot = new THREE.Group();

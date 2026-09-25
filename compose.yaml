@@ -29,6 +29,8 @@ services:
       RENDER_URL: ${RENDER_URL:-http://render:3200}
       FOOTAGE_MAX_MB: ${FOOTAGE_MAX_MB:-1024}
       FOOTAGE_MAX_SECONDS: ${FOOTAGE_MAX_SECONDS:-600}
+      DEPTH_MAX_SECONDS: ${DEPTH_MAX_SECONDS:-120}
+      DEPTH_DETAIL: ${DEPTH_DETAIL:-392}
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
     cap_drop: [ALL]

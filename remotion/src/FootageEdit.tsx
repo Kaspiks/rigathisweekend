@@ -188,8 +188,10 @@ export const FootageEdit = (props: FootageEditProps) => {
       {spec.layers.map((l, i) => {
         if (!active(l)) return null;
         const node = drawLayer(l, i);
-        // A layer with a depth is cut away wherever the scene is nearer.
-        return node && nearness[i] != null ? <AbsoluteFill key={i} style={{ mask: `url(#occ-${i})` }}>{node}</AbsoluteFill> : node;
+        // A layer with a depth is cut away wherever the scene is nearer. Its wrapper is there from the start,
+        // before the depth picture has loaded, so the layer is not rebuilt (a 3D view would start over).
+        const deep = spec.depth && ((l as { depth?: number }).depth != null || (l as { path?: { depth?: number }[] }).path?.some((k) => k.depth != null));
+        return node && deep ? <AbsoluteFill key={i} style={nearness[i] != null ? { mask: `url(#occ-${i})` } : undefined}>{node}</AbsoluteFill> : node;
       })}
     </AbsoluteFill>
   );
