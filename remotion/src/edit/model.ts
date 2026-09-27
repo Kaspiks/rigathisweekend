@@ -27,7 +27,7 @@ export type GraphicElement = {
 };
 export type GraphicLayer = Span & { type: 'graphic'; use?: string; viewBox?: { width: number; height: number }; loop?: number; elements?: GraphicElement[];
   at?: Place; offset?: Point; path?: PathKey[]; facing: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none' };
-export type ModelLayer = Span & { type: 'model'; asset: string; animation?: string; speed: number; loop: boolean; actions?: { frame: number; animation: string; speed?: number; loop?: boolean; stride?: number }[]; blend: number;
+export type ModelLayer = Span & { type: 'model'; asset: string; node?: string; soften: number; animation?: string; speed: number; loop: boolean; actions?: { frame: number; animation: string; speed?: number; loop?: boolean; stride?: number }[]; blend: number;
   depth?: number | 'auto'; stride?: number; front: 'camera' | 'away' | 'right' | 'left';
   at?: Place; offset?: Point; path?: PathKey[]; facing: 'as-made' | 'path'; angle: number; pin: 'feet' | 'center'; size: number; turn: number; tilt: number;
   keys?: Partial<Record<'turn' | 'tilt' | 'spin' | 'roll' | 'scale', Track>>; light: 'left' | 'right' | 'front' | 'top' | 'back'; brightness: number; shadow: number;

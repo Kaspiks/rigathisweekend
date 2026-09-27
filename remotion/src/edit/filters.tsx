@@ -143,6 +143,31 @@ export const IllustrationFilter = ({ id, layer, frame }: { id: string; layer: Il
 };
 
 // The same wobble for an uploaded drawing (image layers with motion "boil").
+// Footage off a phone is soft and carries sensor grain; a rendered model is neither, and that mismatch
+// reads as a sticker even once the lighting is right. A sub-pixel blur plus grain closes it.
+//
+// The grain has to keep the NOISE in its colour channels: overlay against a constant mid grey is an
+// identity operation, so flattening the turbulence to 0.5 produces a filter that costs time and
+// changes nothing. Instead the noise is compressed toward 0.5 by `amount` - full range would be a
+// snowstorm - and then clipped to the model's own alpha so it never lands on the footage. Its seed
+// moves with the frame, because grain that holds still reads as texture stuck to the model.
+export const SoftenFilter = ({ id, amount, frame }: { id: string; amount: number; frame: number }) => {
+  const k = amount * 0.35;                 // how far the noise swings either side of mid grey
+  const bias = (0.5 - 0.5 * k).toFixed(4); // keeps the compressed noise centred on 0.5
+  const grey = `${k.toFixed(4)} 0 0 0 ${bias}`;
+  return (
+    <filter id={id} x="-6%" y="-6%" width="112%" height="112%" colorInterpolationFilters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation={(amount * 1.8).toFixed(2)} result="soft" />
+      <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" seed={1 + (frame % 53)} result="noise" />
+      <feColorMatrix in="noise" type="matrix" result="grey"
+        values={`${grey}  ${grey}  ${grey}  0 0 0 0 1`} />
+      <feComposite in="grey" in2="soft" operator="in" result="onModel" />
+      <feBlend in="soft" in2="onModel" mode="overlay" result="grained" />
+      <feComposite in="grained" in2="soft" operator="in" />
+    </filter>
+  );
+};
+
 export const BoilFilter = ({ id, frame }: { id: string; frame: number }) => (
   <filter id={id} x="-2%" y="-2%" width="104%" height="104%" colorInterpolationFilters="sRGB">
     <Boil input="SourceGraphic" seed={boilSeed(frame)} amount={6} />

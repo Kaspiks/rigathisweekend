@@ -16,28 +16,28 @@ const Frame = () => z.number().int().min(0).max(100000);
 const Unit = () => z.number().min(0).max(1);
 const Color = () => z.union([z.enum(Object.keys(PALETTE)), z.string().regex(/^#[0-9a-fA-F]{6}$/)]).describe(`A palette name (${Object.keys(PALETTE).join(', ')}) or #rrggbb`);
 const Place = () => z.union([z.string().regex(ANCHOR), z.object({ x: Unit(), y: Unit() }).strict()])
-  .describe('An anchor name (sticks to that thing in the footage, following its movement and any zoom) or {x,y} in 0–1 of the finished frame (fixed on screen)');
+  .describe('An anchor name (sticks to it in the footage) or {x,y} in 0–1 of the finished frame');
 const Offset = () => z.object({ x: z.number().min(-1).max(1), y: z.number().min(-1).max(1) }).strict()
-  .describe('Shift from `at`, in fractions of the finished frame (x: -0.2 is a fifth of the width to the left)');
+  .describe('Shift from `at` in fractions of the frame');
 // A flight path in OUTPUT frames, so things can move even during a freeze. Positions between keys are
 // smoothed into curves. A key can name an anchor instead of x/y, to land exactly on something in the shot.
 const Path = () => z.array(z.object({
   frame: Frame().describe('OUTPUT frame'),
   x: Unit().optional(), y: Unit().optional(),
   at: z.string().regex(ANCHOR).optional().describe('Instead of x/y: an anchor name, to arrive exactly on it'),
-  depth: Unit().optional().describe('Depth at this key (0 far – 1 near), eased between keys; overrides the layer depth'),
+  depth: Unit().optional().describe('Depth at this key; overrides the layer depth'),
 }).strict()).min(2).max(600).optional()
-  .describe('Moves the layer along keyframes {frame,x,y} in 0–1 of the finished frame (or {frame,at:"anchor"}), smoothed into curves; used instead of `at`');
+  .describe('Keyframes {frame,x,y} in 0–1 (or {frame,at}), smoothed into curves; used instead of `at`');
 const Facing = () => z.enum(['as-drawn', 'flip', 'path']).default('as-drawn')
   .describe('path: turns to face the way it moves along `path` and leans into turns (draw it facing right); flip: mirrored');
 const Follow = () => z.string().regex(ANCHOR).optional()
-  .describe('An anchor on something that stays put in the scene (the table): the layer\'s at and path move with it as the camera moves, so a handheld shot does not leave it sliding. Positions are as they are when the anchor is at its first keyframe; path keys on an anchor (at) already move with it');
-const Depth = () => Unit().optional().describe('How near it is, 0 far – 1 near (get_depth): it is hidden wherever the scene is nearer, so it can pass behind things. Needs depth on the edit');
+  .describe('An anchor on something fixed in the scene: `at` and `path` move with it, so a handheld shot does not leave the layer sliding. See get_edit_guide');
+const Depth = () => Unit().optional().describe('How near, 0 far – 1 near (get_depth): hidden where the scene is nearer. Needs depth on the edit');
 const Span = () => ({
-  from: Frame().describe('First OUTPUT frame the layer is on'),
-  to: Frame().describe('OUTPUT frame the layer is gone by (exclusive)'),
-  in: z.number().int().min(0).max(90).default(8).describe('Frames the entrance takes'),
-  out: z.number().int().min(0).max(90).default(8).describe('Frames the exit takes'),
+  from: Frame().describe('First OUTPUT frame'),
+  to: Frame().describe('OUTPUT frame it ends, exclusive'),
+  in: z.number().int().min(0).max(90).default(8).describe('Entrance frames'),
+  out: z.number().int().min(0).max(90).default(8).describe('Exit frames'),
 });
 
 const Text = z.object({
@@ -111,7 +111,7 @@ const Sequence = z.object({
 // position, rotation, scale, opacity and stroke draw-on can be keyframed. Saved graphics are reused by name.
 const PATH_D = /^[MmLlHhVvCcSsQqTtAaZz0-9eE.,\s+-]+$/;
 const Num = () => z.number().min(-100000).max(100000);
-const Track = () => z.array(z.object({ frame: z.number().int().min(0).max(100000).describe('Frames from the start of the layer (or of the loop)'), value: Num() }).strict()).min(1).max(200);
+const Track = () => z.array(z.object({ frame: z.number().int().min(0).max(100000).describe('Frames from the layer start'), value: Num() }).strict()).min(1).max(200);
 const Keys = () => z.object({
   x: Track().optional(), y: Track().optional(),
   rotate: Track().optional().describe('Degrees, around `origin`'),
@@ -160,6 +160,8 @@ const AnimationName = () => z.string().min(1).max(80);
 const Model = z.object({
   type: z.literal('model'), ...Span(),
   asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of a 3D model uploaded for this footage (list_footage, under models)'),
+  node: z.string().min(1).max(64).optional()
+    .describe('Draw only this node of the model and its children (list_footage, under nodes) — e.g. the fox out of a workshop. The rest still animates; size and pin measure the chosen part'),
   animation: AnimationName().optional().describe('Which of the model\'s animations plays from the layer\'s start (names from list_footage); leave out to hold its rest pose'),
   speed: z.number().min(0.1).max(4).default(1).describe('Animation speed; 1 is as made'),
   loop: z.boolean().default(true).describe('Repeat the animation, or stop on its last pose'),
@@ -174,13 +176,13 @@ const Model = z.object({
   depth: z.union([Unit(), z.literal('auto')]).optional()
     .describe('"auto" (best for something walking on a surface): each frame it takes the depth of the ground under its feet, so it is never cut off by the table it stands on but still goes behind nearer things. Or a fixed 0 far – 1 near. Needs depth on the edit'),
   stride: z.number().min(0.05).max(10).optional()
-    .describe('Ties the animation to how far it moves along its path: the distance covered in one loop of the animation, in multiples of its height (about 1 for a walk, 2–3 for a run). Feet then stay planted instead of sliding, and it stops stepping when it stops. Raise it if the feet slide backwards, lower it if they slide forwards'),
+    .describe('Distance one loop of the animation covers, in multiples of the model height (~1 walk, 2–3 run), so feet stay planted. get_edit_guide has the fix-up rule'),
   front: z.enum(['camera', 'away', 'right', 'left']).default('camera')
     .describe('Which way the model faces as made, before any turn. glTF models normally face the camera; if a preview with turn 0 shows it facing another way, say which, and facing path will then walk it forwards'),
   facing: z.enum(['as-made', 'path']).default('as-made').describe('path: turns to walk or fly the way it moves along `path`, turning round through facing the camera'),
   angle: z.number().min(0).max(90).default(65).describe('With facing path: 90 is a side view, less turns it towards the camera'),
   pin: z.enum(['feet', 'center']).default('feet').describe('Which point of the model sits on `at`: its feet (standing on something) or its middle (flying)'),
-  size: z.number().min(0.02).max(1.5).default(0.2).describe('Height of the model as a fraction of the finished frame\'s height'),
+  size: z.number().min(0.02).max(1.5).default(0.2).describe('Height of the model as a fraction of the finished frame\'s height. list_footage gives each model\'s bounds, so for a wide flat one (a book, a sign) work it out from the width you want: size = wantedWidthPx * bounds.height / (bounds.width * frameHeightPx)'),
   turn: Degrees().default(0).describe('Turn around its vertical axis: 0 faces the camera, 90 faces right, -90 faces left, 180 away'),
   tilt: z.number().min(-60).max(80).default(15).describe('How far we look down on it: 0 level, 30 from above like a phone over a table. Match the footage'),
   keys: z.object({
@@ -192,6 +194,8 @@ const Model = z.object({
   brightness: z.number().min(0.2).max(3).default(1),
   shadow: Unit().default(0.35).describe('Darkness of the shadow it casts on the ground under it; 0 for none (flying)'),
   color: Color().optional().describe('Tints the whole model; for a plain model without colours of its own'),
+  soften: z.number().min(0).max(1).default(0)
+    .describe('Blurs and grains the model a touch so it matches phone footage instead of looking sharper than the shot it sits in. 0.3–0.5 for handheld video, 0 for clean footage'),
   look: z.enum(['as-made', 'toon']).default('as-made').describe('toon: flat cartoon shading with an ink outline, to match illustrated moments'),
   boil: z.boolean().default(false).describe('Hand-drawn wobble, with look toon'),
   opacity: Unit().default(1),
@@ -678,4 +682,69 @@ list_footage shows each with its length. Place them in "sounds", on OUTPUT frame
 - An illustrated moment reads best on a hold, or on a slow part of the clip.
 - An image with place "footage" should be drawn over a frame of this clip at the same size (use get_frame without a grid,
   have it illustrated, and upload it on the dashboard as an asset); it then lines up with the footage exactly.
-- Use preview_edit on the frames either side of every transition before rendering the video.`;
+- Use preview_edit on the frames either side of every transition before rendering the video.
+
+Layer timing and fit
+- from/to are OUTPUT frames; to is exclusive. in/out are the entrance and exit lengths in frames.
+- stride: if the feet slide backwards raise it, if they slide forwards lower it.
+- follow: positions are as they are when the anchor sits at its first keyframe; path keys that name
+  an anchor already move with it, so they need no follow of their own.
+- node (model layers): draws one named part of a model and its children, e.g. the fox out of a whole
+  workshop. Names come from list_footage under models[].nodes. The rest of the model still animates,
+  it is simply not drawn, and size/pin measure the part you chose rather than the whole scene.
+  Every model layer renders in its own canvas, so two layers never occlude each other or share light:
+  use node to split one model across layers only when they do not need to overlap.
+
+## A flat 2D world that something pops out of (the storybook shot)
+Three layers stacked in order: a book, the drawn scene printed on its page, and the 3D character that
+breaks out of it. What makes or breaks this one is arithmetic, not taste.
+- Size the book from its bounds, not by eye. size is the model's HEIGHT as a fraction of the frame
+  height, and a book's height is its thickness, so the number is small and guessing it is hopeless:
+  size = wantedWidthPx * bounds.height / (bounds.width * frameHeightPx). A 1023px-wide book whose
+  bounds are 2.104 x 0.132 needs size 0.0334 on a 1920-tall frame.
+- Then work out where its page actually is on screen, because that is where the drawn scene has to sit.
+  With pin "feet" the model's BOTTOM is on \`at\`, and tilt swings the page up and back from there. In
+  pixels, with fit = size * frameHeight / bounds.height:
+    top of page    = at.y * frameHeight - (bounds.height * cos(tilt) + pageDepth/2 * sin(tilt)) * fit
+    bottom of page = at.y * frameHeight + (pageDepth/2 * sin(tilt) - bounds.height * cos(tilt)) * fit
+  The page is only pageDepth * sin(tilt) tall on screen: at tilt 42 a book loses a third of its depth,
+  which is why a scene that looks like it fits in plan view hangs off the bottom of the page.
+- A model's bounds are its REST pose. A scene that paints a title as it plays ends up bigger than its
+  bounds say, so size it against what it draws (preview a late frame and read the ink off it), not
+  against what list_footage reports. Aim for the drawn scene covering about three quarters of the page.
+- Keep the drawn scene and the book at the SAME \`at\` arithmetic but different tilts: the book lies at
+  the table's angle (match the tiles, around 40), the drawn scene stands up at 70-80, which is what
+  makes it read as a flat world seen inside the book rather than a sticker on it. Give it look "toon"
+  and boil true, and shadow 0 - it is printed, so it casts nothing.
+- The break-out, all on one frame: tilt and scale keys on the drawn scene (78 to 36, 1 to 1.55 over
+  about 13 frames), a flash, a burst sticker, and the paper-scraps graphic. Crossfade the two models
+  (exit "fade" with out 7 on the drawn one, enter "fade" with in 7 on the 3D one) or the title the
+  character just painted blinks out of existence for a beat.
+- Fade the book out over the next second, and let the 3D character stand on the table without it.
+
+## Following a moving shot, and when not to
+follow pins a layer to an anchor on the table so it does not slide across a handheld shot. Check the
+shot can afford it first: work out how far your anchor travels between the first and last frame you use
+it. If the table crosses more than about a third of the frame, a layer pinned to it leaves the shot.
+- A whip pan (this clip moves 1.3 frame widths in four seconds) cannot be followed at all: place those
+  layers at a fixed \`at\` and let the footage move behind them.
+- On a freeze nothing moves, so anything placed during a hold is planted for free.
+- Where you do follow, choose a stretch that ENDS near where it started, or the subject drifts out of
+  frame by the last second. Pick the cut from the anchor's own numbers: if it runs 0.30 -> 0.15 -> 0.31,
+  cutting at the frame it returns to 0.31 costs nothing and keeps the title centred.
+- The shift is measured from the anchor's FIRST keyframe, so layers are unshifted before it: keyframe
+  the anchor from the frame the move starts and everything earlier stays put on its own.
+
+## Saved graphics you can reuse
+list_graphics shows them; use them with {"type":"graphic","use":"<name>","from":…,"to":…,"at":…}.
+- "gulls": three birds flapping on a 12-frame loop. Fly them along a path over a BRIGHT part of the
+  shot - they are ink silhouettes and vanish against brick or a dark jumper. size 400 makes each bird
+  about 100px on a 1080 frame; each bird needs more room than it is wide, which is why the viewBox is
+  far wider than one bird.
+- "paper-scraps": sixteen torn page fragments bursting out and tumbling, for the frame something breaks
+  through a page. Plays once over about 55 frames; size 700-800.
+Making your own particles: \`repeat\` cannot fan copies out in different directions. It rotates each copy
+on its own pivot but leaves its keyed travel alone, so every copy flies the same way. For a burst, give
+each fragment its own element with its own keys; for a flock or a queue, repeat with dx/dy and delay is
+exactly right.
+`;

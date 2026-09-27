@@ -20,6 +20,10 @@ const COMPRESSED = { KHR_draco_mesh_compression: 'Draco-compressed', KHR_texture
 
 // Reads a GLB's JSON chunk and checks it. Returns what the model offers: its animations (names as the
 // renderer will know them, and lengths), triangles and size.
+// Bumped whenever this function starts recording something new, so sidecars written by an older
+// version are rebuilt from the GLB on the next listing instead of quietly keeping stale metadata.
+export const META = 3;
+
 export function inspectModel(buffer) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw fail('Send the model itself as the body');
   if (buffer.length < 4 || buffer.toString('latin1', 0, 4) !== 'glTF') throw fail('That is not a GLB file. Export the model as binary glTF (.glb), with textures embedded');
@@ -51,7 +55,69 @@ export function inspectModel(buffer) {
     name: a.name || `animation_${i}`,
     seconds: Math.round(Math.max(0, ...(a.samplers || []).map(s => Number(accessors[s.input]?.max?.[0]) || 0)) * 100) / 100,
   }));
-  return { animations, triangles, skinned: !!gltf.skins?.length, bytes: buffer.length };
+  // Names a `node` on a model layer can pick out - the fox inside a whole workshop, say. Only nodes
+  // with children are worth listing: leaves are the individual parts a modeller left lying about
+  // ("part", "Cube.014"), and naming those would bury the two or three groups anyone actually wants.
+  const nodes = [...new Set((gltf.nodes || []).filter(n => n.name && n.children?.length).map(n => n.name))].slice(0, 16);
+  return { meta: META, animations, nodes, bounds: modelBounds(gltf), triangles, skinned: !!gltf.skins?.length, bytes: buffer.length };
+}
+
+// How big the model is, in its own units, with node transforms applied. `size` on a model layer is its
+// HEIGHT as a fraction of the frame height, so without this a flat model (a book, a board, a sign) is
+// impossible to size: its height is its thickness, and nothing says how wide that makes it on screen.
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+const multiply = (a, b) => {
+  const out = new Array(16).fill(0);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+    let sum = 0;
+    for (let k = 0; k < 4; k++) sum += a[k * 4 + r] * b[c * 4 + k];
+    out[c * 4 + r] = sum;
+  }
+  return out;
+};
+// A node's local transform: glTF gives either a column-major matrix or translation/rotation/scale.
+function localMatrix(node) {
+  if (Array.isArray(node.matrix) && node.matrix.length === 16) return node.matrix;
+  const [x, y, z, w] = node.rotation || [0, 0, 0, 1];
+  const [sx, sy, sz] = node.scale || [1, 1, 1];
+  const [tx, ty, tz] = node.translation || [0, 0, 0];
+  const x2 = x + x, y2 = y + y, z2 = z + z;
+  const xx = x * x2, xy = x * y2, xz = x * z2, yy = y * y2, yz = y * z2, zz = z * z2;
+  const wx = w * x2, wy = w * y2, wz = w * z2;
+  return [
+    (1 - (yy + zz)) * sx, (xy + wz) * sx, (xz - wy) * sx, 0,
+    (xy - wz) * sy, (1 - (xx + zz)) * sy, (yz + wx) * sy, 0,
+    (xz + wy) * sz, (yz - wx) * sz, (1 - (xx + yy)) * sz, 0,
+    tx, ty, tz, 1,
+  ];
+}
+const transform = (m, x, y, z) => [m[0] * x + m[4] * y + m[8] * z + m[12], m[1] * x + m[5] * y + m[9] * z + m[13], m[2] * x + m[6] * y + m[10] * z + m[14]];
+
+function modelBounds(gltf) {
+  const accessors = gltf.accessors || [], nodes = gltf.nodes || [], meshes = gltf.meshes || [];
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  const seen = new Set();
+  const visit = (index, parent, depth) => {
+    const node = nodes[index];
+    if (!node || depth > 64 || seen.has(`${index}@${depth}`)) return;
+    seen.add(`${index}@${depth}`);
+    const world = multiply(parent, localMatrix(node));
+    if (node.mesh != null) for (const prim of meshes[node.mesh]?.primitives || []) {
+      const a = accessors[prim.attributes?.POSITION];
+      if (!a?.min || !a?.max || a.min.length < 3 || a.max.length < 3) continue;
+      // Every corner of the primitive's box, because a rotation turns the box into a different box.
+      for (let corner = 0; corner < 8; corner++) {
+        const p = transform(world, corner & 1 ? a.max[0] : a.min[0], corner & 2 ? a.max[1] : a.min[1], corner & 4 ? a.max[2] : a.min[2]);
+        for (let k = 0; k < 3; k++) { if (p[k] < lo[k]) lo[k] = p[k]; if (p[k] > hi[k]) hi[k] = p[k]; }
+      }
+    }
+    for (const child of node.children || []) visit(child, world, depth + 1);
+  };
+  const roots = gltf.scenes?.[gltf.scene ?? 0]?.nodes ?? nodes.map((_, i) => i);
+  for (const root of roots) visit(root, IDENTITY, 0);
+  if (!Number.isFinite(lo[0]) || !Number.isFinite(hi[0])) return null;
+  const round = v => Math.round(v * 1000) / 1000;
+  return { width: round(hi[0] - lo[0]), height: round(hi[1] - lo[1]), depth: round(hi[2] - lo[2]) };
 }
 
 export const modelFile = (folder, name) => join(folder, `${name}.glb`);
@@ -72,9 +138,24 @@ export async function deleteModel(folder, name) {
 }
 
 export async function modelList(folder) {
-  const names = (await readdir(folder).catch(() => [])).filter(f => /^[a-z0-9][a-z0-9-]{0,31}\.json$/.test(f)).sort();
-  const list = await Promise.all(names.map(async f => {
-    try { return { name: f.slice(0, -5), ...JSON.parse(await readFile(join(folder, f), 'utf8')) }; } catch { return null; }
+  // Enumerate the GLBs, not the sidecars. The sidecar is derived data: if it is missing or was written
+  // by an older version it gets rebuilt here, whereas listing sidecars made a model with no sidecar
+  // invisible even though the .glb was sitting right there.
+  const names = (await readdir(folder).catch(() => []))
+    .filter(f => /^[a-z0-9][a-z0-9-]{0,31}\.glb$/.test(f)).map(f => f.slice(0, -4)).sort();
+  const list = await Promise.all(names.map(async name => {
+    const meta = join(folder, `${name}.json`);
+    let info = null;
+    try { info = JSON.parse(await readFile(meta, 'utf8')); } catch {}
+    if (!info || info.meta !== META) {
+      try {
+        info = { ...info, ...inspectModel(await readFile(modelFile(folder, name))) };
+        await writeFile(meta, JSON.stringify({ ...info, updated: info.updated || new Date().toISOString() }));
+      } catch { return null; }
+    }
+    return { name, ...info };
   }));
-  return list.filter(Boolean).map(({ name, animations, triangles, skinned, bytes }) => ({ name, animations, triangles, skinned, mb: Math.round(bytes / 104857.6) / 10 }));
+  return list.filter(Boolean).map(({ name, animations, nodes, bounds, triangles, skinned, bytes }) =>
+    ({ name, animations, nodes: nodes?.length ? nodes : undefined, bounds: bounds || undefined, triangles, skinned, mb: Math.round(bytes / 104857.6) / 10 }));
 }
+

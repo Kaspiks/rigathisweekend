@@ -112,13 +112,51 @@ export type ModelPose = { x: number; y: number; frame: number; dir: number; lean
 // The turn that makes a model face the camera, from the way it faces as made.
 const FRONT: Record<ModelLayer['front'], number> = { camera: 0, away: 180, right: -90, left: 90 };
 
+// Image-based light. Three directional lights give a model shape but no SURROUNDINGS: metal and varnish
+// have nothing to reflect, so everything comes back matte and reads as flat artwork pasted on a photo.
+// A room environment gives each material something to catch, which is most of what makes a model look
+// like it is in the room rather than on top of it.
+//
+// Built once per renderer and cached: Remotion draws every frame through the same WebGL context, and
+// generating the PMREM each frame would add real time to a render that already runs for minutes.
+const ENV = new WeakMap<THREE.WebGLRenderer, THREE.Texture>();
+const roomEnvironment = (gl: THREE.WebGLRenderer) => {
+  const had = ENV.get(gl);
+  if (had) return had;
+  const pmrem = new THREE.PMREMGenerator(gl);
+  const room = new RoomEnvironment();
+  const texture = pmrem.fromScene(room, 0.04).texture;
+  pmrem.dispose();
+  room.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (mesh.isMesh) { mesh.geometry?.dispose(); (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).forEach((m) => m?.dispose()); }
+  });
+  ENV.set(gl, texture);
+  return texture;
+};
+
 // Inside the canvas: the model, its light and floor, posed for the current frame before the canvas draws.
 const Stage = ({ gltf, layer, pose, width, height }: { gltf: GLTF; layer: ModelLayer; pose: ModelPose; width: number; height: number }) => {
   const { gl, scene } = useThree();
   const rig = useMemo(() => {
     const model = cloneSkinned(gltf.scene);
     model.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(model, true);
+    // `node` draws one named part of the model and leaves the rest out - the fox without the workshop
+    // around it. The whole graph is kept and only the other branches are hidden, because the animation
+    // channels address nodes by name across the entire scene: detach the branch and the clip that
+    // drives it stops resolving. Framing then measures the visible part, not the scene it came from.
+    let subject: THREE.Object3D = model;
+    if (layer.node) {
+      const picked = model.getObjectByName(layer.node);
+      if (picked) {
+        const keep = new Set<THREE.Object3D>();
+        for (let o: THREE.Object3D | null = picked; o; o = o.parent) keep.add(o);
+        picked.traverse((o) => keep.add(o));
+        model.traverse((o) => { if (!keep.has(o)) o.visible = false; });
+        subject = picked;
+      }
+    }
+    const box = new THREE.Box3().setFromObject(subject, true);
     const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
     const fit = (layer.size * height) / Math.max(1e-6, size.y || size.x);
     // A tint gets its own copies of the materials: the loaded model is shared with other layers.
@@ -176,10 +214,10 @@ const Stage = ({ gltf, layer, pose, width, height }: { gltf: GLTF; layer: ModelL
   useLayoutEffect(() => {
     scene.add(rig.place);
     // Soft reflections, so metal and gloss look like they do in a modelling program rather than black.
-    const pmrem = new THREE.PMREMGenerator(gl);
-    const env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    scene.environment = env; scene.environmentIntensity = 0.5 * layer.brightness;
-    return () => { scene.remove(rig.place); env.dispose(); pmrem.dispose(); rig.mixer.stopAllAction(); };
+    // The texture comes from the shared cache: built once per renderer, not rebuilt on every mount.
+    scene.environment = roomEnvironment(gl);
+    scene.environmentIntensity = 0.5 * layer.brightness;
+    return () => { scene.remove(rig.place); rig.mixer.stopAllAction(); };
   }, [rig, scene, gl, layer.brightness]);
 
   // Posed during React's layout pass, which comes before the canvas draws this frame.

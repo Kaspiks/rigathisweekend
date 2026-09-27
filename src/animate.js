@@ -411,7 +411,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
 
   function register(server) {
     server.registerTool('list_footage', {
-      description: 'List uploaded video clips for animated edits: id, status (processing/ready/failed), length in frames at 30 fps, size, uploaded pictures (assets), 3D models with their animations, sounds with their lengths, saved edit versions and recent renders.',
+      description: 'Lists clips for animated edits: id, status, length in frames at 30 fps, size, assets, models (with their animations, pickable nodes and bounds in model units), sounds, saved edit versions and recent renders.',
       inputSchema: {}, annotations: read,
     }, async () => text(await Promise.all(store.footageList().map(summary))));
 
@@ -434,7 +434,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     });
 
     server.registerTool('get_frame', {
-      description: 'One SOURCE frame at full detail, with a coordinate grid labelled 0–1 across the whole footage (x left→right, y top→bottom), for placing anchors. Give a region to zoom into part of the frame; labels stay in whole-frame coordinates.',
+      description: 'One SOURCE frame at full detail under a 0-1 coordinate grid (x left-right, y top-bottom), for placing anchors. `region` zooms in; labels stay in whole-frame coordinates.',
       inputSchema: {
         footage: Id, frame: z.number().int().min(0).describe('SOURCE frame'),
         grid: z.boolean().default(true),
@@ -472,7 +472,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     });
 
     server.registerTool('preview_edit', {
-      description: 'Render chosen OUTPUT frames of a saved edit as stills (actual renders, with every layer) and return them as one labelled sheet. Without frames, picks a frame inside each layer. Returns the sheet when it is done within ~45 s; otherwise a render id for get_render.',
+      description: 'Renders chosen OUTPUT frames of a saved edit as real stills, returned as one labelled sheet. Without `frames`, one inside each layer. Returns the sheet if done in ~45 s, else a render id for get_render.',
       inputSchema: {
         footage: Id, version: z.number().int().min(1).optional().describe('Edit version (default latest)'),
         frames: z.array(z.number().int().min(0)).min(1).max(12).optional().describe('OUTPUT frames to render'),
@@ -496,7 +496,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     });
 
     server.registerTool('render_edit', {
-      description: 'Render a saved edit as an MP4 in the background. quality draft is half size and quicker, for checking motion; final is full size. Optionally only OUTPUT frames from..to. Returns a render id; poll get_render. Nothing is published.',
+      description: 'Renders a saved edit to MP4 in the background. draft is half size for checking motion, final is full size. Returns a render id; poll get_render. Nothing is published.',
       inputSchema: {
         footage: Id, version: z.number().int().min(1).optional().describe('Edit version (default latest)'),
         quality: z.enum(['draft', 'final']).default('draft'),
@@ -511,7 +511,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     });
 
     server.registerTool('save_graphic', {
-      description: 'Save a graphic (shapes with keyframed animation, see get_edit_guide) under a name, for any edit to use with {"type":"graphic","use":"<name>"}. Saving an existing name replaces it; edits already saved keep their copy. Try it in an edit with preview_edit before relying on it.',
+      description: 'Saves a named graphic (shapes with keyframed animation; see get_edit_guide) for any edit to use as {\"type\":\"graphic\",\"use\":\"<name>\"}. Re-saving a name replaces it; saved edits keep their copy.',
       inputSchema: { name: AssetName, graphic: GraphicDef, note: z.string().trim().max(200).optional().describe('What it is, for list_graphics') }, annotations: write,
     }, async ({ name, graphic, note }) => {
       const errors = graphicErrors(graphic, name);
@@ -526,7 +526,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async () => text(store.graphicList()));
 
     server.registerTool('create_upload_link', {
-      description: 'A one-time link for sending a file you made in your sandbox to a clip. kind picture (default): a PNG/JPEG/WebP stored as a named asset for image, sequence or depth-still use. kind model: a 3D model as one binary glTF (.glb, textures embedded, no Draco) for model layers; its animations are listed back. kind sound: an audio file (MP3, WAV, OGG, FLAC, M4A, up to 3 minutes) for the sounds in edits. kind depth: the clip\'s per-frame depth as a greyscale MP4 (near = white, one frame per clip frame; get the clip with create_download_link). Upload the raw file with PUT or POST as the body, e.g. curl --fail -T file "<url>". Works once, for 30 minutes.',
+      description: 'A one-time 30-minute link for sending a sandbox file to a clip. kind: picture (PNG/JPEG/WebP, default), model (.glb, textures embedded, no Draco), sound (MP3/WAV/OGG/FLAC/M4A, up to 3 min), depth (greyscale MP4, near = white, one frame per clip frame). PUT or POST the raw file as the body: curl --fail -T file \"<url>\".',
       inputSchema: { footage: Id, kind: z.enum(['picture', 'model', 'sound', 'depth']).default('picture'), name: AssetName.optional().describe('Required for a picture, model or sound') }, annotations: write,
     }, async ({ footage, kind, name }) => {
       const f = store.footage(footage);
@@ -546,7 +546,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     });
 
     server.registerTool('make_depth', {
-      description: 'Make per-frame depth for a clip on the server (Depth Anything V2 Small, near = white), for edits with "depth": {"video": true}. Runs in the background and takes a few minutes (under a second a frame); list_footage shows depthJob progress, then depth. Asking again while it runs just reports progress; asking after it is done makes it again.',
+      description: 'Makes per-frame depth on the server (Depth Anything V2 Small, near = white) for edits with \"depth\":{\"video\":true}. Background, a few minutes; list_footage shows depthJob progress. Asking again while it runs reports progress.',
       inputSchema: { footage: Id }, annotations: write,
     }, async ({ footage }) => {
       const f = ready(footage), job = queueDepth(f);
@@ -555,7 +555,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     });
 
     server.registerTool('create_download_link', {
-      description: 'A link to download the clip\'s working copy (H.264 MP4, 30 fps, the exact frames edits use), valid for 30 minutes. Depth is easiest with make_depth; this is for computing it yourself in your sandbox: run a monocular depth model on every frame, normalise the whole clip with one min/max so it does not flicker, near = white, and encode a greyscale MP4 with the same number of frames; then create_upload_link with kind depth.',
+      description: 'A 30-minute link to the clip\'s working copy (H.264 MP4, 30 fps, the exact frames edits use), for computing depth yourself. make_depth is easier; get_edit_guide has the recipe.',
       inputSchema: { footage: Id }, annotations: { ...read, openWorldHint: false },
     }, async ({ footage }) => {
       const f = ready(footage);
@@ -565,7 +565,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     });
 
     server.registerTool('get_depth', {
-      description: 'Read depth (0 far – 1 near) at points in 0–1 of the footage, from the clip\'s per-frame depth at a SOURCE frame, or from a depth picture asset. Use it to choose a layer\'s depth (e.g. a bird perched on the rim sits just nearer than the rim) or a blur focus. Also returns the depth picture itself.',
+      description: 'Reads depth (0 far - 1 near) at points in 0-1 of the footage, at a SOURCE frame or from a depth picture asset, for choosing a layer\'s depth or a blur focus. Also returns the depth picture.',
       inputSchema: {
         footage: Id, frame: z.number().int().min(0).optional().describe('SOURCE frame, for per-frame depth'),
         asset: AssetName.optional().describe('Or a depth picture uploaded as an asset'),
@@ -604,7 +604,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
 
     // For a sandbox without outbound network: ChatGPT hands the file over and this server fetches it.
     server.registerTool('add_model', {
-      description: 'Add a 3D model (.glb, textures embedded, no Draco) to a clip, from a file in this conversation (attached or made in your sandbox) or from a public HTTPS link. Answers with its animations. Use it when your sandbox cannot reach create_upload_link.',
+      description: 'Adds a 3D model (.glb, textures embedded, no Draco) to a clip from a file in this conversation or a public HTTPS link. Answers with its animations and nodes. Use when your sandbox cannot reach create_upload_link.',
       inputSchema: {
         footage: Id, name: AssetName,
         file: z.object({ download_url: z.string().url(), file_id: z.string(), mime_type: z.string().optional(), file_name: z.string().optional() }).optional().describe('The model as a ChatGPT file'),
@@ -621,7 +621,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     });
 
     server.registerTool('add_sound', {
-      description: 'Add a sound effect or music to a clip, from a file in this conversation (attached or made in your sandbox) or from a public HTTPS link to the audio file. MP3, WAV, OGG, FLAC or M4A, up to 3 minutes. Answers with its length. Then place it in the edit\'s sounds.',
+      description: 'Adds a sound to a clip from a file in this conversation or a public HTTPS link. MP3, WAV, OGG, FLAC or M4A, up to 3 minutes. Answers with its length; then place it in the edit\'s sounds.',
       inputSchema: {
         footage: Id, name: AssetName,
         file: z.object({ download_url: z.string().url(), file_id: z.string(), mime_type: z.string().optional(), file_name: z.string().optional() }).optional().describe('The sound as a ChatGPT file'),

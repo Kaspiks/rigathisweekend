@@ -8,7 +8,7 @@ import '@fontsource/cormorant-garamond/700.css';
 import '@fontsource/great-vibes/400.css';
 import type { CSSProperties } from 'react';
 import { AbsoluteFill, Audio, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
-import { BoilFilter, IllustrationFilter } from './edit/filters';
+import { BoilFilter, IllustrationFilter, SoftenFilter } from './edit/filters';
 import type { BlurLayer, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
 import { PALETTE, baseScale, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, travel, walked } from './edit/model';
 import { ModelView } from './edit/Model3D';
@@ -144,6 +144,8 @@ export const FootageEdit = (props: FootageEditProps) => {
         <defs>
           {drawings.map(([l, i]) => <IllustrationFilter key={i} id={`drawn-${i}`} layer={l as IllustrateLayer} frame={frame} />)}
           {boils ? <BoilFilter id="boil-img" frame={frame} /> : null}
+          {spec.layers.map((l, i) => l.type === 'model' && l.soften > 0
+            ? <SoftenFilter key={`sf-${i}`} id={`soften-${i}`} amount={l.soften} frame={frame} /> : null)}
           {/* Hidden where the scene is nearer than the layer: white (shown) where layer depth > scene nearness. */}
           {nearness.map((d, i) => d == null ? null : (
             <g key={`occ-${i}`}>
@@ -244,7 +246,8 @@ export const FootageEdit = (props: FootageEditProps) => {
             const p = at(l, { x: 0.5, y: 0.5 });
             const pose = { x: p.x, y: p.y, frame, ...travel(props, cam, base, frame, l), walked: (f: number) => walked(props, base, l, f, (seed) => random(seed)) };
             return <ModelView key={i} layer={l} src={props.models?.[l.asset]?.src ?? null} pose={pose}
-              width={plan.width} height={plan.height} filter={l.boil ? 'url(#boil-img)' : undefined} />;
+              width={plan.width} height={plan.height}
+              filter={[l.boil ? 'url(#boil-img)' : null, l.soften > 0 ? `url(#soften-${i})` : null].filter(Boolean).join(' ') || undefined} />;
           }
           case 'flash': {
             // Full strength two frames in, gone by the end of the layer.
