@@ -1,5 +1,13 @@
 FROM node:24-bookworm-slim AS base
 RUN apt-get update && apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/*
+# COLMAP, for solving where the camera was on each frame (src/track-worker.py). In its own virtualenv so
+# it cannot disturb the python Debian ships, and ahead of the app's own files so changing code does not
+# rebuild it. Without this the app still runs: make_track reports that tracks cannot be solved here.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv libgl1 libglib2.0-0 \
+ && python3 -m venv /opt/pycolmap \
+ && /opt/pycolmap/bin/pip install --no-cache-dir pycolmap==4.2.0 \
+ && apt-get purge -y python3-venv && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /root/.cache
+ENV TRACK_PYTHON=/opt/pycolmap/bin/python3 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 COPY package*.json .npmrc ./
 # .npmrc skips onnxruntime's GPU download; the Windows and macOS builds it ships are not needed here either.
