@@ -476,6 +476,18 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     usedWorld.add(value);
     if (!worldPoints.has(value)) errors.push(`${where}: there is no world spot '${value}'; define it under world`);
   };
+  // `at` on a flat layer may name a spot in the room instead of an anchor: it is then drawn where that
+  // spot appears, and left out of frames where it is behind the camera. follow and a zoom focus stay
+  // anchors only - they follow something in the picture, which is a different idea.
+  const needPlace = (where, value) => {
+    if (typeof value !== 'string') return;
+    if (worldPoints.has(value)) {
+      usedWorld.add(value);
+      if (!footage.track) errors.push(`${where}: '${value}' is a spot in the room, which needs a camera track for this clip`);
+      return;
+    }
+    needAnchor(where, value);
+  };
   const zooms = [];
   for (const [i, layer] of spec.layers.entries()) {
     const where = `layers.${i} (${layer.type})`;
@@ -488,7 +500,7 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
       layer.in = Math.floor(layer.in * k); layer.out = Math.floor(layer.out * k);
       warnings.push(`${where}: entrance and exit were longer than the layer, so they were shortened`);
     }
-    needAnchor(where, layer.at);
+    needPlace(where, layer.at);
     needAnchor(`${where}: follow`, layer.follow);
     if (layer.world || layer.worldPath) {
       // Placing something in the room only means anything if we know where the camera was.
@@ -509,7 +521,7 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
       for (const [k, key] of layer.path.entries()) {
         const here = `${where}: path.${k}`;
         if (key.at != null ? key.x != null || key.y != null : key.x == null || key.y == null) errors.push(`${here}: give either x and y, or at`);
-        needAnchor(here, key.at);
+        needPlace(here, key.at);
         if (k && key.frame === layer.path[k - 1].frame) errors.push(`${here}: two keys on frame ${key.frame}`);
       }
       if (layer.path[0].frame > layer.from || layer.path.at(-1).frame < layer.to - 1) warnings.push(`${where}: the path does not cover the whole layer, so it waits at its first or last point`);

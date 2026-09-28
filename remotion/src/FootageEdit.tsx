@@ -13,7 +13,7 @@ import type { CSSProperties } from 'react';
 import { AbsoluteFill, Audio, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
 import { BoilFilter, IllustrationFilter, SoftenFilter } from './edit/filters';
 import type { Asset, BlurLayer, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
-import { PALETTE, baseScale, blendMode, glowFilter, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, travel, walked } from './edit/model';
+import { PALETTE, baseScale, blendMode, glowFilter, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, sourceAt, travel, walked, worldAt } from './edit/model';
 import { ModelView } from './edit/Model3D';
 import { ParticlesView } from './edit/Particles';
 import { depthNear, useLocalImage } from './edit/depth';
@@ -275,7 +275,14 @@ export const FootageEdit = (props: FootageEditProps) => {
           case 'model': {
             const p = at(l, { x: 0.5, y: 0.5 });
             const pose = { x: p.x, y: p.y, frame, ...travel(props, cam, base, frame, l), walked: (f: number) => walked(props, base, l, f, (seed) => random(seed)) };
-            return <ModelView key={i} layer={l} src={props.models?.[l.asset]?.src ?? null} pose={pose}
+            // Standing in the room rather than on the screen: the spot now, the spot it started on (which
+            // decides which way it faces and how big it is), and where the clip is drawn in the frame.
+            const spot = l.world || l.worldPath ? worldAt(props, l, frame) : null;
+            const first = spot ? worldAt(props, l, l.from) : null;
+            const world = props.track && spot && first
+              ? { track: props.track, point: spot, first, rect: footageRect(props, cam, base), source: sourceAt(plan.segments, frame), firstSource: sourceAt(plan.segments, l.from) }
+              : null;
+            return <ModelView key={i} layer={l} src={props.models?.[l.asset]?.src ?? null} pose={pose} world={world}
               width={plan.width} height={plan.height}
               filter={[l.boil ? 'url(#boil-img)' : null, l.soften > 0 ? `url(#soften-${i})` : null].filter(Boolean).join(' ') || undefined} />;
           }

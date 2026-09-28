@@ -289,8 +289,17 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const cues = job.kind === 'video' ? await Promise.all(planned.spec.sounds.map(async c => ({ ...c, file: await processedSound(folder, c) }))) : [];
       for (const c of cues) files[c.file] = {};
       const spec = { ...planned.spec, sounds: cues };
+      // A layer placed in the room needs the camera's path and the spots resolved to 3D. The scene
+      // points the solve found are left behind: they are only for placing a spot marked once, which has
+      // already happened by now, and there are thousands of them.
+      let track = null, world = null;
+      if (planned.spec.layers.some(l => l.world || l.worldPath)) {
+        const t = await loadTrack(footageFiles(store.dir, f.id).dir);
+        track = { frames: t.frames, fovY: t.fovY, aspect: t.aspect, up: t.up, scale: t.scale, poses: t.poses };
+        world = Object.fromEntries((await resolveWorld(f, planned.spec)).points.map(p => [p.name, p.position]));
+      }
       const body = JSON.stringify({ footage: f.id, render: job.id, kind: job.kind, ...job.request,
-        props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null, models, sounds: files } });
+        props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null, models, sounds: files, track, world } });
       let out;
       for (let waited = 0; ; waited++) {
         const r = await clipFetcher(`${renderUrl()}/clip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(job.kind === 'stills' ? 5 * 60000 : 60 * 60000) });

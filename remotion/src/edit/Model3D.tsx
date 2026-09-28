@@ -11,8 +11,8 @@ import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.j
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { cancelRender, continueRender, delayRender } from 'remotion';
-import type { ModelLayer, Track } from './model';
-import { PALETTE, colour, motionStyle, phase } from './model';
+import type { CameraTrack, ModelLayer, Track } from './model';
+import { PALETTE, cameraPoseAt, colour, motionStyle, phase } from './model';
 
 const FOV = 20;
 const loaded = new Map<string, GLTF>();
@@ -109,6 +109,9 @@ function makeToon(root: THREE.Object3D, outline: number) {
 
 // walked(frame): pixels moved along the path by then, for walk cycles tied to distance (stride).
 export type ModelPose = { x: number; y: number; frame: number; dir: number; lean: number; walked: (frame: number) => number };
+// Placing a model in the room instead of on the screen: the camera track, the spot it stands on, the
+// rectangle the clip is drawn into (which the canvas may only partly show), and the source frame now.
+export type WorldPlacement = { track: CameraTrack; point: [number, number, number]; first: [number, number, number]; rect: { left: number; top: number; width: number; height: number }; source: number; firstSource: number };
 // The turn that makes a model face the camera, from the way it faces as made.
 const FRONT: Record<ModelLayer['front'], number> = { camera: 0, away: 180, right: -90, left: 90 };
 
@@ -136,8 +139,8 @@ const roomEnvironment = (gl: THREE.WebGLRenderer) => {
 };
 
 // Inside the canvas: the model, its light and floor, posed for the current frame before the canvas draws.
-const Stage = ({ gltf, layer, pose, width, height }: { gltf: GLTF; layer: ModelLayer; pose: ModelPose; width: number; height: number }) => {
-  const { gl, scene } = useThree();
+const Stage = ({ gltf, layer, pose, width, height, world }: { gltf: GLTF; layer: ModelLayer; pose: ModelPose; width: number; height: number; world?: WorldPlacement | null }) => {
+  const { gl, scene, camera } = useThree();
   const rig = useMemo(() => {
     const model = cloneSkinned(gltf.scene);
     model.updateMatrixWorld(true);
@@ -208,7 +211,7 @@ const Stage = ({ gltf, layer, pose, width, height }: { gltf: GLTF; layer: ModelL
       a.play(); a.setEffectiveWeight(0);
       actions.set(clip.name, a);
     }
-    return { place, tilt, yaw, fit, mixer, actions, sun, reach };
+    return { place, tilt, yaw, fit, span: Math.max(1e-6, size.y || size.x), mixer, actions, sun, reach };
   }, [gltf, layer, height]);
 
   useLayoutEffect(() => {
@@ -224,10 +227,48 @@ const Stage = ({ gltf, layer, pose, width, height }: { gltf: GLTF; layer: ModelL
   const p = phase(layer, pose.frame);
   const m = motionStyle(layer.enter, layer.exit, p.enter, p.exit);
   const k = layer.keys ?? {};
-  rig.place.position.set(pose.x + m.dx - width / 2, height / 2 - (pose.y + m.dy), 0);
-  rig.place.rotation.z = (-pose.lean * Math.PI) / 180;
-  rig.tilt.rotation.x = (valueAt(k.tilt, p.local, layer.tilt) * Math.PI) / 180;
-  const scale = rig.fit * valueAt(k.scale, p.local, 1) * m.scale;
+  let scale: number;
+  if (world) {
+    // Look through the tracked camera. The canvas is the finished frame, but the clip is drawn into
+    // `rect`, which the frame may only partly show (cover fit, a zoom); setViewOffset renders exactly
+    // that sub-window of the clip's own frustum, so a point in the room lands where the footage puts it.
+    const cam = camera as THREE.PerspectiveCamera;
+    const shot = cameraPoseAt(world.track, world.source);
+    if (shot) {
+      cam.fov = world.track.fovY;
+      cam.aspect = world.rect.width / world.rect.height;
+      cam.setViewOffset(world.rect.width, world.rect.height, -world.rect.left, -world.rect.top, width, height);
+      cam.position.set(shot.position[0], shot.position[1], shot.position[2]);
+      cam.quaternion.set(shot.q[0], shot.q[1], shot.q[2], shot.q[3]);
+      cam.near = world.track.scale / 500; cam.far = world.track.scale * 40;
+      cam.updateProjectionMatrix();
+      cam.updateMatrixWorld(true);
+    }
+    rig.place.position.set(world.point[0] + m.dx * 0, world.point[1], world.point[2]);
+    rig.place.rotation.set(0, 0, 0);
+    // Standing on the ground: the model's own up follows the track's up, and it faces where the camera
+    // was when the layer began, so it does not swivel to follow the lens afterwards.
+    const up = new THREE.Vector3(...world.track.up).normalize();
+    const start = cameraPoseAt(world.track, world.firstSource);
+    const toCam = start ? new THREE.Vector3(start.position[0] - world.first[0], start.position[1] - world.first[1], start.position[2] - world.first[2]) : new THREE.Vector3(0, 0, 1);
+    let front = toCam.projectOnPlane(up);
+    if (front.lengthSq() < 1e-12) front = new THREE.Vector3(1, 0, 0).projectOnPlane(up);
+    front.normalize();
+    const right = new THREE.Vector3().crossVectors(up, front).normalize();
+    rig.tilt.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, front));
+    // `size` is a fraction of the frame height, which in the room means: this big on the frame it
+    // started on. After that it is a fixed object and perspective decides how big it looks.
+    const away = start ? new THREE.Vector3(...world.first).distanceTo(new THREE.Vector3(...start.position)) : world.track.scale;
+    const span = 2 * Math.tan((world.track.fovY * Math.PI) / 360) * Math.max(1e-6, away);
+    const worldHeight = layer.size * (height / world.rect.height) * span;
+    scale = (worldHeight / rig.span) * valueAt(k.scale, p.local, 1) * m.scale;
+  } else {
+    rig.place.position.set(pose.x + m.dx - width / 2, height / 2 - (pose.y + m.dy), 0);
+    rig.place.rotation.z = (-pose.lean * Math.PI) / 180;
+    rig.tilt.quaternion.identity();
+    rig.tilt.rotation.x = (valueAt(k.tilt, p.local, layer.tilt) * Math.PI) / 180;
+    scale = rig.fit * valueAt(k.scale, p.local, 1) * m.scale;
+  }
   rig.tilt.scale.setScalar(scale);
   // The shadow camera is not inside the scaled group, so its box is sized in pixels around the model.
   const box = rig.reach * scale * 2.5, shadow = rig.sun.shadow;
@@ -253,7 +294,7 @@ const Stage = ({ gltf, layer, pose, width, height }: { gltf: GLTF; layer: ModelL
   return null;
 };
 
-export const ModelView = ({ layer, src, pose, width, height, filter }: { layer: ModelLayer; src: string | null; pose: ModelPose; width: number; height: number; filter?: string }) => {
+export const ModelView = ({ layer, src, pose, width, height, filter, world }: { layer: ModelLayer; src: string | null; pose: ModelPose; width: number; height: number; filter?: string; world?: WorldPlacement | null }) => {
   const gltf = useGltf(src);
   const p = phase(layer, pose.frame);
   if (!gltf || !p.on) return null;
@@ -263,7 +304,7 @@ export const ModelView = ({ layer, src, pose, width, height, filter }: { layer: 
     <ThreeCanvas width={width} height={height} flat shadows="percentage" gl={{ alpha: true, antialias: true, preserveDrawingBuffer: true }}
       camera={{ fov: FOV, position: [0, 0, distance], near: distance / 20, far: distance * 20 }}
       style={{ position: 'absolute', left: 0, top: 0, opacity: m.opacity * layer.opacity, filter }}>
-      <Stage gltf={gltf} layer={layer} pose={pose} width={width} height={height} />
+      <Stage gltf={gltf} layer={layer} pose={pose} width={width} height={height} world={world} />
     </ThreeCanvas>
   );
 };

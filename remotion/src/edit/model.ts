@@ -39,6 +39,7 @@ export type GraphicLayer = Span & { type: 'graphic'; use?: string; viewBox?: { w
 export type ModelLayer = Span & { type: 'model'; asset: string; node?: string; soften: number; animation?: string; speed: number; loop: boolean; actions?: { frame: number; animation: string; speed?: number; loop?: boolean; stride?: number }[]; blend: number;
   depth?: number | 'auto'; stride?: number; front: 'camera' | 'away' | 'right' | 'left';
   at?: Place; offset?: Point; path?: PathKey[]; facing: 'as-made' | 'path'; angle: number; pin: 'feet' | 'center'; size: number; turn: number; tilt: number;
+  world?: string; worldPath?: { frame: number; world: string }[];
   keys?: Partial<Record<'turn' | 'tilt' | 'spin' | 'roll' | 'scale', Track>>; light: 'left' | 'right' | 'front' | 'top' | 'back'; brightness: number; shadow: number;
   color?: string; follow?: string; look: 'as-made' | 'toon'; boil: boolean; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none' };
 export type BlurLayer = Span & { type: 'blur'; focus: number; range: number; amount: number; near: boolean };
@@ -55,7 +56,12 @@ export type Segment = { from: number; to: number; source: number; hold?: boolean
 export type Plan = { width: number; height: number; fps: number; durationInFrames: number; segments: Segment[] };
 export type Asset = { src: string; width: number; height: number };
 export type DepthFrames = { base: string; frames: number };
-export type FootageEditProps = { spec: Spec; plan: Plan; video: string; assets: Record<string, Asset>; source: { width: number; height: number; frames: number }; depth?: DepthFrames | null; models?: Record<string, { src: string }>; sounds?: Record<string, { src: string }> };
+// A camera track: where the camera was and which way it looked on every frame of the clip, so a layer
+// can be put in the room instead of on the screen. Poses are [x, y, z, qx, qy, qz, qw] in OpenGL
+// convention (the camera looks along −Z, +Y up), or null on frames the track does not cover.
+export type Pose = [number, number, number, number, number, number, number];
+export type CameraTrack = { frames: number; fovY: number; aspect: number; up: [number, number, number]; scale: number; poses: (Pose | null)[] };
+export type FootageEditProps = { spec: Spec; plan: Plan; video: string; assets: Record<string, Asset>; source: { width: number; height: number; frames: number }; depth?: DepthFrames | null; models?: Record<string, { src: string }>; sounds?: Record<string, { src: string }>; track?: CameraTrack | null; world?: Record<string, [number, number, number]> | null };
 
 export const PALETTE: Record<string, string> = { ink: '#17352d', lime: '#d4ed86', paper: '#f4f0e6', white: '#ffffff', black: '#111111', coral: '#ff6b5b', gold: '#f5c542', sky: '#7cc6fe' };
 export const colour = (c: string | undefined, fallback: string) => (c ? PALETTE[c] ?? c : fallback);
@@ -147,10 +153,22 @@ export function toScreen(props: FootageEditProps, cam: Camera, base: number, p: 
 // Screen position (pixels) of a layer's `at` plus offset: anchors follow the footage, points stay put.
 export function screenPlace(props: FootageEditProps, cam: Camera, base: number, frame: number, at: Place | undefined, offset: Point | undefined, fallback: Point): Point {
   const { plan, spec } = props;
-  const p = at == null ? { x: fallback.x * plan.width, y: fallback.y * plan.height }
-    : typeof at === 'string' ? toScreen(props, cam, base, footagePoint(spec, at, sourceAt(plan.segments, frame)))
-      : { x: at.x * plan.width, y: at.y * plan.height };
+  // A name can be a spot in the room as well as an anchor in the picture. World spots win: they are
+  // only defined when the clip has a camera track, and planEdit keeps the two from sharing a name.
+  const spot = typeof at === 'string' && props.track ? props.world?.[at] : null;
+  const p = spot ? worldOnScreen(props, cam, base, frame, spot)
+    : at == null ? { x: fallback.x * plan.width, y: fallback.y * plan.height }
+      : typeof at === 'string' ? toScreen(props, cam, base, footagePoint(spec, at, sourceAt(plan.segments, frame)))
+        : { x: at.x * plan.width, y: at.y * plan.height };
   return { x: p.x + (offset?.x ?? 0) * plan.width, y: p.y + (offset?.y ?? 0) * plan.height };
+}
+// Where a spot in the room lands on screen. Once it is behind the camera there is no such place, so it
+// is put far outside the frame, which keeps it out of the picture without every layer having to ask.
+const BEHIND = { x: -1e6, y: -1e6 };
+function worldOnScreen(props: FootageEditProps, cam: Camera, base: number, frame: number, point: [number, number, number]): Point {
+  const s = props.track ? projectWorld(props.track, sourceAt(props.plan.segments, frame), point) : null;
+  if (!s || s.behind || !Number.isFinite(s.x) || !Number.isFinite(s.y)) return BEHIND;
+  return toScreen(props, cam, base, { x: s.x, y: s.y });
 }
 
 // Where a layer is at a frame: along its path when it has one (smoothed through the keys, and a key
@@ -316,3 +334,66 @@ export function sourceVolumeAt(spec: Spec, frame: number): number {
 // CSS for how a layer mixes with the picture under it, and a soft glow around it.
 export const blendMode = (b?: Blend) => (b === 'add' ? 'plus-lighter' : b && b !== 'normal' ? b : undefined) as import('react').CSSProperties['mixBlendMode'];
 export const glowFilter = (px?: number, color = 'rgba(255,244,214,0.9)') => (px ? `drop-shadow(0 0 ${(px / 2).toFixed(1)}px ${color}) drop-shadow(0 0 ${px}px ${color})` : undefined);
+
+// ---- Looking through a tracked camera ---------------------------------------------------------------
+// The same arithmetic as src/tracking.js on the server, so a spot resolved there lands here.
+type Quat = [number, number, number, number];
+const qdot = (a: Quat, b: Quat) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+function qslerp(a: Quat, b: Quat, t: number): Quat {
+  let d = qdot(a, b), c = b;
+  if (d < 0) { c = b.map((v) => -v) as Quat; d = -d; }
+  if (d > 0.9995) {
+    const m = a.map((v, i) => v + (c[i] - v) * t) as Quat;
+    const l = Math.hypot(...m) || 1;
+    return m.map((v) => v / l) as Quat;
+  }
+  const th = Math.acos(d), s = Math.sin(th);
+  return a.map((v, i) => (v * Math.sin((1 - t) * th) + c[i] * Math.sin(t * th)) / s) as Quat;
+}
+export const qrotate = (q: Quat, v: [number, number, number]): [number, number, number] => {
+  const [x, y, z, w] = q, [vx, vy, vz] = v;
+  // t = 2 * (q.xyz x v); v' = v + w t + q.xyz x t
+  const tx = 2 * (y * vz - z * vy), ty = 2 * (z * vx - x * vz), tz = 2 * (x * vy - y * vx);
+  return [vx + w * tx + y * tz - z * ty, vy + w * ty + z * tx - x * tz, vz + w * tz + x * ty - y * tx];
+};
+export type CameraPose = { position: [number, number, number]; q: Quat };
+// The camera at a (possibly fractional) SOURCE frame; null where the track does not reach.
+export function cameraPoseAt(track: CameraTrack, frame: number): CameraPose | null {
+  const n = Math.max(0, Math.min(track.frames - 1, frame));
+  const a = Math.floor(n), b = Math.min(track.frames - 1, a + 1), k = n - a;
+  const pa = track.poses[a], pb = track.poses[b];
+  if (!pa && !pb) return null;
+  if (!pa || !pb || k === 0) {
+    const p = (pa ?? pb) as Pose;
+    return { position: [p[0], p[1], p[2]], q: [p[3], p[4], p[5], p[6]] };
+  }
+  return {
+    position: [pa[0] + (pb[0] - pa[0]) * k, pa[1] + (pb[1] - pa[1]) * k, pa[2] + (pb[2] - pa[2]) * k],
+    q: qslerp([pa[3], pa[4], pa[5], pa[6]], [pb[3], pb[4], pb[5], pb[6]], k),
+  };
+}
+// Where a point in the room shows in the footage, in 0–1 of the clip picture.
+export function projectWorld(track: CameraTrack, frame: number, point: [number, number, number]) {
+  const pose = cameraPoseAt(track, frame);
+  if (!pose) return null;
+  const d: [number, number, number] = [point[0] - pose.position[0], point[1] - pose.position[1], point[2] - pose.position[2]];
+  const inv: Quat = [-pose.q[0], -pose.q[1], -pose.q[2], pose.q[3]];
+  const v = qrotate(inv, d);
+  if (v[2] >= -1e-9) return { x: NaN, y: NaN, behind: true, depth: 0 };
+  const f = 1 / Math.tan((track.fovY * Math.PI) / 360);
+  return { x: 0.5 + ((v[0] / -v[2]) * f) / track.aspect / 2, y: 0.5 - ((v[1] / -v[2]) * f) / 2, behind: false, depth: -v[2] };
+}
+// A layer's spot in the room at an output frame: one spot, or eased along a worldPath between spots.
+export function worldAt(props: FootageEditProps, layer: { world?: string; worldPath?: { frame: number; world: string }[] }, frame: number): [number, number, number] | null {
+  const named = (name: string) => props.world?.[name] ?? null;
+  const keys = layer.worldPath;
+  if (!keys?.length) return layer.world ? named(layer.world) : null;
+  if (frame <= keys[0].frame) return named(keys[0].world);
+  const last = keys[keys.length - 1];
+  if (frame >= last.frame) return named(last.world);
+  const i = keys.findIndex((k, n) => frame >= k.frame && frame < keys[n + 1].frame);
+  const a = named(keys[i].world), b = named(keys[i + 1].world);
+  if (!a || !b) return a ?? b;
+  const t = smooth((frame - keys[i].frame) / (keys[i + 1].frame - keys[i].frame));
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+}
