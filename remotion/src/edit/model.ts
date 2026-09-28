@@ -6,17 +6,26 @@ import { Easing, interpolate } from 'remotion';
 export type Point = { x: number; y: number };
 export type Place = string | Point;
 type Span = { from: number; to: number; in: number; out: number };
-export type TextLayer = Span & { type: 'text'; text: string; style: 'title' | 'callout' | 'caption' | 'label' | 'script' | 'band'; at?: Place; offset?: Point; pointer: boolean; size?: number; color?: string; background?: string; align: 'left' | 'center' | 'right'; enter: 'pop' | 'fade' | 'rise' | 'type' | 'slide' | 'none'; exit: 'fade' | 'pop' | 'sink' | 'none' };
+export type TextMotion = { by: 'letter' | 'word' | 'line'; style: 'fade' | 'rise' | 'drop' | 'pop' | 'blur' | 'slide' | 'scramble' | 'typewriter' | 'flip'; stagger: number; duration: number };
+export type TextLayer = Span & { type: 'text'; text: string; style: 'title' | 'callout' | 'caption' | 'label' | 'script' | 'band'; at?: Place; offset?: Point; path?: PathKey[]; pointer: boolean; size?: number; color?: string; background?: string; align: 'left' | 'center' | 'right'; enter: 'pop' | 'fade' | 'rise' | 'type' | 'slide' | 'none'; exit: 'fade' | 'pop' | 'sink' | 'none';
+  font?: 'serif' | 'script' | 'sans' | 'display' | 'mono'; reveal?: TextMotion; hide?: TextMotion; loop?: 'none' | 'wave' | 'bounce' | 'pulse' | 'shake' | 'flicker' | 'glow';
+  highlight?: { words: string[]; color: string; style: 'marker' | 'underline' | 'box'; delay: number }; count?: { from: number; to: number; decimals: number; frames: number };
+  stroke?: { color: string; width: number }; glow?: string; gradient?: [string, string]; tracking?: number; rotate?: number; blend?: Blend };
 export type PathKey = { frame: number; x?: number; y?: number; at?: string; depth?: number };
 export type Facing = 'as-drawn' | 'flip' | 'path';
 export type StickerLayer = Span & { type: 'sticker'; shape: 'sparkles' | 'steam' | 'hearts' | 'stars' | 'circle' | 'arrow' | 'burst' | 'pulse' | 'underline' | 'squiggle'; at?: Place; offset?: Point; path?: PathKey[]; size: number; color: string; rotate: number; enter: 'draw' | 'pop' | 'fade' | 'none'; exit: 'fade' | 'pop' | 'none' };
 export type IllustrateLayer = Span & { type: 'illustrate'; style: 'cel' | 'ink' | 'sketch' | 'watercolor' | 'duotone' | 'posterize'; transition: 'fade' | 'wipe' | 'iris'; at?: Place; boil: boolean; colors?: [string, string] };
-export type ImageLayer = Span & { type: 'image'; asset: string; place: 'footage' | 'screen'; at?: Place; offset?: Point; path?: PathKey[]; facing?: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'wipe' | 'none'; exit: 'pop' | 'fade' | 'none'; motion: 'none' | 'float' | 'boil' | 'sway' | 'pulse' | 'spin' };
+export type Blend = 'normal' | 'screen' | 'add' | 'multiply' | 'overlay' | 'soft-light' | 'lighten';
+export type ImageLayer = Span & { type: 'image'; asset: string; place: 'footage' | 'screen'; at?: Place; offset?: Point; path?: PathKey[]; facing?: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'wipe' | 'none'; exit: 'pop' | 'fade' | 'none'; motion: 'none' | 'float' | 'boil' | 'sway' | 'pulse' | 'spin';
+  blend?: Blend; glow?: number; tint?: string };
 export type ZoomLayer = Span & { type: 'zoom'; scale: number; focus: Place };
 export type ShakeLayer = Span & { type: 'shake'; strength: number };
 export type FlashLayer = Span & { type: 'flash'; color: string };
-export type SequenceLayer = Span & { type: 'sequence'; asset: string; count: number; fps: number; loop: boolean; at?: Place; offset?: Point; path?: PathKey[]; facing: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none'; motion: 'none' | 'bob' | 'sway' };
+export type SequenceLayer = Span & { type: 'sequence'; asset: string; count: number; columns?: number; range?: { from: number; to: number }; playback?: 'loop' | 'once' | 'pingpong'; rotate?: number; spin?: number; blend?: Blend; glow?: number; tint?: string; fps: number; loop: boolean; at?: Place; offset?: Point; path?: PathKey[]; facing: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none'; motion: 'none' | 'bob' | 'sway' };
 export type Track = { frame: number; value: number }[];
+export type ParticlesLayer = Span & { type: 'particles'; shape?: 'dot' | 'soft' | 'spark' | 'star' | 'ring' | 'streak' | 'heart' | 'confetti' | 'square'; asset?: string; count: number; columns?: number; fps: number;
+  at?: Place; offset?: Point; path?: PathKey[]; area?: { width: number; height: number }; rate: number; burst: number; life: number; speed: number; direction: number; spread: number;
+  gravity: number; drag: number; size: number; sizeRandom: number; grow: number; spin: number; colors?: string[]; fade: 'in-out' | 'out' | 'none'; opacity: number; blend?: Blend; glow?: number; seed: number };
 export type GraphicElement = {
   shape: 'path' | 'circle' | 'ellipse' | 'rect' | 'line' | 'text'; d?: string; cx?: number; cy?: number; r?: number; rx?: number; ry?: number;
   x?: number; y?: number; width?: number; height?: number; x2?: number; y2?: number; text?: string; font?: 'serif' | 'script'; fontSize?: number;
@@ -35,7 +44,7 @@ export type ModelLayer = Span & { type: 'model'; asset: string; node?: string; s
 export type BlurLayer = Span & { type: 'blur'; focus: number; range: number; amount: number; near: boolean };
 export type FogLayer = Span & { type: 'fog'; color: string; strength: number; start: number };
 export type ParallaxLayer = Span & { type: 'parallax'; move: 'pan' | 'tilt' | 'orbit'; amount: number };
-export type Layer = TextLayer | StickerLayer | IllustrateLayer | ImageLayer | SequenceLayer | GraphicLayer | ModelLayer | BlurLayer | FogLayer | ParallaxLayer | ZoomLayer | ShakeLayer | FlashLayer;
+export type Layer = TextLayer | StickerLayer | IllustrateLayer | ImageLayer | SequenceLayer | ParticlesLayer | GraphicLayer | ModelLayer | BlurLayer | FogLayer | ParallaxLayer | ZoomLayer | ShakeLayer | FlashLayer;
 export type Keyframe = { frame: number; x: number; y: number };
 export type DepthSpec = { video: boolean; stills?: { from: number; to: number; asset: string }[]; near: 'white' | 'black' };
 export type Level = { frame: number; value: number }[];
@@ -303,3 +312,7 @@ export function sourceVolumeAt(spec: Spec, frame: number): number {
   }
   return Math.max(0, v);
 }
+
+// CSS for how a layer mixes with the picture under it, and a soft glow around it.
+export const blendMode = (b?: Blend) => (b === 'add' ? 'plus-lighter' : b && b !== 'normal' ? b : undefined) as import('react').CSSProperties['mixBlendMode'];
+export const glowFilter = (px?: number, color = 'rgba(255,244,214,0.9)') => (px ? `drop-shadow(0 0 ${(px / 2).toFixed(1)}px ${color}) drop-shadow(0 0 ${px}px ${color})` : undefined);

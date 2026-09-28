@@ -623,3 +623,52 @@ test('Sounds are uploaded, placed on frames with levels and effects, and handed 
   assert.equal(got.audio.every, 0.25);
   assert.ok(got.audio.db.split(' ').length >= 7, got.audio.db);
 });
+
+test('ChatGPT can keep house rules that appear in the edit guide in later chats', async t => {
+  const { mcp } = await setup(t);
+  const client = await mcp();
+  const guide = async () => (await client.callTool({ name: 'get_edit_guide', arguments: {} })).content[0].text;
+  assert.doesNotMatch(await guide(), /House rules/);
+  await client.callTool({ name: 'save_guide_note', arguments: { title: 'Sprite-first effects', text: 'Use the cinema-* sprites for impacts and glints before drawing new graphics.' } });
+  await client.callTool({ name: 'save_guide_note', arguments: { title: 'Soft models', text: 'Give model layers soften 0.4 on handheld footage.' } });
+  await client.callTool({ name: 'save_guide_note', arguments: { title: 'Sprite-first effects', text: 'Use cinema-impact, cinema-glint and cinema-dust first.' } });
+  const text = await guide();
+  assert.match(text, /## House rules[\s\S]*### Sprite-first effects\nUse cinema-impact, cinema-glint and cinema-dust first\.[\s\S]*### Soft models/);
+  assert.doesNotMatch(text, /before drawing new graphics/, 'saving a title again replaces it');
+  const gone = dataOf(await client.callTool({ name: 'delete_guide_note', arguments: { title: 'Soft models' } }));
+  assert.deepEqual(gone.notes, ['Sprite-first effects']);
+  assert.ok((await client.callTool({ name: 'delete_guide_note', arguments: { title: 'Nope' } })).isError);
+});
+
+test('Sprite sheets are built from single frames, and sprites, particles and text animate in more ways', needsFfmpeg, async t => {
+  const { dir, base, auth, upload, settle, mcp } = await setup(t);
+  const { id } = await upload(await readFile(await rampClip(dir))).then(json); await settle();
+  const client = await mcp();
+  // Five frames of different sizes become one grid sheet, each centred in an equal cell.
+  for (const [i, w] of [100, 120, 100, 90, 110].entries()) {
+    const png = await sharp({ create: { width: w, height: 80, channels: 4, background: { r: 200, g: 40 * i, b: 60, alpha: 1 } } }).png().toBuffer();
+    assert.equal((await fetch(`${base}/api/footage/${id}/assets/spark-${i}`, { method: 'POST', headers: { ...auth, 'Content-Type': 'image/png' }, body: png })).status, 201);
+  }
+  const built = dataOf(await client.callTool({ name: 'build_sprite', arguments: { footage: id, name: 'spark', frames: [0, 1, 2, 3, 4].map(i => `spark-${i}`), columns: 3, remove: true } }));
+  assert.deepEqual([built.width, built.height, built.count, built.columns, built.frame], [360, 160, 5, 3, { width: 120, height: 80 }]);
+  const assets = dataOf(await client.callTool({ name: 'list_footage', arguments: {} }))[0].assets.map(a => a.name);
+  assert.deepEqual(assets, ['spark'], 'the single frames were removed');
+  const missing = await client.callTool({ name: 'build_sprite', arguments: { footage: id, name: 'x', frames: ['nope', 'spark'] } });
+  assert.ok(missing.isError); assert.match(missing.content[0].text, /No picture called 'nope'/);
+  // Layers using them are checked.
+  const save = layers => client.callTool({ name: 'save_edit', arguments: { footage: id, edit: { layers } } });
+  const ok = await save([
+    { type: 'sequence', from: 0, to: 30, asset: 'spark', count: 5, columns: 3, range: { from: 1, to: 3 }, playback: 'pingpong', blend: 'add', glow: 12, tint: 'gold', spin: 90 },
+    { type: 'particles', from: 0, to: 60, at: { x: 0.5, y: 0.6 }, shape: 'spark', burst: 40, rate: 0, drag: 3, speed: 0.6, spread: 360, blend: 'screen' },
+    { type: 'particles', from: 0, to: 60, asset: 'spark', count: 5, columns: 3, rate: 10 },
+    { type: 'text', from: 0, to: 60, text: '{n} cups a day', font: 'display', count: { from: 0, to: 1200 }, reveal: { by: 'word', style: 'blur' }, hide: { by: 'letter', style: 'scramble' }, loop: 'wave',
+      highlight: { words: ['cups'] }, stroke: { color: 'ink', width: 3 }, glow: 'gold', gradient: ['paper', 'gold'], tracking: 0.2, path: [{ frame: 0, x: 0.2, y: 0.3 }, { frame: 59, x: 0.8, y: 0.3 }] },
+  ]);
+  assert.ok(!ok.isError, ok.content?.[0]?.text);
+  const refuse = async (layer, pattern) => { const r = await save([layer]); assert.ok(r.isError); assert.match(r.content[0].text, pattern); };
+  await refuse({ type: 'sequence', from: 0, to: 30, asset: 'spark', count: 5, columns: 3, range: { from: 2, to: 7 } }, /range must run/);
+  await refuse({ type: 'particles', from: 0, to: 60, rate: 300, life: 200 }, /particles would be on screen/);
+  await refuse({ type: 'particles', from: 0, to: 60, shape: 'dot', asset: 'spark' }, /either shape or asset/);
+  const uneven = dataOf(await save([{ type: 'sequence', from: 0, to: 30, asset: 'spark', count: 5, columns: 7 }]));
+  assert.match(uneven.warnings.join(), /does not split evenly into 7 columns/);
+});

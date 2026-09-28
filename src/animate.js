@@ -5,7 +5,7 @@
 import express from 'express';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, rm } from 'node:fs/promises';
+import { mkdir, readdir, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import sharp from 'sharp';
 import { z } from 'zod';
@@ -448,9 +448,33 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     });
 
     server.registerTool('get_edit_guide', {
-      description: 'How to write an edit for save_edit: the workflow, the two frame clocks, coordinates, a worked example and tips. Read it before the first edit.',
+      description: 'How to write an edit for save_edit: the workflow, the two frame clocks, coordinates, a worked example and tips, then the house rules saved with save_guide_note. Read it before the first edit.',
       inputSchema: {}, annotations: read,
-    }, async () => ({ content: [{ type: 'text', text: GUIDE }] }));
+    }, async () => {
+      const notes = store.guideNotes();
+      const house = notes.length ? `\n\n## House rules (saved with save_guide_note; follow them)\n${notes.map(n => `### ${n.title}\n${n.text}`).join('\n\n')}` : '';
+      return { content: [{ type: 'text', text: GUIDE + house }] };
+    });
+
+    server.registerTool('save_guide_note', {
+      description: 'Adds a rule or lesson to the end of get_edit_guide for every later edit and chat, e.g. a working method the owner asked for or a fix that worked. Saving an existing title replaces it. Keep each note short and specific.',
+      inputSchema: {
+        title: z.string().trim().min(3).max(80).describe('Short title, e.g. "Sprite-first effects"'),
+        text: z.string().trim().min(10).max(2000).describe('The rule, in plain words, with the asset or setting names it relies on'),
+      }, annotations: write,
+    }, async ({ title, text: body }) => {
+      if (store.guideNotes().length >= 40 && !store.guideNotes().some(n => n.title === title)) throw fail('There are 40 notes already; replace or delete one first');
+      store.saveGuideNote(title, body);
+      return text({ saved: title, notes: store.guideNotes().map(n => n.title) });
+    });
+
+    server.registerTool('delete_guide_note', {
+      description: 'Removes a house rule from get_edit_guide by its title.',
+      inputSchema: { title: z.string().trim().min(1).max(80) }, annotations: { ...write, destructiveHint: true },
+    }, async ({ title }) => {
+      if (!store.deleteGuideNote(title)) throw fail(`No note called '${title}'`);
+      return text({ deleted: title, notes: store.guideNotes().map(n => n.title) });
+    });
 
     server.registerTool('get_edit', {
       description: 'The saved edit for a clip (latest version unless one is given), its timeline and the list of versions.',
@@ -518,6 +542,42 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       if (errors.length) throw fail(errors.join('; '));
       store.saveGraphic(name, graphic, note || null);
       return text({ saved: name, elements: graphic.elements.length, use: `{"type":"graphic","use":"${name}","from":…,"to":…,"at":…}` });
+    });
+
+    // Sprite sheets from single frames, so ChatGPT can make each frame separately (drawn, generated or
+    // rendered) and get one sheet laid out the way sequence and particles layers read it.
+    server.registerTool('build_sprite', {
+      description: 'Builds a sprite sheet from pictures already uploaded to the clip, one per frame in order, laid out in a grid for a sequence or particles layer. Each frame is centred in an equal cell with transparency kept. Answers with count, columns and a layer to start from.',
+      inputSchema: {
+        footage: Id, name: AssetName.describe('Name for the sheet'),
+        frames: z.array(AssetName).min(2).max(256).describe('Uploaded pictures, in playing order'),
+        columns: z.number().int().min(1).max(64).optional().describe('Frames per row (default: as many as fit 8192 px)'),
+        remove: z.boolean().default(false).describe('Delete the single frame pictures once the sheet is made'),
+      }, annotations: write,
+    }, async ({ footage, name, frames, columns, remove }) => {
+      const f = store.footage(footage), folder = footageFiles(store.dir, f.id).assets;
+      const files = frames.map(n => join(folder, `${n}.png`));
+      const missing = frames.filter((n, i) => !existsSync(files[i]));
+      if (missing.length) throw fail(`No picture called ${missing.map(n => `'${n}'`).join(', ')} on this clip`);
+      const metas = await Promise.all(files.map(file => sharp(file).metadata()));
+      let cw = Math.max(...metas.map(m => m.width)), ch = Math.max(...metas.map(m => m.height));
+      const LIMIT = 8192;
+      let cols = columns ?? Math.max(1, Math.min(frames.length, Math.floor(LIMIT / cw) || 1));
+      let rows = Math.ceil(frames.length / cols);
+      // Shrink the cells if the sheet would be too big to handle.
+      const k = Math.min(1, LIMIT / (cols * cw), LIMIT / (rows * ch), Math.sqrt(40e6 / (cols * cw * rows * ch)));
+      cw = Math.max(1, Math.floor(cw * k)); ch = Math.max(1, Math.floor(ch * k));
+      const tiles = await Promise.all(files.map(async (file, i) => ({
+        input: await sharp(file).resize(cw, ch, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } }).png().toBuffer(),
+        left: (i % cols) * cw, top: Math.floor(i / cols) * ch,
+      })));
+      await mkdir(folder, { recursive: true });
+      const out = join(folder, `${name}.png`), tmp = `${out}.part`;
+      await sharp({ create: { width: cols * cw, height: rows * ch, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).composite(tiles).png().toFile(tmp);
+      await rename(tmp, out);
+      if (remove) for (const [i, n] of frames.entries()) if (n !== name) await rm(files[i], { force: true });
+      return text({ name, width: cols * cw, height: rows * ch, count: frames.length, columns: cols, frame: { width: cw, height: ch }, ...(k < 1 ? { note: `Frames were scaled to ${Math.round(k * 100)}% to fit the sheet` } : {}),
+        use: { type: 'sequence', asset: name, count: frames.length, columns: cols, fps: 12 } });
     });
 
     server.registerTool('list_graphics', {

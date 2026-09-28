@@ -33,6 +33,9 @@ const Facing = () => z.enum(['as-drawn', 'flip', 'path']).default('as-drawn')
 const Follow = () => z.string().regex(ANCHOR).optional()
   .describe('An anchor on something fixed in the scene: `at` and `path` move with it, so a handheld shot does not leave the layer sliding. See get_edit_guide');
 const Depth = () => Unit().optional().describe('How near, 0 far – 1 near (get_depth): hidden where the scene is nearer. Needs depth on the edit');
+const Blend = () => z.enum(['normal', 'screen', 'add', 'multiply', 'overlay', 'soft-light', 'lighten']).default('normal')
+  .describe('How it mixes with what is under it: screen or add for light (glints, flares, dust in a sunbeam), multiply for shadows and ink');
+const Glow = () => z.number().min(0).max(80).default(0).describe('Soft glow around it, in pixels (0 none); pairs with blend screen for light effects');
 const Span = () => ({
   from: Frame().describe('First OUTPUT frame'),
   to: Frame().describe('OUTPUT frame it ends, exclusive'),
@@ -40,19 +43,48 @@ const Span = () => ({
   out: z.number().int().min(0).max(90).default(8).describe('Exit frames'),
 });
 
+const TextMotion = () => z.object({
+  by: z.enum(['letter', 'word', 'line']).default('letter'),
+  style: z.enum(['fade', 'rise', 'drop', 'pop', 'blur', 'slide', 'scramble', 'typewriter', 'flip']).default('rise')
+    .describe('rise/drop move each piece up into place or down from above, pop springs it, blur focuses it, scramble shows random letters that settle, flip turns it over'),
+  stagger: z.number().int().min(0).max(30).default(2).describe('Frames between one piece and the next'),
+  duration: z.number().int().min(1).max(60).default(10).describe('Frames each piece takes'),
+}).strict();
+
 const Text = z.object({
   type: z.literal('text'), ...Span(),
   text: z.string().trim().min(1).max(140).refine(t => t.split('\n').length <= 3, 'Up to three lines').describe('Up to three lines; use \\n to break'),
   style: z.enum(['title', 'callout', 'caption', 'label', 'script', 'band']).default('caption')
     .describe('title: big serif headline; callout: paper card, pairs with pointer; caption: bold subtitle; label: small tag; script: handwritten accent; band: full-width bar'),
   at: Place().optional().describe('Where the text sits. Defaults: title near the top, caption and band near the bottom, others at the centre'),
-  offset: Offset().optional(), follow: Follow(), depth: Depth(),
+  offset: Offset().optional(), path: Path(), follow: Follow(), depth: Depth(),
   pointer: z.boolean().default(false).describe('Draw a line from the text back to `at`; use with an anchor and an offset for a callout'),
   size: z.number().int().min(20).max(220).optional().describe('Type size in pixels on a 1080-wide frame'),
   color: Color().optional(), background: z.union([Color(), z.literal('none')]).optional(),
   align: z.enum(['left', 'center', 'right']).default('center'),
   enter: z.enum(['pop', 'fade', 'rise', 'type', 'slide', 'none']).default('pop'),
   exit: z.enum(['fade', 'pop', 'sink', 'none']).default('fade'),
+  font: z.enum(['serif', 'script', 'sans', 'display', 'mono']).optional()
+    .describe('serif (Cormorant, the brand), script (handwritten), sans (Inter, heavy), display (Bebas Neue, tall capitals for cinema titles), mono (typewriter). Default by style'),
+  reveal: TextMotion().optional().describe('Animates the text in piece by piece (letters, words or lines) instead of all at once'),
+  hide: TextMotion().optional().describe('Animates it out piece by piece at the end of the layer'),
+  loop: z.enum(['none', 'wave', 'bounce', 'pulse', 'shake', 'flicker', 'glow']).default('none')
+    .describe('Keeps moving while on: wave (letters ripple), bounce, pulse (breathes), shake (jitters, for impact), flicker (neon sign), glow (pulsing glow)'),
+  highlight: z.object({
+    words: z.array(z.string().min(1).max(40)).min(1).max(10).describe('Words to mark, as written in the text'),
+    color: Color().default('lime'), style: z.enum(['marker', 'underline', 'box']).default('marker'),
+    delay: z.number().int().min(0).max(300).default(8).describe('Frames after the layer starts that the marker sweeps in'),
+  }).strict().optional(),
+  count: z.object({
+    from: z.number().min(-1e9).max(1e9), to: z.number().min(-1e9).max(1e9),
+    decimals: z.number().int().min(0).max(3).default(0), frames: z.number().int().min(1).max(600).default(30).describe('How long the count takes'),
+  }).strict().optional().describe('Counts a number up or down: put {n} in the text where it goes (or the text is just the number), e.g. "{n} coffees a day"'),
+  stroke: z.object({ color: Color(), width: z.number().min(0.5).max(20) }).strict().optional().describe('Outline around the letters'),
+  glow: Color().optional().describe('Glowing light around the letters'),
+  gradient: z.array(Color()).length(2).optional().describe('Top and bottom colour of the letters'),
+  tracking: z.number().min(-0.1).max(1).optional().describe('Letter spacing in em, e.g. 0.3 for wide cinema titles'),
+  rotate: z.number().min(-45).max(45).default(0),
+  blend: Blend(),
 }).strict();
 
 const Sticker = z.object({
@@ -88,14 +120,18 @@ const Image = z.object({
   enter: z.enum(['pop', 'fade', 'wipe', 'none']).default('fade'),
   exit: z.enum(['pop', 'fade', 'none']).default('fade'),
   motion: z.enum(['none', 'float', 'boil', 'sway', 'pulse', 'spin']).default('none'),
+  blend: Blend(), glow: Glow(), tint: Color().optional().describe('Recolours the whole picture in one colour, keeping its shape and transparency'),
 }).strict();
 
 // Frame-by-frame animation from a sprite sheet: every frame side by side in one row, equal widths,
 // on a transparent background. A flapping bird, a hand-drawn flicker, a turntable of a 3D object.
 const Sequence = z.object({
   type: z.literal('sequence'), ...Span(),
-  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of an uploaded sprite sheet: all frames side by side in one row, equal widths'),
-  count: z.number().int().min(2).max(64).describe('How many frames the sheet holds'),
+  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of an uploaded sprite sheet: equal-sized frames in one row, or in a grid with columns'),
+  count: z.number().int().min(2).max(256).describe('How many frames the sheet holds'),
+  columns: z.number().int().min(1).max(64).optional().describe('Frames per row for a grid sheet, read left to right, top to bottom (default: all in one row); build_sprite makes grids'),
+  range: z.object({ from: z.number().int().min(0).max(255), to: z.number().int().min(0).max(255) }).strict().optional().describe('Play only sheet frames from..to (inclusive), e.g. just the flash of an impact'),
+  playback: z.enum(['loop', 'once', 'pingpong']).optional().describe('loop repeats, once stops on the last frame, pingpong plays forwards then backwards (default from loop)'),
   fps: z.number().int().min(1).max(30).default(12).describe('How fast the frames play; 8–12 feels hand-drawn, 24–30 smooth'),
   loop: z.boolean().default(true).describe('Repeat the frames, or stop on the last one'),
   at: Place().optional(), offset: Offset().optional(), path: Path(), follow: Follow(), facing: Facing(), depth: Depth(),
@@ -104,6 +140,38 @@ const Sequence = z.object({
   enter: z.enum(['pop', 'fade', 'none']).default('fade'),
   exit: z.enum(['pop', 'fade', 'none']).default('fade'),
   motion: z.enum(['none', 'bob', 'sway']).default('none').describe('bob: gentle up and down, like hovering'),
+  rotate: z.number().min(-360).max(360).default(0), spin: z.number().min(-1440).max(1440).default(0).describe('Degrees per second'),
+  blend: Blend(), glow: Glow(), tint: Color().optional().describe('Recolours every frame in one colour, keeping shape and transparency'),
+}).strict();
+
+// Particles: many small copies of a shape or sprite, emitted from a point or area over time, each with its
+// own direction, speed, size and spin, drawn the same on every render (seeded). Dust, sparks, confetti,
+// embers, steam droplets, bubbles, snow.
+const Particles = z.object({
+  type: z.literal('particles'), ...Span(),
+  shape: z.enum(['dot', 'soft', 'spark', 'star', 'ring', 'streak', 'heart', 'confetti', 'square']).optional()
+    .describe('Built-in particle: dot (hard), soft (blurred dust mote), spark (4-point glint), star, ring, streak (a line along its motion), heart, confetti (tumbling paper), square'),
+  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).optional().describe('Or an uploaded picture or sprite sheet as the particle'),
+  count: z.number().int().min(1).max(256).default(1).describe('Frames in the sheet, for an animated particle'),
+  columns: z.number().int().min(1).max(64).optional(), fps: z.number().int().min(1).max(30).default(12),
+  at: Place().optional().describe('Where they come from'), offset: Offset().optional(), path: Path(), follow: Follow(), depth: Depth(),
+  area: z.object({ width: Unit(), height: Unit() }).strict().optional().describe('Spawn box around the emitter, in fractions of the frame (default a single point)'),
+  rate: z.number().min(0).max(300).default(20).describe('New particles per second'),
+  burst: z.number().int().min(0).max(400).default(0).describe('Particles all at once at the start (an impact, a pop)'),
+  life: z.number().int().min(2).max(600).default(45).describe('Frames each particle lives'),
+  speed: z.number().min(0).max(3).default(0.15).describe('Frame widths per second'),
+  direction: z.number().min(-180).max(180).default(-90).describe('Degrees: 0 right, -90 up, 90 down, 180 left'),
+  spread: z.number().min(0).max(360).default(60).describe('Degrees either side of direction, in total; 360 in every direction'),
+  gravity: z.number().min(-3).max(3).default(0).describe('Frame widths per second², positive pulls down (confetti 0.4, rising embers -0.1)'),
+  drag: z.number().min(0).max(10).default(0).describe('Slows them down over time (a burst that settles: 3)'),
+  size: z.number().min(0.001).max(0.5).default(0.015).describe('Width of a particle as a fraction of the frame width'),
+  sizeRandom: Unit().default(0.5).describe('How much sizes vary (0 all the same)'),
+  grow: z.number().min(0).max(8).default(1).describe('Size at the end of its life relative to the start (0.2 shrinks away, 3 billows)'),
+  spin: z.number().min(0).max(1440).default(0).describe('Most degrees per second a particle turns'),
+  colors: z.array(Color()).min(1).max(8).optional().describe('Colours picked at random per particle, for shapes (default paper)'),
+  fade: z.enum(['in-out', 'out', 'none']).default('in-out'),
+  opacity: Unit().default(1), blend: Blend(), glow: Glow(),
+  seed: z.number().int().min(0).max(100000).default(1).describe('Change it for a different random pattern'),
 }).strict();
 
 // Graphics: shapes ChatGPT draws and animates itself, as data. Each element is a path, circle, ellipse,
@@ -246,7 +314,7 @@ const Zoom = z.object({
 const Shake = z.object({ type: z.literal('shake'), ...Span(), strength: Unit().default(0.4) }).strict();
 const Flash = z.object({ type: z.literal('flash'), ...Span(), color: Color().default('white') }).strict();
 
-export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Graphic, Model, Blur, Fog, Parallax, Zoom, Shake, Flash]);
+export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Particles, Graphic, Model, Blur, Fog, Parallax, Zoom, Shake, Flash]);
 
 const Play = z.object({
   from: Frame().describe('First SOURCE frame'), to: Frame().describe('SOURCE frame to stop before'),
@@ -404,7 +472,7 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
       if (layer.path[0].frame > layer.from || layer.path.at(-1).frame < layer.to - 1) warnings.push(`${where}: the path does not cover the whole layer, so it waits at its first or last point`);
       if (layer.at != null) warnings.push(`${where}: has both a path and 'at'; the path is used`);
     }
-    if ((layer.type === 'image' && layer.place === 'screen' || ['sequence', 'sticker', 'graphic', 'model'].includes(layer.type)) && layer.at == null && !layer.path) layer.at = { x: 0.5, y: 0.5 };
+    if ((layer.type === 'image' && layer.place === 'screen' || ['sequence', 'sticker', 'graphic', 'model', 'particles'].includes(layer.type)) && layer.at == null && !layer.path) layer.at = { x: 0.5, y: 0.5 };
     if (layer.type === 'model') {
       const model = models[layer.asset];
       if (!model) { errors.push(`${where}: no 3D model called '${layer.asset}' has been uploaded for this footage (create_upload_link kind model)`); continue; }
@@ -432,10 +500,22 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
       if (!layer.elements) { errors.push(`${where}: needs elements, or use with a saved graphic's name`); continue; }
       errors.push(...graphicErrors(layer, where));
     }
+    if (layer.type === 'particles') {
+      if (layer.shape && layer.asset) { errors.push(`${where}: give either shape or asset, not both`); continue; }
+      if (!layer.shape && !layer.asset) layer.shape = 'dot';
+      if (layer.asset && !assets[layer.asset]) { errors.push(`${where}: no picture called '${layer.asset}' has been uploaded for this footage`); continue; }
+      const alive = layer.burst + (layer.rate * layer.life) / FPS;
+      if (alive > 600) errors.push(`${where}: up to ${Math.round(alive)} particles would be on screen at once; keep it under 600 (lower rate, life or burst)`);
+      if (!layer.rate && !layer.burst) warnings.push(`${where}: rate and burst are both 0, so nothing is emitted`);
+    }
+    if (layer.type === 'text' && layer.count && !layer.text.includes('{n}') && !/^[\d.,\s-]+$/.test(layer.text)) warnings.push(`${where}: count is set but the text has no {n}, so the number replaces the whole text`);
     if (layer.type === 'sequence') {
       const sheet = assets[layer.asset];
       if (!sheet) { errors.push(`${where}: no sprite sheet called '${layer.asset}' has been uploaded for this footage`); continue; }
-      if (sheet.width % layer.count) warnings.push(`${where}: '${layer.asset}' is ${sheet.width} px wide, which does not split evenly into ${layer.count} frames; check the count`);
+      const columns = layer.columns ?? layer.count, rows = Math.ceil(layer.count / columns);
+      if (sheet.width % columns) warnings.push(layer.columns ? `${where}: '${layer.asset}' is ${sheet.width} px wide, which does not split evenly into ${columns} columns; check count and columns` : `${where}: '${layer.asset}' is ${sheet.width} px wide, which does not split evenly into ${layer.count} frames; check the count`);
+      if (sheet.height % rows) warnings.push(`${where}: '${layer.asset}' is ${sheet.height} px tall, which does not split evenly into ${rows} rows; check count and columns`);
+      if (layer.range && (layer.range.to < layer.range.from || layer.range.to >= layer.count)) errors.push(`${where}: range must run from..to within the sheet's ${layer.count} frames (0–${layer.count - 1})`);
     }
     if (layer.type === 'image') {
       const asset = assets[layer.asset];
@@ -579,6 +659,32 @@ steam and a callout, then carries on. Layer times are OUTPUT frames: the freeze 
   The last key lands exactly on the "rim" anchor. "facing":"path" turns it to face the way it flies (draw it facing right).
 - A bird that lands: a flapping sequence along a path ending on the rim, then an image of it perched at "rim"
   starting on the landing frame (sequence exit "none", out 0; perched image enter "none" or "pop").
+
+## Sprites, particles and light effects
+- A sprite sheet can be one row or a grid: "columns" says how many frames per row. build_sprite makes a grid
+  sheet from single frames you uploaded (one picture per frame), so you can draw or render frames one by one.
+- "range" plays only some frames of a sheet ({"from":4,"to":11}); "playback" is loop, once or pingpong.
+  "rotate" and "spin" (degrees per second) turn it; "tint" recolours it; "glow" adds a soft light around it.
+- "blend": "screen" or "add" makes a sprite act as light (glints, flares, light wipes, dust in a beam) so its
+  dark background disappears; "multiply" for shadows and ink. Images and text take blend too.
+- A particles layer emits many copies of a built-in shape (dot, soft, spark, star, ring, streak, heart,
+  confetti, square) or of an uploaded picture/sprite, from "at" (or a moving path), over an "area":
+  {"type":"particles","from":150,"to":210,"at":"rim","shape":"soft","rate":25,"life":60,"speed":0.04,
+   "direction":-90,"spread":50,"size":0.01,"grow":1.6,"colors":["paper","gold"],"blend":"screen","glow":6}
+  An impact: "burst": 60, "rate": 0, "drag": 3, "speed": 0.6, "spread": 360, shape "spark". Confetti: shape confetti,
+  "gravity": 0.4, many colours. Rising embers: "gravity": -0.1, colours gold and coral, blend add.
+  Keep on-screen particles under 600 (burst + rate × life / 30).
+
+## Text animation
+- "font": serif (brand), script, sans (heavy Inter), display (tall Bebas Neue capitals, for cinema titles), mono.
+- "reveal" animates text in piece by piece: {"by":"letter"|"word"|"line","style":"rise"|"drop"|"pop"|"blur"|"fade"|
+  "slide"|"flip"|"scramble"|"typewriter","stagger":2,"duration":10}. "hide" does the same on the way out.
+  A cinema title: {"font":"display","tracking":0.25,"size":150,"reveal":{"by":"letter","style":"blur","stagger":2,"duration":14}}.
+- "loop" keeps it moving: wave, bounce, pulse, shake (impact), flicker (neon), glow (with "glow" colour).
+- "highlight": {"words":["best"],"color":"lime","style":"marker"|"underline"|"box","delay":10} sweeps a marker under words.
+- "count": {"from":0,"to":1200,"frames":40} counts up, with {n} in the text where the number goes ("{n} cups a day").
+- "stroke" {"color","width"} outlines letters, "glow" lights them, "gradient" [top, bottom] colours them,
+  "rotate" tilts the block, "path" moves it like any other layer.
 
 ## Graphics: draw and animate your own shapes
 A graphic is shapes in its own coordinates (viewBox, default 100×100) with keyframed properties. Keys count

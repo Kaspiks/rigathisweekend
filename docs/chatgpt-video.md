@@ -45,11 +45,12 @@ What ChatGPT can do in an edit:
 |---|---|
 | `timeline` | Cut the clip: play ranges, freeze a frame (`hold`), slow motion or speed-up |
 | `anchors` | Named points on things in the footage, keyframed over time, so overlays follow them |
-| `text` | Title, caption, callout card with a pointer line, tag, handwritten accent, full-width band |
+| `text` | Title, caption, callout card with a pointer line, tag, handwritten accent, full-width band. Five typefaces; letter/word/line reveals and exits (rise, drop, pop, blur, slide, flip, scramble, typewriter); wave, bounce, pulse, shake, flicker and glow loops; marker highlights, counting numbers, outline, glow and gradient letters; can move along a path |
 | `sticker` | Steam, sparkles, hearts, stars, circle, arrow, underline, squiggle, burst, pulse, all animated |
 | `illustrate` | Redraw the footage as a drawing (cel, ink, sketch, watercolor, duotone, posterize), with a fade, wipe or iris in and out, and a hand-drawn "boil" |
 | `image` | A picture you uploaded, either on screen or lined up exactly over the footage |
-| `sequence` | Frame-by-frame animation from an uploaded sprite sheet (all frames in one row): flapping wings, a turntable of a 3D object, a hand-drawn flicker |
+| `sequence` | Frame-by-frame animation from an uploaded sprite sheet (one row or a grid): flapping wings, a turntable, a hand-drawn flicker, light effects. Plays a range of frames, loops, once or back and forth, spins, and can be tinted, glow, or blend as light (screen/add) |
+| `particles` | Many small shapes or sprites emitted over time or in a burst: dust in a sunbeam, sparks on an impact, confetti, embers, bubbles. Seeded, so every render is the same |
 | `path` (on images, sequences, graphics, models and stickers) | Flies it through the frame along smoothed keyframes, even during a freeze; the last key can land exactly on an anchor, and `facing: "path"` turns it the way it flies |
 | `graphic` | Shapes ChatGPT draws and animates itself (keyframed position, rotation around a pivot, scale, opacity, draw-on, repeats for particles); `save_graphic` keeps one by name for reuse |
 | `model` | A 3D model (.glb) placed in the shot and played through its own animations (walk, idle, sit…), switching between them at set frames; it can walk along a path facing the way it goes, is lit from the side you choose, casts a soft shadow, and can be drawn as a toon with an ink outline |
@@ -99,6 +100,8 @@ The drawing styles are filters: they need no image generation and cost nothing e
 | `get_depth` | no | Depth values (0 far – 1 near) at points, plus the depth picture |
 | `create_upload_link` | makes a link | One-time link for ChatGPT to upload a picture, a 3D model (.glb), a sound, or the clip's per-frame depth video, from its sandbox |
 | `add_picture` | stores a picture | A file from the conversation, or a public HTTPS link |
+| `build_sprite` | stores a picture | Lays out single uploaded frames as one grid sprite sheet |
+| `save_guide_note` / `delete_guide_note` | changes the guide | House rules ChatGPT keeps for itself; they appear at the end of `get_edit_guide` in every later chat |
 | `add_sound` | stores a sound | An audio file from the conversation, or a public HTTPS link to one |
 | `add_model` | stores a 3D model | A .glb from the conversation, or a public HTTPS link; for a sandbox that cannot reach the upload link |
 

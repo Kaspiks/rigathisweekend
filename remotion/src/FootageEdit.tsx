@@ -6,12 +6,16 @@ import '@fontsource/cormorant-garamond/500.css';
 import '@fontsource/cormorant-garamond/600.css';
 import '@fontsource/cormorant-garamond/700.css';
 import '@fontsource/great-vibes/400.css';
+import '@fontsource/inter/800.css';
+import '@fontsource/bebas-neue/400.css';
+import '@fontsource/jetbrains-mono/700.css';
 import type { CSSProperties } from 'react';
 import { AbsoluteFill, Audio, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
 import { BoilFilter, IllustrationFilter, SoftenFilter } from './edit/filters';
-import type { BlurLayer, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
-import { PALETTE, baseScale, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, travel, walked } from './edit/model';
+import type { Asset, BlurLayer, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
+import { PALETTE, baseScale, blendMode, glowFilter, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, travel, walked } from './edit/model';
 import { ModelView } from './edit/Model3D';
+import { ParticlesView } from './edit/Particles';
 import { depthNear, useLocalImage } from './edit/depth';
 import { GraphicView } from './edit/Graphics';
 import { Sticker } from './edit/Stickers';
@@ -22,6 +26,9 @@ Promise.all([
   document.fonts.load('700 60px "Cormorant Garamond"'),
   document.fonts.load('600 60px "Cormorant Garamond"'),
   document.fonts.load('60px "Great Vibes"'),
+  document.fonts.load('800 60px "Inter"'),
+  document.fonts.load('60px "Bebas Neue"'),
+  document.fonts.load('700 60px "JetBrains Mono"'),
 ]).then(() => continueRender(fonts));
 
 type Rect = { left: number; top: number; width: number; height: number };
@@ -70,29 +77,52 @@ const Picture = ({ layer, props, rect, x, y, frame, boilId, turn }: { layer: Ima
       : layer.motion === 'pulse' ? `scale(${(1 + Math.sin(t / 8) * 0.04).toFixed(4)})`
         : layer.motion === 'spin' ? `rotate(${(t * 6) % 360}deg)` : '';
   const wipe = layer.enter === 'wipe' ? { clipPath: `inset(0 ${((1 - Easing.inOut(Easing.cubic)(p.enter)) * 100).toFixed(2)}% 0 0)` } : {};
-  const common: CSSProperties = { position: 'absolute', opacity: m.opacity * layer.opacity, filter: layer.motion === 'boil' ? `url(#${boilId})` : undefined, ...wipe };
+  const tint = layer.tint ? colour(layer.tint, PALETTE.paper) : null;
+  const filter = [layer.motion === 'boil' ? `url(#${boilId})` : null, glowFilter(layer.glow, tint ?? undefined)].filter(Boolean).join(' ') || undefined;
+  const common: CSSProperties = { position: 'absolute', opacity: m.opacity * layer.opacity, filter, mixBlendMode: blendMode(layer.blend), ...wipe };
+  const draw = (style: CSSProperties) => tint ? <Tinted src={asset.src} colour={tint} style={style} /> : <Img src={asset.src} style={style} />;
   if (layer.place === 'footage')
-    return <Img src={asset.src} style={{ ...common, left: rect.left, top: rect.top, width: rect.width, height: rect.height, objectFit: 'cover', transform: `scale(${m.scale}) ${motion}` }} />;
+    return draw({ ...common, left: rect.left, top: rect.top, width: rect.width, height: rect.height, objectFit: 'cover', transform: `scale(${m.scale}) ${motion}` });
   const width = layer.size * props.plan.width, height = (width * asset.height) / asset.width;
-  return <Img src={asset.src} style={{ ...common, left: x - width / 2, top: y - height / 2, width, height, transform: `translate(${m.dx}px, ${m.dy}px) scale(${m.scale}) ${motion} ${turned(turn)}` }} />;
+  return draw({ ...common, left: x - width / 2, top: y - height / 2, width, height, transform: `translate(${m.dx}px, ${m.dy}px) scale(${m.scale}) ${motion} ${turned(turn)}` });
 };
 
-// Frame-by-frame animation from a sprite sheet: the sheet slides behind a one-frame window.
+// A picture recoloured in one colour, keeping its shape: the colour is painted through the picture as a
+// mask. The hidden copy makes Remotion wait until the picture has loaded.
+const Tinted = ({ src, colour: c, style, inner }: { src: string; colour: string; style: CSSProperties; inner?: CSSProperties }) => (
+  <div style={{ ...style, overflow: inner ? 'hidden' : style.overflow }}>
+    <Img src={src} style={{ display: 'none' }} />
+    <div style={{ position: 'absolute', inset: 0, ...inner, backgroundColor: c, WebkitMaskImage: `url("${src}")`, maskImage: `url("${src}")`, WebkitMaskSize: '100% 100%', maskSize: '100% 100%' }} />
+  </div>
+);
+
+// Which frame of a sheet shows at a point in the layer: a range of it, looped, played once, or back and forth.
+export function sheetFrame(layer: SequenceLayer, local: number, fps: number) {
+  const first = layer.range?.from ?? 0, last = layer.range?.to ?? layer.count - 1, n = Math.max(1, last - first + 1);
+  const step = Math.floor((local * layer.fps) / fps);
+  const mode = layer.playback ?? (layer.loop ? 'loop' : 'once');
+  if (mode === 'once') return first + Math.min(step, n - 1);
+  if (mode === 'pingpong' && n > 1) { const s = step % (2 * n - 2); return first + (s < n ? s : 2 * n - 2 - s); }
+  return first + (step % n);
+}
+
+// Frame-by-frame animation from a sprite sheet, in one row or a grid: the sheet slides behind a window.
 const Sprite = ({ layer, props, x, y, frame, turn }: { layer: SequenceLayer; props: FootageEditProps; x: number; y: number; frame: number; turn: Turn }) => {
-  const sheet = props.assets[layer.asset];
+  const sheet: Asset | undefined = props.assets[layer.asset];
   const p = phase(layer, frame);
   if (!sheet || !p.on) return null;
   const m = motionStyle(layer.enter, layer.exit, p.enter, p.exit);
-  const step = Math.floor((p.local * layer.fps) / props.plan.fps);
-  const index = layer.loop ? step % layer.count : Math.min(step, layer.count - 1);
-  const width = layer.size * props.plan.width, height = (width * sheet.height * layer.count) / sheet.width;
+  const index = sheetFrame(layer, p.local, props.plan.fps);
+  const cols = layer.columns ?? layer.count, rows = Math.ceil(layer.count / cols), col = index % cols, row = Math.floor(index / cols);
+  const width = layer.size * props.plan.width, height = (width * (sheet.height / rows)) / (sheet.width / cols);
   const motion = layer.motion === 'bob' ? `translateY(${(Math.sin(p.local / 9) * 10).toFixed(2)}px)` : layer.motion === 'sway' ? `rotate(${(Math.sin(p.local / 16) * 4).toFixed(2)}deg)` : '';
-  return (
-    <div style={{ position: 'absolute', left: x - width / 2, top: y - height / 2, width, height, overflow: 'hidden', opacity: m.opacity * layer.opacity,
-      transform: `translate(${m.dx}px, ${m.dy}px) scale(${m.scale}) ${motion} ${turned(turn)}` }}>
-      <Img src={sheet.src} style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${layer.count * 100}%`, maxWidth: 'none', transform: `translateX(${(-100 * index) / layer.count}%)` }} />
-    </div>
-  );
+  const angle = (layer.rotate ?? 0) + ((layer.spin ?? 0) * p.local) / props.plan.fps;
+  const tint = layer.tint ? colour(layer.tint, PALETTE.paper) : null;
+  const outer: CSSProperties = { position: 'absolute', left: x - width / 2, top: y - height / 2, width, height, overflow: 'hidden', opacity: m.opacity * layer.opacity,
+    transform: `translate(${m.dx}px, ${m.dy}px) scale(${m.scale}) ${motion} rotate(${angle.toFixed(2)}deg) ${turned(turn)}`, mixBlendMode: blendMode(layer.blend), filter: glowFilter(layer.glow, tint ?? undefined) };
+  const inner: CSSProperties = { position: 'absolute', left: 0, top: 0, width: `${cols * 100}%`, height: `${rows * 100}%`, maxWidth: 'none',
+    transform: `translate(${(-100 * col) / cols}%, ${(-100 * row) / rows}%)` };
+  return tint ? <Tinted src={sheet.src} colour={tint} style={outer} inner={inner} /> : <div style={outer}><Img src={sheet.src} style={inner} /></div>;
 };
 
 export const FootageEdit = (props: FootageEditProps) => {
@@ -248,6 +278,10 @@ export const FootageEdit = (props: FootageEditProps) => {
             return <ModelView key={i} layer={l} src={props.models?.[l.asset]?.src ?? null} pose={pose}
               width={plan.width} height={plan.height}
               filter={[l.boil ? 'url(#boil-img)' : null, l.soften > 0 ? `url(#soften-${i})` : null].filter(Boolean).join(' ') || undefined} />;
+          }
+          case 'particles': {
+            const emitter = (f: number) => layerPoint(props, cam, base, f, l as never, { x: 0.5, y: 0.5 });
+            return <ParticlesView key={i} uid={`pt${i}`} layer={l} frame={frame} emitter={emitter} width={plan.width} height={plan.height} sheet={l.asset ? props.assets[l.asset] : undefined} />;
           }
           case 'flash': {
             // Full strength two frames in, gone by the end of the layer.

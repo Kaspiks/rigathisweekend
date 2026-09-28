@@ -21,6 +21,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS footage(id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, error TEXT, progress REAL, info TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS footage_edits(footage TEXT NOT NULL, version INTEGER NOT NULL, spec TEXT NOT NULL, note TEXT, created TEXT NOT NULL, PRIMARY KEY(footage,version));
       CREATE TABLE IF NOT EXISTS graphics(name TEXT PRIMARY KEY, def TEXT NOT NULL, note TEXT, updated TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS guide_notes(title TEXT PRIMARY KEY, text TEXT NOT NULL, updated TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS upload_links(token TEXT PRIMARY KEY, footage TEXT NOT NULL, name TEXT NOT NULL, expires TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open');
       CREATE TABLE IF NOT EXISTS footage_renders(id INTEGER PRIMARY KEY, footage TEXT NOT NULL, version INTEGER NOT NULL, kind TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', error TEXT, result TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);`);
     // Instagram posts are per day, so the approval rule moved from one edition per weekend
@@ -253,6 +254,10 @@ export class Store {
   graphics() {return Object.fromEntries(this.db.prepare('SELECT name,def FROM graphics').all().map(r=>[r.name,JSON.parse(r.def)]));}
   graphicList() {return this.db.prepare('SELECT name,note,updated,def FROM graphics ORDER BY name').all().map(r=>({name:r.name,note:r.note,updated:r.updated,definition:JSON.parse(r.def)}));}
   deleteGraphic(name) {return this.db.prepare('DELETE FROM graphics WHERE name=?').run(name).changes>0;}
+  // House rules ChatGPT keeps for itself, shown at the end of the edit guide in every later chat.
+  saveGuideNote(title,text) {this.db.prepare('INSERT INTO guide_notes(title,text,updated) VALUES(?,?,?) ON CONFLICT(title) DO UPDATE SET text=excluded.text,updated=excluded.updated').run(title,text,new Date().toISOString());}
+  guideNotes() {return this.db.prepare('SELECT title,text,updated FROM guide_notes ORDER BY rowid').all().map(r=>({...r}));}
+  deleteGuideNote(title) {return this.db.prepare('DELETE FROM guide_notes WHERE title=?').run(title).changes>0;}
   // One-time upload links, so ChatGPT can send a file it made straight from its sandbox. Only a hash of
   // the token is kept; a link works once, for one named picture of one clip, until it expires.
   addUploadLink(hash,footage,name,expires,kind='picture') {
