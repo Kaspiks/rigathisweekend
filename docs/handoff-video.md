@@ -27,46 +27,62 @@ schema and `GUIDE`, the text ChatGPT reads through `get_edit_guide`.
 - Render service: `remotion/server.mjs` (POST /clip), composition `remotion/src/FootageEdit.tsx`.
 - Tests: `npm test` (73 pass at the last full run). Scratch helpers were kept out of the repo.
 
-## In progress: camera tracking (not finished, not wired into edits yet)
+## Camera tracking (works end to end; not yet proved in a render)
 Goal: a 3D element stays put in the room when the camera looks away and comes back. Priority order the
 owner asked for: (1) an AR track recorded while filming (ARKit/ARCore app export) is used when present;
 (2) otherwise the server solves the camera with COLMAP; (3) if that fails, fall back to the 2D anchors.
+All three are in place, in that order: `storeTrack` refuses to let a solve overwrite an uploaded track,
+`make_track` solves one, and a clip with no track keeps working exactly as before on anchors.
 
-Done so far:
-- `src/tracking.js`: `normalizeTrack(json, work, source)` turns an uploaded or solved track into one pose
-  per working-copy frame (OpenGL convention: camera looks −Z, +Y up; quaternions [x,y,z,w]); accepts
-  `convention` opengl|opencv, `space` camera-to-world|world-to-camera, `fps` or per-sample `t`/`frame`,
-  `fovY` or `intrinsics`, `roll` (portrait ARKit video may need 90 or -90), `up`, `points`.
-  `estimateUp` (RANSAC floor plane, else camera average), `poseAt`, `project` (world point → 0–1 of the
-  footage), `locate` (triangulate a spot marked on ≥2 frames; one sighting uses the solve's scene points),
-  `solveTrack` (runs the worker, rejects if <60% of sampled frames register), `saveTrack`/`loadTrack`
-  (`footage/<id>/track.json`), `trackOverlay` (draws a ground grid and world points on a frame, for checking).
-- `src/track-worker.py`: pycolmap 4.2 (CPU): samples ≤~120 frames, SIFT, exhaustive matching (so coming
-  back to a place joins up), incremental mapping; prints JSON lines `{stage}` and `{result}`.
-  Trial on the espresso clip: 40/40 frames registered, ~8000 points, 0.47 px error, ~70 s on 4 cores.
-- `src/animate.js`: imports tracking; `clipInfo` now carries `track`; `storeTrack()`; upload links accept
-  `kind: "track"` (JSON body) — but `create_upload_link` does not offer `track` yet.
+Proved on the espresso clip (`ec5ddb0d08915e54d2ee2224`, IMG_9861.mov, 1080x1920, 253 frames), through
+the real MCP tools on the server, not in a harness:
+- `make_track` -> background job -> 85/85 sampled frames registered, 0.76 px reprojection error, coverage
+  1.0, fovY 60.16 deg, about 3 minutes on the 4-core VPS. `list_footage` shows `track` and clears `trackJob`.
+- `get_track` with two sightings triangulated the crema at 11.2 deg baseline, 0.0199 reprojection error,
+  and drew a ground grid that sticks to the table right through the orbit.
+
+Done since the last handoff:
+- `src/tracking.js`: `sceneCentre` (a default middle for the checking grid). Fixed `trackOverlay`, which
+  never worked: sharp resizes before it composites whatever order the calls are in, so the frame was
+  shrunk and then the full-size overlay refused as too big. Two passes now.
+- `src/animate.js`: `queueTrack` background job with restart recovery (`info.trackJob`, stages from the
+  worker), `make_track`, `get_track` (status, quality, sightings, overlay sheet), `track`/`trackJob` in
+  every clip summary, `track` in `create_upload_link`'s kinds, and `resolveWorld` turning each spot's
+  sightings into a 3D position before an edit is saved (a spot a layer stands on that cannot be placed
+  is an error at save time, not a surprise mid-render).
+- `src/edits.js`: top-level `world: [{name, sightings}]`; model layers take `world` and `worldPath`; a
+  flat layer's `at` may name a spot too. planEdit refuses world without a track, refuses world together
+  with at/path/follow, keeps world names out of the anchor namespace, and warns about unused spots.
+  New GUIDE section "Putting something in the room, not on the screen".
+- Render props carry `track` (poses, fovY, aspect, up, scale - not the points) and the resolved `world`
+  positions, only when a layer actually uses them.
+- `remotion/src/edit/model.ts`: `cameraPoseAt`, `projectWorld`, `worldAt`, and `screenPlace` resolving a
+  world spot for flat layers (put far off screen when it is behind the camera).
+- `remotion/src/edit/Model3D.tsx`: world mode. The camera takes the tracked pose and `setViewOffset` maps
+  the footage rect onto the canvas; the model stands on the track's up, faces where the camera was on its
+  first frame, and `size` fixes its real size from that frame so perspective takes over afterwards. The
+  existing screen-space path is untouched.
+- `Dockerfile`: python3 + pycolmap 4.2.0 in `/opt/pycolmap`, `TRACK_PYTHON`. Adds ~360 MB. Verified in the
+  running container. Without it the app still runs; `make_track` just says tracks cannot be solved here.
+- `test/tracking.test.js`: 9 tests on a synthetic orbit - coverage, projection, behind-the-camera,
+  triangulation against a known point, refusing a too-narrow baseline, single-sighting placement, and an
+  OpenCV world-to-camera round trip. No COLMAP needed. `npm test`: 68 pass.
 
 Still to do:
-1. `animate.js`: add `track` to `create_upload_link`'s kind enum; `make_track` tool + background job like
-   `queueDepth` (state in `info.trackJob`, restart recovery, `TRACK_MAX_SECONDS` default 60,
-   `TRACK_PYTHON`); `get_track` tool (status, quality, overlay sheet via `trackOverlay`, optional
-   sightings to test); summary fields `track`/`trackJob`; dashboard upload/solve/delete routes and UI.
-2. Edit schema (`src/edits.js`): top-level `world: [{name, sightings: [{frame, x, y}]}]` (SOURCE frames,
-   0–1 footage coords; names share the anchor namespace); model layer `world: "<name>"` and
-   `worldPath: [{frame, world}]`; planEdit errors when world is used without a track. Resolve positions in
-   animate.js with `locate()` (warn if error > ~0.02) and report them from save_edit/get_edit.
-3. Render props: pass `track` (poses, fovY, aspect, up, scale — not points) and resolved `world` positions
-   through `runRender` → `remotion/server.mjs` → composition.
-4. Renderer: in `Model3D.tsx`, a world mode: camera from `poseAt` at the fractional source frame
-   (`sourceAt`), `setViewOffset` to map the footage rect (zoom/crop) onto the canvas, model at the world
-   point oriented to `up`, facing the camera at the layer's first frame, size from `size` at that frame,
-   shadow floor perpendicular to `up`, lights relative to that basis; `worldPath` in 3D with stride by
-   world distance. In `model.ts`, let `at: "<world point>"` project for 2D layers (hidden when behind the
-   camera).
-5. Dockerfile: install python3 + pycolmap (e.g. a venv with `pycolmap==4.2.0`), `PYTHONDONTWRITEBYTECODE=1`.
-6. Tests (synthetic AR track JSON: normalize, locate, project; skip the COLMAP test if pycolmap is missing),
-   GUIDE section, `docs/chatgpt-video.md`.
+1. **Render a world-placed model and look at it.** Everything above is checked except the last step: no
+   edit with `world` has been rendered yet, so `setViewOffset`, the up/facing basis and the size rule are
+   unproven in a picture. Do this first - put a model on the espresso clip's cup and render frames either
+   side of the camera moving. Expect the sign of `up` to need checking: a COLMAP solve has no gravity, so
+   `estimateUp` guesses from the biggest flat surface, and on this clip it returned a vector whose meaning
+   is only clear from the overlay.
+2. Dashboard: upload/solve/delete routes and UI for tracks (the MCP side is done, the dashboard is not).
+3. `worldPath` stride: walking between spots should pace the animation by distance in the room, as
+   `stride` does on screen. Not wired.
+4. `docs/chatgpt-video.md`: describe tracks for the owner.
+5. Scale: a solved track has no real-world size, so `size` is relative to the frame it starts on. If the
+   owner wants real metres, that needs a calibration step (mark two points a known distance apart).
+6. Anchors and path keys are still clamped to 0-1, so a 2D anchor cannot be followed off screen and back.
+   That only limits the last-resort path; world spots do not care.
 
 ## Other notes
 - `remotion/src/PinboardStory.tsx` (owner's) imports `./autumnOpener`, which is not in the repo. Nothing
