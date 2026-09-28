@@ -19,7 +19,7 @@ import { fetchPublic } from './photos.js';
 import { MAX_MODEL, deleteModel, modelList, saveModel } from './models.js';
 import { depthEstimateSeconds, depthLimits, depthModel, makeDepth } from './depth.js';
 import { MAX_SOUND, deleteSound, loudness, processedSound, saveSound, soundList } from './sounds.js';
-import { loadTrack, locate, normalizeTrack, project, saveTrack, solveTrack, trackLimits, trackOverlay } from './tracking.js';
+import { loadTrack, locate, normalizeTrack, project, saveTrack, sceneCentre, solveTrack, trackLimits, trackOverlay } from './tracking.js';
 import http from 'node:http';
 
 const fail = (message, httpStatus = 400) => Object.assign(new Error(message), { httpStatus });
@@ -180,6 +180,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   // while it is waiting or running, or failed with the reason; finished depth replaces info.depth.
   const setInfo = (id, patch) => store.updateFootage(id, { info: { ...store.footage(id).info, ...patch } });
   for (const f of store.footageList()) if (['queued', 'running'].includes(f.info?.depthJob?.status)) setInfo(f.id, { depthJob: { status: 'failed', error: 'Interrupted by a restart; ask again' } });
+  for (const f of store.footageList()) if (['queued', 'running'].includes(f.info?.trackJob?.status)) setInfo(f.id, { trackJob: { status: 'failed', error: 'Interrupted by a restart; ask again' } });
   let depthWork = Promise.resolve();
   function queueDepth(f) {
     const job = f.info.depthJob;
@@ -207,6 +208,36 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }));
     return store.footage(f.id).info.depthJob;
   }
+  // Solving the camera with COLMAP, in the background like depth. An AR track recorded while filming is
+  // better than anything solved afterwards, so one that has been uploaded is never overwritten by a solve.
+  let trackWork = Promise.resolve();
+  function queueTrack(f) {
+    const job = f.info.trackJob;
+    if (['queued', 'running'].includes(job?.status)) return job;
+    if (f.info.track?.source === 'upload') throw fail('This clip already has a camera track recorded while filming, which is better than a solve. Delete it first if you want the server to solve one instead');
+    const max = trackLimits(env);
+    if (f.info.work.duration > max.seconds) throw fail(`Camera tracks are solved on the server for clips up to ${max.seconds} s (TRACK_MAX_SECONDS); this one is ${Math.round(f.info.work.duration)} s`);
+    setInfo(f.id, { trackJob: { status: 'queued', stage: 'waiting', requested: new Date().toISOString() } });
+    tracked(trackWork = trackWork.then(async () => {
+      const id = f.id;
+      try {
+        setInfo(id, { trackJob: { status: 'running', stage: 'starting', started: new Date().toISOString() } });
+        const files = footageFiles(store.dir, id);
+        const track = await solveTrack(files.work, store.footage(id).info.work, files.dir, {
+          python: max.python,
+          onProgress: stage => { try { setInfo(id, { trackJob: { ...store.footage(id).info.trackJob, stage } }); } catch {} },
+        });
+        const saved = await saveTrack(files.dir, track);
+        const { trackJob, ...info } = store.footage(id).info;
+        store.updateFootage(id, { info: { ...info, track: saved } });
+      } catch (err) {
+        try { setInfo(id, { trackJob: { status: 'failed', error: err.message } }); } catch {}
+      }
+    }));
+    return store.footage(f.id).info.trackJob;
+  }
+  const trackState = f => f.info?.trackJob ?? null;
+
   const depthState = f => f.info?.depthJob ? { ...f.info.depthJob, ...(f.info.depthJob.status !== 'failed' ? { estimateSeconds: depthEstimateSeconds(f.info.work.frames) } : {}) } : null;
 
   // Renders run one at a time, in the order asked for. The render service also makes story videos, so
@@ -299,6 +330,8 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       source: f.info?.source ?? null,
       depth: f.info?.depth ? { frames: f.info.depth.frames, updated: f.info.depth.updated, source: f.info.depth.source || 'upload' } : null,
       depthJob: depthState(f),
+      track: f.info?.track ?? null,
+      trackJob: trackState(f),
       assets: await assetList(store.dir, f.id),
       models: await modelList(footageFiles(store.dir, f.id).models),
       sounds: await soundList(footageFiles(store.dir, f.id).sounds),
@@ -607,15 +640,19 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async () => text(store.graphicList()));
 
     server.registerTool('create_upload_link', {
-      description: 'A one-time 30-minute link for sending a sandbox file to a clip. kind: picture (PNG/JPEG/WebP, default), model (.glb, textures embedded, no Draco), sound (MP3/WAV/OGG/FLAC/M4A, up to 3 min), depth (greyscale MP4, near = white, one frame per clip frame). PUT or POST the raw file as the body: curl --fail -T file \"<url>\".',
-      inputSchema: { footage: Id, kind: z.enum(['picture', 'model', 'sound', 'depth']).default('picture'), name: AssetName.optional().describe('Required for a picture, model or sound') }, annotations: write,
+      description: 'A one-time 30-minute link for sending a sandbox file to a clip. kind: picture (PNG/JPEG/WebP, default), model (.glb, textures embedded, no Draco), sound (MP3/WAV/OGG/FLAC/M4A, up to 3 min), depth (greyscale MP4, near = white, one frame per clip frame), track (camera track JSON recorded while filming by an AR app). PUT or POST the raw file as the body: curl --fail -T file \"<url>\".',
+      inputSchema: { footage: Id, kind: z.enum(['picture', 'model', 'sound', 'depth', 'track']).default('picture'), name: AssetName.optional().describe('Required for a picture, model or sound') }, annotations: write,
     }, async ({ footage, kind, name }) => {
       const f = store.footage(footage);
-      if (kind !== 'depth' && !name) throw fail(`Give the ${kind} a name`);
-      if (kind === 'depth' && f.status !== 'ready') throw fail('The clip is not ready yet', 409);
+      if (!['depth', 'track'].includes(kind) && !name) throw fail(`Give the ${kind} a name`);
+      if (['depth', 'track'].includes(kind) && f.status !== 'ready') throw fail('The clip is not ready yet', 409);
       const token = randomBytes(24).toString('base64url'), expires = new Date(Date.now() + LINK_MINUTES * 60000);
-      store.addUploadLink(tokenHash(token), f.id, kind === 'depth' ? 'depth' : name, expires, kind);
+      store.addUploadLink(tokenHash(token), f.id, ['depth', 'track'].includes(kind) ? kind : name, expires, kind);
       const url = `${origin}/u/${token}`;
+      if (kind === 'track') return text({ url, expires: expires.toISOString(), footage: f.id, kind, maxMB: MAX_TRACK / 1048576, frames: f.info.work.frames, fps: FPS,
+        upload: `curl --fail -sS -H 'content-type: application/json' -T /path/to/track.json "${url}"`,
+        format: '{"frames":[{"t":<seconds>,"matrix":[16 numbers]}...],"intrinsics":{"fx","fy","width","height"}}, or "position"+"quaternion" [x,y,z,w] per frame and "fovY" in degrees. Optional: "convention" opengl|opencv (default opengl, which is ARKit and three.js), "space" camera-to-world|world-to-camera, "roll" 0|90|-90|180 if the video was rotated on export, "up" [x,y,z], "points" for placing a spot seen on one frame only.',
+        then: 'An AR track recorded while filming is used ahead of anything solved here. get_track draws a grid on the ground to check it.' });
       if (kind === 'depth') return text({ url, expires: expires.toISOString(), footage: f.id, kind, maxMB: MAX_DEPTH / 1048576, frames: f.info.work.frames,
         upload: `curl --fail -sS -T /path/to/depth.mp4 "${url}"`, then: 'The server checks it has one frame per clip frame, then edits can use "depth":{"video":true}; get_depth reads values.' });
       if (kind === 'sound') return text({ url, expires: expires.toISOString(), footage: f.id, kind, name, maxMB: MAX_SOUND / 1048576, upload: `curl --fail -sS -T /path/to/${name}.mp3 "${url}"`,
@@ -633,6 +670,42 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const f = ready(footage), job = queueDepth(f);
       return text({ footage: f.id, depthJob: depthState(store.footage(f.id)) ?? job, frames: f.info.work.frames,
         then: 'Check list_footage until depth is there (depthJob disappears), then use get_depth to read values and "depth": {"video": true} in the edit.' });
+    });
+
+    server.registerTool('make_track', {
+      description: 'Solves where the camera was on every frame (COLMAP on the server), so things can be placed in the room and stay put when the camera looks away and back. Background, minutes; list_footage shows trackJob. A track recorded while filming by an AR app is better: send one with create_upload_link kind track instead. Needs a clip where the camera MOVES through the room, not just turns on the spot.',
+      inputSchema: { footage: Id }, annotations: write,
+    }, async ({ footage }) => {
+      const f = ready(footage), job = queueTrack(f);
+      return text({ footage: f.id, trackJob: trackState(store.footage(f.id)) ?? job, frames: f.info.work.frames,
+        then: 'Check list_footage until track is there (trackJob disappears), then get_track to see the ground grid and place points.' });
+    });
+
+    server.registerTool('get_track', {
+      description: 'The clip\'s camera track, with a checking picture: a grid drawn on the ground and any spots you name, on several frames. If the grid sticks to the same surface as the camera moves, the track is good. Give `sightings` (the same spot marked on two or more frames from different angles) to work out where it is in the room and see it drawn.',
+      inputSchema: {
+        footage: Id,
+        frames: z.array(z.number().int().min(0)).min(1).max(6).optional().describe('SOURCE frames to draw (default: four spread over the clip)'),
+        sightings: z.array(z.object({ frame: z.number().int().min(0).describe('SOURCE frame'), x: z.number().min(0).max(1), y: z.number().min(0).max(1) }).strict()).min(1).max(12).optional()
+          .describe('The same spot marked in 0-1 of the footage on two or more frames the camera has moved between'),
+      }, annotations: read,
+    }, async ({ footage, frames, sightings }) => {
+      const f = ready(footage);
+      if (!f.info.track) throw fail(trackState(f) ? `The camera track is not ready: ${JSON.stringify(trackState(f))}` : 'This clip has no camera track: make_track solves one, or send one recorded while filming with create_upload_link kind track');
+      const files = footageFiles(store.dir, f.id);
+      const track = await loadTrack(files.dir);
+      const spot = sightings?.length ? locate(track, sightings) : null;
+      const centre = spot ? spot.position : sceneCentre(track);
+      const list = (frames?.length ? [...new Set(frames)].sort((a, b) => a - b) : spread(0, f.info.work.frames - 1, 4)).map(n => checkFrame(f, n));
+      const points = spot ? [{ name: 'spot', position: spot.position }] : [];
+      const cells = await Promise.all(list.map(async n => ({
+        image: await trackOverlay(await grabFrame(files.work, n), track, n, { centre, points, size: 540 }), label: `f${n} · ${secondsOf(n).toFixed(2)}s`,
+      })));
+      const sheet = await contactSheet(cells, { portrait: f.info.work.height >= f.info.work.width });
+      return picture(sheet, { footage: f.id, track: f.info.track, fovY: track.fovY, up: track.up, scale: track.scale, frames: list,
+        ...(spot ? { spot, seenAt: sightings.map(s => { const p = project(track, s.frame, spot.position); return { frame: s.frame, marked: [s.x, s.y], lands: p && !p.behind ? [+p.x.toFixed(4), +p.y.toFixed(4)] : null }; }) } : {}),
+        note: spot ? (spot.error > 0.02 ? 'The marks do not agree well (error above 0.02); mark the spot more carefully, or on frames the camera has moved further between' : 'The grid lies on the ground through the spot. Check it sticks to the same surface on every frame.')
+          : 'The grid is centred on the middle of the scene. Give sightings to place a spot of your own.' });
     });
 
     server.registerTool('create_download_link', {

@@ -294,6 +294,19 @@ export async function saveTrack(folder, track) {
 }
 export const loadTrack = async folder => JSON.parse(await readFile(join(folder, 'track.json'), 'utf8'));
 
+// A point in the middle of what the cameras looked at, for centring the checking grid when no spot has
+// been marked: the middle of the scene points, or failing those, a scene-distance ahead of the camera
+// half way through the clip.
+export function sceneCentre(track) {
+  if (track.points?.length >= 8) {
+    const mid = axis => { const v = track.points.map(p => p[axis]).sort((a, b) => a - b); return v[v.length >> 1]; };
+    return [mid(0), mid(1), mid(2)];
+  }
+  const pose = poseAt(track, Math.floor(track.frames / 2));
+  if (!pose) return [0, 0, 0];
+  return add(pose.position, mul(qrotate(pose.q, [0, 0, -1]), track.scale));
+}
+
 // ---- A picture to check a track by: a grid on the ground and the world points, drawn into frames ---------
 export async function trackOverlay(frameJpeg, track, frame, { centre, points = [], size = 540 }) {
   const img = sharp(frameJpeg), meta = await img.metadata();
