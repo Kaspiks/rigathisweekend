@@ -77,3 +77,13 @@ button.small{padding:7px 11px;font-size:12px}
 .renders img{width:320px;border-radius:6px}
 .clip pre{max-height:320px;overflow:auto}
 @media(max-width:700px){.clip{grid-template-columns:1fr}.clip-poster img,.clip-poster .blank{width:120px}.renders img{width:100%}}
+
+/* A canvas has no poster frame: show its shape instead. */
+.blank.canvas{display:flex;align-items:center;justify-content:center;background:repeating-linear-gradient(45deg,#17352d,#17352d 8px,#1d4036 8px,#1d4036 16px);color:#d4ed86;font-size:.8rem;letter-spacing:.08em}
+.versions{margin:.4rem 0 .6rem}
+.versions ol{margin:.4rem 0 0;padding-left:1.4rem;font-size:.85rem;line-height:1.5}
+.history-table{width:100%;border-collapse:collapse;font-size:.88rem}
+.history-table th{text-align:left;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:#7b8f88;border-bottom:1px solid #24413a;padding:.4rem .6rem}
+.history-table td{padding:.5rem .6rem;border-bottom:1px solid #1b332d;vertical-align:top}
+.history-table tr:hover td{background:#152b26}
+.history-table a{margin-right:.6rem}

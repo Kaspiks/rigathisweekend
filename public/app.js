@@ -265,9 +265,13 @@ function renderRow(c,r){
 function clipCard(c){
   const busy=c.renders.some(renderBusy), last=c.edits[c.edits.length-1], ready=c.status==='ready';
   const state=ready?'':c.status==='failed'?`<span class="tag missing">Failed</span> ${esc(c.error||'')}`:`<span class="tag ok">${c.status==='uploading'?'Uploading':'Processing'}${c.progress?` ${Math.round(c.progress*100)}%`:'…'}</span>`;
-  const meta=ready?`${c.seconds.toFixed(1)} s · ${c.width}×${c.height} · ${c.frames} frames at 30 fps${c.audio?' · with sound':''}${c.source?.hdr?' · HDR, converted':''}`:'';
-  const poster=ready?`<a href="${clipFile(c,'work.mp4')}" target="_blank" rel="noopener"><img src="${clipFile(c,'poster.jpg')}" alt="${esc(c.name)}"></a>`:'<div class="blank"></div>';
-  const edit=last?`Edit version ${last.version}${last.note?` · ${esc(last.note)}`:''} · saved ${esc(riga(last.created))}`:'No edit yet. In ChatGPT, ask it to animate this clip.';
+  const meta=ready?`${c.blank?'Animation · ':''}${c.seconds.toFixed(1)} s · ${c.width}×${c.height} · ${c.frames} frames at 30 fps${c.audio?' · with sound':''}${c.source?.hdr?' · HDR, converted':''}`:'';
+  const poster=c.blank?`<div class="blank canvas"><span>${c.width}×${c.height}</span></div>`
+    :ready?`<a href="${clipFile(c,'work.mp4')}" target="_blank" rel="noopener"><img src="${clipFile(c,'poster.jpg')}" alt="${esc(c.name)}"></a>`:'<div class="blank"></div>';
+  const edit=last?`Edit version ${last.version}${last.note?` · ${esc(last.note)}`:''} · saved ${esc(riga(last.created))}`
+    :c.blank?'No edit yet. In ChatGPT, ask it to make the animation.':'No edit yet. In ChatGPT, ask it to animate this clip.';
+  // Every version kept, newest first, so you can see how an animation got to where it is.
+  const history=c.edits.length>1?`<details class="versions"><summary>${c.edits.length} versions</summary><ol reversed>${c.edits.slice().reverse().map(v=>`<li><strong>v${v.version}</strong> · ${esc(riga(v.created))}${v.note?`<br><span class="hint">${esc(v.note)}</span>`:''}</li>`).join('')}</ol></details>`:'';
   const pictures=c.assets.map(a=>`<figure><a href="${clipFile(c,`assets/${a.name}.png`)}?v=${stamp}" target="_blank" rel="noopener"><img loading="lazy" src="${clipFile(c,`assets/${a.name}.png`)}?v=${stamp}" alt="${esc(a.name)}"></a><span>${esc(a.name)} · ${a.width}×${a.height}</span><button class="secondary small" data-unasset="${c.id}" data-name="${esc(a.name)}">Remove</button></figure>`).join('');
   const models=(c.models||[]).map(m=>`<li><strong>${esc(m.name)}</strong> · ${m.animations.length?`animations: ${m.animations.map(a=>esc(a.name)).join(', ')}`:'no animations'} · ${m.mb} MB <button class="secondary small" data-unmodel="${c.id}" data-name="${esc(m.name)}">Remove</button></li>`).join('');
   const sounds=(c.sounds||[]).map(x=>`<li><strong>${esc(x.name)}</strong> · ${x.seconds.toFixed(1)} s <audio controls preload="none" src="${clipFile(c,`sounds/${x.name}.wav`)}?v=${stamp}"></audio> <button class="secondary small" data-unsound="${c.id}" data-name="${esc(x.name)}">Remove</button></li>`).join('');
@@ -283,7 +287,7 @@ function clipCard(c){
       <h3>${esc(c.name)}</h3>
       <p class="meta">${meta} ${state}</p>
       <div class="id">Clip id ${c.id}</div>
-      ${ready?`<h4>Edit</h4><p class="hint">${edit}</p>
+      ${ready?`<h4>Edit</h4><p class="hint">${edit}</p>${history}
       <div class="toolbar"><button class="small" data-clip-render="${c.id}" data-quality="final"${off}>Render video</button><button class="secondary small" data-clip-render="${c.id}" data-quality="draft"${off}>Quick draft (half size)</button></div>
       ${footageRenderable?'':'<p class="hint">The render service is not configured (RENDER_URL), so edits cannot be rendered here yet.</p>'}
       <h4>Pictures</h4><p class="hint">Images an edit can use by name: an illustrated frame to line up over the footage, a logo, a drawing. PNG keeps transparency.</p>
@@ -292,14 +296,39 @@ function clipCard(c){
       ${models?`<ul class="models">${models}</ul>`:''}<button class="secondary small" data-model="${c.id}">Add 3D model</button>
       <h4>Sounds</h4><p class="hint">Sound effects and music an edit can place on exact frames: steps, a whoosh, a poof. MP3, WAV, OGG, FLAC or M4A, up to 3 minutes.</p>
       ${sounds?`<ul class="models sounds">${sounds}</ul>`:''}<button class="secondary small" data-sound="${c.id}">Add sound</button>
-      <h4>Depth</h4><p class="hint">How far away each part of the shot is (near is white), so animations can pass behind things and edits can blur or fog by distance. Made on this server in a few minutes.</p>
-      ${depth}`:''}
+      ${c.blank?'':`<h4>Depth</h4><p class="hint">How far away each part of the shot is (near is white), so animations can pass behind things and edits can blur or fog by distance. Made on this server in a few minutes.</p>
+      ${depth}`}`:''}
       ${c.renders.length?`<h4>Renders</h4><ul class="renders">${c.renders.map(r=>renderRow(c,r)).join('')}</ul>`:''}
-      <div class="toolbar">${c.status==='failed'?`<button class="secondary small" data-clip-retry="${c.id}">Retry processing</button>`:''}<button class="secondary small" data-clip-delete="${c.id}"${busy||clipBusy(c)?' disabled':''}>Delete clip</button></div>
+      <div class="toolbar">${c.status==='failed'?`<button class="secondary small" data-clip-retry="${c.id}">Retry processing</button>`:''}<button class="secondary small" data-clip-delete="${c.id}"${busy||clipBusy(c)?' disabled':''}>Delete ${c.blank?'animation':'clip'}</button></div>
     </div>
   </article>`;
 }
 // Redraw only when something changed, so a video you are watching is not reset by the refresh.
+// Everything ever rendered, newest first, whatever it came from. Separate from the cards above, which
+// only show a clip's own recent renders.
+let renderSig='';
+function historyRow(r){
+  const what=r.kind==='stills'?`Preview stills · edit v${r.version}`:`${r.requested?.quality==='final'?'Video':'Draft video, half size'} · edit v${r.version}`;
+  const from=r.gone?'<span class="tag missing">deleted</span>':`${esc(r.name||r.footage)}${r.blank?' <span class="tag ok">animation</span>':''}`;
+  const state=r.status==='queued'?'Waiting for the renderer…':r.status==='rendering'?'Rendering…':r.status==='failed'?`<span class="error">Failed: ${esc(r.error||'')}</span>`:esc(riga(r.updated));
+  const file=r.status==='ready'&&r.file&&!r.gone?`/footage/${r.footage}/renders/${r.file}`:null;
+  const open=!file?'':r.kind==='stills'
+    ?`<a href="${file}" target="_blank" rel="noopener">Open stills</a>`
+    :`<a href="${file}" target="_blank" rel="noopener">Watch</a> <a href="${file}" download="${esc((r.name||'render').replace(/\.[^.]+$/,''))}-v${r.version}.mp4">Download</a>`;
+  return `<tr><td>${esc(riga(r.created))}</td><td>${from}</td><td>${what}</td><td class="job-state ${r.status}">${state}</td><td>${open}</td></tr>`;
+}
+
+async function loadRenders(){
+  const d=await api('/api/renders?limit=200');
+  const sig=JSON.stringify(d.renders.map(r=>[r.render,r.status]));
+  if(sig===renderSig) return d;
+  renderSig=sig;
+  $('#renders').innerHTML=d.renders.length
+    ?`<table class="history-table"><thead><tr><th>Made</th><th>From</th><th>What</th><th>How it went</th><th></th></tr></thead><tbody>${d.renders.map(historyRow).join('')}</tbody></table>`
+    :'<p class="empty">Nothing has been rendered yet.</p>';
+  return d;
+}
+
 function showFootage(d){
   footageRenderable=d.renderConfigured;
   const sig=JSON.stringify(d.footage.map(c=>[c.id,c.status,c.progress,c.name,c.edits.length,c.assets,c.models,c.sounds,c.depth,c.depthJob,c.renders.map(r=>[r.render,r.status])]));
@@ -310,6 +339,7 @@ function showFootage(d){
 async function loadFootage(){
   footageSig='';
   const d=await api('/api/footage'); showFootage(d);
+  loadRenders().catch(()=>{});
   if(d.footage.some(c=>clipBusy(c)||c.renders.some(renderBusy))) watchFootage();
 }
 function watchFootage(){
@@ -332,6 +362,16 @@ function sendFile(url,file){
 const removeAt=async url=>{const r=await fetch(url,{method:'DELETE'});const d=await r.json();if(!r.ok)throw Error(d.error||'Could not remove it');};
 function footageClick(b){
   if(b.id==='upload-footage'){pickFile('video/*').then(f=>{if(f)action(()=>sendFile(`/api/footage?name=${encodeURIComponent(f.name)}`,f));});return true;}
+  // An animation with no clip behind it: ChatGPT fills it in afterwards, like any other edit.
+  if(b.id==='new-animation'){
+    const name=prompt('What is this animation? (a name for the dashboard)','Animation');
+    if(!name)return true;
+    const format=prompt('Shape: vertical, portrait, square or landscape','vertical');
+    if(!format)return true;
+    const seconds=Number(prompt('How many seconds?','6'));
+    action(()=>api('/api/animations',{name:name.trim(),format:format.trim(),seconds:seconds>0?seconds:6}));
+    return true;
+  }
   if(b.dataset.asset){
     pickFile('image/png,image/jpeg,image/webp').then(f=>{
       if(!f)return;

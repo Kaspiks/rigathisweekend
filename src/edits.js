@@ -428,6 +428,19 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
   const spec = EditSpec.parse(input);
   const errors = [], warnings = [];
   const last = footage.frames - 1;
+  // A blank canvas has no clip behind it, so everything that reads one has nothing to read. Saying so
+  // here keeps the failure at save time, with the reason, instead of in the middle of a render.
+  if (footage.blank) {
+    const cannot = { illustrate: 'redraws the clip', blur: 'needs the clip\'s depth', fog: 'needs the clip\'s depth', parallax: 'needs the clip\'s depth', zoom: 'moves the clip' };
+    for (const [i, layer] of spec.layers.entries()) {
+      if (cannot[layer.type]) errors.push(`layers.${i} (${layer.type}): ${cannot[layer.type]}, and this animation has no clip behind it`);
+      if (layer.type === 'image' && layer.place === 'footage') errors.push(`layers.${i} (image): place "footage" covers the clip, and this animation has no clip behind it`);
+    }
+    if (Object.keys(spec.anchors).length) errors.push('anchors: there is no clip to stick to in this animation; place layers with at or path in 0-1 of the frame');
+    if (spec.world.length) errors.push('world: spots in the room need a clip with a camera track; this animation has no clip behind it');
+    if (spec.depth) errors.push('depth: there is no clip to measure, so an animation with no clip cannot use depth');
+    if (spec.audio === 'source' && (spec.sourceVolume !== 1 || spec.sourceKeys)) warnings.push('this animation has no clip, so it has no sound of its own; sounds in "sounds" still play');
+  }
   const segments = [];
   let t = 0;
   for (const [i, s] of (spec.timeline ?? [{ from: 0, to: footage.frames, speed: 1 }]).entries()) {

@@ -241,6 +241,8 @@ export class Store {
     return {...row,request:JSON.parse(row.request),result:row.result?JSON.parse(row.result):null};
   }
   footageRenders(footage) {return this.db.prepare('SELECT id FROM footage_renders WHERE footage=? ORDER BY id DESC').all(footage).map(r=>this.footageRender(r.id));}
+  // Every render ever made, newest first, whichever clip or canvas it belongs to: the history page.
+  allRenders(limit=200) {return this.db.prepare('SELECT id FROM footage_renders ORDER BY id DESC LIMIT ?').all(limit).map(r=>this.footageRender(r.id));}
   claimFootageRender() {
     const row=this.db.prepare("UPDATE footage_renders SET status='rendering',updated=? WHERE id=(SELECT id FROM footage_renders WHERE status='queued' ORDER BY id LIMIT 1) AND status='queued' RETURNING id").get(new Date().toISOString());
     return row?this.footageRender(row.id):null;

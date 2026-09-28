@@ -50,7 +50,8 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
   if (!EDITION.test(footage || '') || !Number.isInteger(id) || id < 1) throw bad('Invalid footage or render');
   if (!props?.spec || !props?.plan?.segments || !props?.source) throw bad('Missing edit');
   const dir = join(DATA, 'footage', footage);
-  await stat(join(dir, 'work.mp4')).catch(() => { throw bad('The footage is not ready', 409); });
+  // A blank canvas has no clip behind it: the animation is everything, drawn on the edit's background.
+  if (!props.blank) await stat(join(dir, 'work.mp4')).catch(() => { throw bad('The footage is not ready', 409); });
   const assets = {};
   for (const [name, a] of Object.entries(props.assets || {})) {
     if (!ASSET.test(name)) throw bad(`Invalid asset name ${name}`);
@@ -67,7 +68,8 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
     sounds[name] = { src: `http://127.0.0.1:${PORT}/footage/${footage}/sounds/${name}.wav` };
   }
   const depth = props.depth?.frames > 0 ? { frames: Number(props.depth.frames), base: `http://127.0.0.1:${PORT}/footage/${footage}/depth` } : null;
-  const inputProps = { spec: props.spec, plan: props.plan, source: props.source, assets, depth, models, sounds, video: `http://127.0.0.1:${PORT}/footage/${footage}/work.mp4` };
+  const inputProps = { spec: props.spec, plan: props.plan, source: props.source, assets, depth, models, sounds, track: props.track ?? null, world: props.world ?? null,
+    video: props.blank ? '' : `http://127.0.0.1:${PORT}/footage/${footage}/work.mp4` };
   const k = Math.min(1, Math.max(0.2, Number(scale) || 1));
   const out = join(dir, 'renders');
   await mkdir(out, { recursive: true });

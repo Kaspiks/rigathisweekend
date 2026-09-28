@@ -9,7 +9,7 @@ import { mkdir, readdir, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import sharp from 'sharp';
 import { z } from 'zod';
-import { GUIDE, GraphicDef, McpEditSpec, fromMcpEdit, graphicErrors, toMcpEdit, planEdit, previewFrames, sourceFrameAt } from './edits.js';
+import { FORMATS, GUIDE, GraphicDef, McpEditSpec, fromMcpEdit, graphicErrors, toMcpEdit, planEdit, previewFrames, sourceFrameAt } from './edits.js';
 import {
   ASSET_NAME, FOOTAGE_ID, FPS, cleanName, contactSheet, describe, footageFiles, frameWithGrid, grabFrame, limits,
   newFootageId, probe, receive, sampleSheet, saveAsset, secondsOf, spread, transcode, writePoster,
@@ -29,7 +29,7 @@ const AssetName = z.string().regex(ASSET_NAME).describe('Name edits use for the 
 const MAX_ASSET = 15 * 1048576, MAX_DEPTH = 1024 * 1048576, LINK_MINUTES = 30;
 const tokenHash = token => createHash('sha256').update(token).digest('hex');
 // What an edit is checked against: the working copy, and whether per-frame depth has been uploaded for it.
-const clipInfo = f => ({ ...f.info.work, depth: f.info.depth ?? null, track: f.info.track ?? null });
+const clipInfo = f => ({ ...f.info.work, depth: f.info.depth ?? null, track: f.info.track ?? null, blank: !!f.info.blank });
 const MAX_TRACK = 40 * 1048576;
 // Reads an uploaded camera track (JSON), checks it and stores it for a clip. An AR track recorded while
 // filming beats one solved from the footage, so it replaces whatever track the clip had.
@@ -44,6 +44,20 @@ async function storeTrack(store, id, body) {
   const { trackJob, ...info } = store.footage(f.id).info;
   store.updateFootage(f.id, { info: { ...info, track: summary } });
   return { footage: f.id, track: summary };
+}
+
+// An animation with no clip behind it. Kept as a footage row with `info.blank`, rather than a second
+// kind of thing: every tool that already works on a clip - versions, previews, renders, pictures, models,
+// sounds, the dashboard - then works on it too, and the only difference is that nothing is drawn under
+// the layers.
+export function createBlank(store, { name, format = 'vertical', seconds = 6 }) {
+  const size = FORMATS[format];
+  if (!size) throw fail(`format must be one of ${Object.keys(FORMATS).join(', ')}`);
+  const length = Math.round(Math.min(180, Math.max(1, Number(seconds) || 6)) * FPS);
+  const id = newFootageId();
+  store.addFootage(id, cleanName(name) || 'Animation');
+  const work = { width: size[0], height: size[1], frames: length, duration: +(length / FPS).toFixed(3), audio: false };
+  return store.updateFootage(id, { status: 'ready', progress: 1, error: null, info: { blank: true, work, source: null } });
 }
 
 // Stores a picture for a clip, whichever way it arrived: dashboard, upload link or ChatGPT file.
@@ -299,7 +313,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         world = Object.fromEntries((await resolveWorld(f, planned.spec)).points.map(p => [p.name, p.position]));
       }
       const body = JSON.stringify({ footage: f.id, render: job.id, kind: job.kind, ...job.request,
-        props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null, models, sounds: files, track, world } });
+        props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null, models, sounds: files, track, world, blank: !!f.info.blank } });
       let out;
       for (let waited = 0; ; waited++) {
         const r = await clipFetcher(`${renderUrl()}/clip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(job.kind === 'stills' ? 5 * 60000 : 60 * 60000) });
@@ -330,6 +344,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   }
   setImmediate(pump); // renders still queued from before a restart
 
+  const needsClip = f => { if (f.info?.blank) throw fail('This is an animation with no clip behind it, so there is nothing to read frames from'); return f; };
   const ready = id => {
     const f = store.footage(id);
     if (f.status === 'failed') throw fail(`This footage failed to process: ${f.error}`, 409);
@@ -357,6 +372,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     return {
       id: f.id, name: f.name, status: f.status, error: f.error, progress: f.progress, created: f.created,
       ...(work ? { frames: work.frames, fps: FPS, seconds: work.duration, width: work.width, height: work.height, orientation: work.width > work.height ? 'landscape' : work.width < work.height ? 'portrait' : 'square', audio: work.audio } : {}),
+      blank: !!f.info?.blank,
       source: f.info?.source ?? null,
       depth: f.info?.depth ? { frames: f.info.depth.frames, updated: f.info.depth.updated, source: f.info.depth.source || 'upload' } : null,
       depthJob: depthState(f),
@@ -391,6 +407,21 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   // ---- Dashboard and API --------------------------------------------------------------------------
   app.get('/api/footage', async (_req, res) => res.json({ renderConfigured: !!renderUrl(), limits: { mb: limits(env).bytes / 1048576, seconds: limits(env).seconds }, footage: await Promise.all(store.footageList().map(summary)) }));
   // The upload streams straight to disk; the clip is checked with ffprobe before anything else happens.
+  // Start an animation with nothing behind it, from the dashboard.
+  app.post('/api/animations', async (req, res) => {
+    const body = z.object({ name: z.string().trim().min(1).max(80).default('Animation'), format: z.enum(Object.keys(FORMATS)).default('vertical'), seconds: z.number().min(0.5).max(180).default(6) }).parse(req.body || {});
+    res.status(201).json(await summary(createBlank(store, body)));
+  });
+  // Every render ever made, for the history page.
+  app.get('/api/renders', async (req, res) => {
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    const names = new Map();
+    res.json({ renders: store.allRenders(limit).map(r => {
+      if (!names.has(r.footage)) { try { const f = store.footage(r.footage); names.set(r.footage, { name: f.name, blank: !!f.info?.blank }); } catch { names.set(r.footage, null); } }
+      const from = names.get(r.footage);
+      return { ...renderSummary(r), name: from?.name ?? null, blank: from?.blank ?? false, gone: !from };
+    }) });
+  });
   app.post('/api/footage', async (req, res) => {
     const id = newFootageId(), files = footageFiles(store.dir, id), max = limits(env);
     store.addFootage(id, cleanName(req.query.name));
@@ -499,6 +530,32 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       inputSchema: {}, annotations: read,
     }, async () => text(await Promise.all(store.footageList().map(summary))));
 
+    server.registerTool('new_animation', {
+      description: 'Starts an animation with no video behind it: a blank canvas of the size and length you ask for, drawn entirely from layers on the edit\'s background colour. Use it when the owner asks for an animation rather than for something over their own footage. It answers with an id that every other tool takes, and edits on it are versioned and kept like any other.',
+      inputSchema: {
+        name: z.string().trim().min(1).max(80).describe('What this animation is, for the dashboard'),
+        format: z.enum(Object.keys(FORMATS)).default('vertical').describe('vertical 1080x1920 (Reels, Stories), portrait 1080x1350, square 1080x1080, landscape 1920x1080'),
+        seconds: z.number().min(0.5).max(180).default(6).describe('How long it runs; the edit can still cut this shorter or longer with its timeline'),
+      }, annotations: write,
+    }, async ({ name, format, seconds }) => {
+      const f = createBlank(store, { name, format, seconds });
+      return text({ footage: f.id, name: f.name, blank: true, format, width: f.info.work.width, height: f.info.work.height, frames: f.info.work.frames, fps: FPS, seconds: f.info.work.duration,
+        then: 'Write the edit with save_edit, using this id as `footage`. There is no clip, so no anchors, follow, illustrate, depth, world or zoom - place layers with at/path in 0-1 of the frame, and set the edit\'s background colour. preview_edit and render_edit work as usual.' });
+    });
+
+    server.registerTool('list_renders', {
+      description: 'Every render made so far, newest first, across all clips and animations, with what it came from and how it went. The finished files are on the dashboard.',
+      inputSchema: { limit: z.number().int().min(1).max(200).default(50), footage: Id.optional().describe('Only this clip or animation') }, annotations: read,
+    }, async ({ limit, footage }) => {
+      const rows = (footage ? store.footageRenders(footage) : store.allRenders(limit)).slice(0, limit);
+      const names = new Map();
+      return text({ renders: rows.map(r => {
+        if (!names.has(r.footage)) { try { const f = store.footage(r.footage); names.set(r.footage, { name: f.name, blank: !!f.info?.blank }); } catch { names.set(r.footage, null); } }
+        const from = names.get(r.footage);
+        return { ...renderSummary(r), name: from?.name ?? null, blank: from?.blank ?? null };
+      }) });
+    });
+
     server.registerTool('sample_footage', {
       description: 'Contact sheet of a clip: up to 24 frames, each labelled with its SOURCE frame number and time. Use it to find when things happen; narrow in with from/to, or ask for exact frames.',
       inputSchema: {
@@ -509,7 +566,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         frames: z.array(z.number().int().min(0)).min(1).max(24).optional().describe('Exact SOURCE frames instead of a range'),
       }, annotations: read,
     }, async ({ footage, from, to, count, frames }) => {
-      const f = ready(footage), work = f.info.work;
+      const f = needsClip(ready(footage)), work = f.info.work;
       if (from != null) checkFrame(f, from);
       if (from != null && to != null && to <= from) throw fail('`to` must be after `from`');
       const list = frames ? [...new Set(frames)].sort((a, b) => a - b).map(x => checkFrame(f, x)) : spread(from ?? 0, Math.min(work.frames, to ?? work.frames), count);
@@ -525,7 +582,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         region: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1), width: z.number().min(0.05).max(1), height: z.number().min(0.05).max(1) }).optional().describe('Part of the frame to show, in 0–1 of the footage'),
       }, annotations: read,
     }, async ({ footage, frame, grid, region }) => {
-      const f = ready(footage);
+      const f = needsClip(ready(footage));
       checkFrame(f, frame);
       const out = await frameWithGrid(footageFiles(store.dir, f.id).work, frame, { grid, region: region ?? null });
       return picture(out.image, { footage: f.id, frame, seconds: secondsOf(frame), shown: region ?? { x: 0, y: 0, width: 1, height: 1 }, footageSize: out.source });
@@ -701,7 +758,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       description: 'Makes per-frame depth on the server (Depth Anything V2 Small, near = white) for edits with \"depth\":{\"video\":true}. Background, a few minutes; list_footage shows depthJob progress. Asking again while it runs reports progress.',
       inputSchema: { footage: Id }, annotations: write,
     }, async ({ footage }) => {
-      const f = ready(footage), job = queueDepth(f);
+      const f = needsClip(ready(footage)), job = queueDepth(f);
       return text({ footage: f.id, depthJob: depthState(store.footage(f.id)) ?? job, frames: f.info.work.frames,
         then: 'Check list_footage until depth is there (depthJob disappears), then use get_depth to read values and "depth": {"video": true} in the edit.' });
     });
@@ -710,7 +767,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       description: 'Solves where the camera was on every frame (COLMAP on the server), so things can be placed in the room and stay put when the camera looks away and back. Background, minutes; list_footage shows trackJob. A track recorded while filming by an AR app is better: send one with create_upload_link kind track instead. Needs a clip where the camera MOVES through the room, not just turns on the spot.',
       inputSchema: { footage: Id }, annotations: write,
     }, async ({ footage }) => {
-      const f = ready(footage), job = queueTrack(f);
+      const f = needsClip(ready(footage)), job = queueTrack(f);
       return text({ footage: f.id, trackJob: trackState(store.footage(f.id)) ?? job, frames: f.info.work.frames,
         then: 'Check list_footage until track is there (trackJob disappears), then get_track to see the ground grid and place points.' });
     });
@@ -724,7 +781,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
           .describe('The same spot marked in 0-1 of the footage on two or more frames the camera has moved between'),
       }, annotations: read,
     }, async ({ footage, frames, sightings }) => {
-      const f = ready(footage);
+      const f = needsClip(ready(footage));
       if (!f.info.track) throw fail(trackState(f) ? `The camera track is not ready: ${JSON.stringify(trackState(f))}` : 'This clip has no camera track: make_track solves one, or send one recorded while filming with create_upload_link kind track');
       const files = footageFiles(store.dir, f.id);
       const track = await loadTrack(files.dir);
@@ -746,7 +803,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       description: 'A 30-minute link to the clip\'s working copy (H.264 MP4, 30 fps, the exact frames edits use), for computing depth yourself. make_depth is easier; get_edit_guide has the recipe.',
       inputSchema: { footage: Id }, annotations: { ...read, openWorldHint: false },
     }, async ({ footage }) => {
-      const f = ready(footage);
+      const f = needsClip(ready(footage));
       const token = randomBytes(24).toString('base64url'), expires = new Date(Date.now() + LINK_MINUTES * 60000);
       store.addUploadLink(tokenHash(token), f.id, 'work', expires, 'download');
       return text({ url: `${origin}/d/${token}.mp4`, expires: expires.toISOString(), frames: f.info.work.frames, fps: FPS, width: f.info.work.width, height: f.info.work.height });
@@ -760,7 +817,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         points: z.array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }).strict()).min(1).max(20),
       }, annotations: read,
     }, async ({ footage, frame, asset, points }) => {
-      const f = ready(footage), files = footageFiles(store.dir, f.id);
+      const f = needsClip(ready(footage)), files = footageFiles(store.dir, f.id);
       let file;
       if (asset) file = join(files.assets, `${asset}.png`);
       else {
