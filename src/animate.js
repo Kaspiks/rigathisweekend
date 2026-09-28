@@ -19,6 +19,7 @@ import { fetchPublic } from './photos.js';
 import { MAX_MODEL, deleteModel, modelList, saveModel } from './models.js';
 import { depthEstimateSeconds, depthLimits, depthModel, makeDepth } from './depth.js';
 import { MAX_SOUND, deleteSound, loudness, processedSound, saveSound, soundList } from './sounds.js';
+import { loadTrack, locate, normalizeTrack, project, saveTrack, solveTrack, trackLimits, trackOverlay } from './tracking.js';
 import http from 'node:http';
 
 const fail = (message, httpStatus = 400) => Object.assign(new Error(message), { httpStatus });
@@ -28,7 +29,22 @@ const AssetName = z.string().regex(ASSET_NAME).describe('Name edits use for the 
 const MAX_ASSET = 15 * 1048576, MAX_DEPTH = 1024 * 1048576, LINK_MINUTES = 30;
 const tokenHash = token => createHash('sha256').update(token).digest('hex');
 // What an edit is checked against: the working copy, and whether per-frame depth has been uploaded for it.
-const clipInfo = f => ({ ...f.info.work, depth: f.info.depth ?? null });
+const clipInfo = f => ({ ...f.info.work, depth: f.info.depth ?? null, track: f.info.track ?? null });
+const MAX_TRACK = 40 * 1048576;
+// Reads an uploaded camera track (JSON), checks it and stores it for a clip. An AR track recorded while
+// filming beats one solved from the footage, so it replaces whatever track the clip had.
+async function storeTrack(store, id, body) {
+  const f = store.footage(id);
+  if (f.status !== 'ready') throw fail('The clip is not ready yet', 409);
+  if (['queued', 'running'].includes(f.info.trackJob?.status)) throw fail('A camera track is being solved for this clip; wait for it to finish', 409);
+  let json;
+  try { json = JSON.parse(Buffer.isBuffer(body) ? body.toString('utf8') : String(body)); } catch { throw fail('A camera track is JSON; that file is not'); }
+  const track = normalizeTrack(json, f.info.work, 'upload');
+  const summary = await saveTrack(footageFiles(store.dir, f.id).dir, track);
+  const { trackJob, ...info } = store.footage(f.id).info;
+  store.updateFootage(f.id, { info: { ...info, track: summary } });
+  return { footage: f.id, track: summary };
+}
 
 // Stores a picture for a clip, whichever way it arrived: dashboard, upload link or ChatGPT file.
 async function storeAsset(store, id, name, buffer) {
@@ -74,6 +90,11 @@ export function uploadLinkRoute(store) {
           res.status(201).json({ footage: f.id, depth });
         } finally { await rm(incoming, { force: true }); }
         return;
+      }
+      if (link.kind === 'track') {
+        const saved = await storeTrack(store, link.footage, await readBody(req, MAX_TRACK));
+        store.finishUploadLink(hash);
+        return res.status(201).json(saved);
       }
       const folders = () => footageFiles(store.dir, store.footage(link.footage).id);
       const saved = link.kind === 'model'
