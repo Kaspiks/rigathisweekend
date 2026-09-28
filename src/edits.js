@@ -897,6 +897,42 @@ it. If the table crosses more than about a third of the frame, a layer pinned to
 - The shift is measured from the anchor's FIRST keyframe, so layers are unshifted before it: keyframe
   the anchor from the frame the move starts and everything earlier stays put on its own.
 
+## Putting something in the room, not on the screen
+\`at\` and \`path\` place a layer on the SCREEN: it stays where you put it while the footage moves behind it.
+That is right for captions and for anything that should sit in one corner. It is wrong for a thing that
+is supposed to BE somewhere in the room - it slides over the table, and when the camera looks away and
+comes back it is in the wrong place.
+
+For that, the clip needs a camera track: where the camera was and which way it pointed on every frame.
+- Best: a track recorded while filming by an AR app (ARKit/ARCore). create_upload_link kind track, then
+  PUT the JSON. It is gravity-aligned and has real scale, and it beats anything worked out afterwards.
+- Otherwise: make_track solves one from the footage with COLMAP. It needs a clip where the camera MOVES
+  through the room - walking round a table works, turning on the spot does not, because a camera that
+  only pivots never sees anything from two sides and nothing can be placed in depth.
+- If neither works, fall back to 2D anchors and follow, which is the old way and still fine for a shot
+  that does not come back to the same place.
+list_footage shows \`track\` when a clip has one. get_track draws a grid on the ground to check it: if the
+grid sticks to the same surface as the camera moves, the track is good.
+
+Then mark the spots you care about and give them names:
+"world": [{"name": "cup", "sightings": [{"frame": 30, "x": 0.52, "y": 0.50}, {"frame": 210, "x": 0.44, "y": 0.56}]}]
+Sightings are SOURCE frames and 0-1 of the footage, like anchors. Mark the SAME spot on two or more
+frames the camera has moved between - get_frame with a grid is the way to read the numbers off. Two marks
+from nearly the same angle cannot say how far away it is; save_edit answers with each spot's position and
+warns when the marks disagree.
+
+Use a spot on a model layer with "world" instead of at/path:
+{"type":"model","asset":"fox","from":0,"to":200,"world":"cup","size":0.25,"animation":"Idle"}
+It then stands there in the room: it holds still while the camera moves, goes out of shot when the camera
+looks away, and is in the same place when it comes back. \`size\` is how much of the frame height it fills
+on the frame the layer STARTS on - after that it is an object of that size, so it grows as the camera
+comes closer, which is the point. It stands up along the track's own up direction and faces where the
+camera was at its first frame. "worldPath": [{"frame":0,"world":"door"},{"frame":90,"world":"table"}]
+moves it between spots.
+A flat layer (text, sticker, image, graphic) can use a spot too, as "at": "cup"; it is left out of the
+frames where that spot is behind the camera. tilt, turn and follow do not apply to a layer in the room -
+the camera decides how it is seen.
+
 ## Saved graphics you can reuse
 list_graphics shows them; use them with {"type":"graphic","use":"<name>","from":…,"to":…,"at":…}.
 - "gulls": three birds flapping on a 12-frame loop. Fly them along a path over a BRIGHT part of the
