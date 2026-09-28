@@ -241,6 +241,10 @@ const Model = z.object({
   }).strict()).max(20).optional().describe('Switch animations during the layer, e.g. walk then sit: [{"frame":130,"animation":"Sit","loop":false}]'),
   blend: z.number().int().min(0).max(30).default(8).describe('Frames to cross-fade between animations'),
   at: Place().optional().describe('Where it stands (with pin feet, its feet are here)'), offset: Offset().optional(), path: Path(), follow: Follow(),
+  world: z.string().regex(ANCHOR).optional()
+    .describe('A spot from the edit\'s world list: the model stands there in the ROOM and holds still while the camera moves, instead of being placed on the screen. Needs a camera track. Used instead of at, path and follow'),
+  worldPath: z.array(z.object({ frame: Frame().describe('OUTPUT frame'), world: z.string().regex(ANCHOR) }).strict()).min(2).max(200).optional()
+    .describe('Moves between spots in the room, e.g. [{"frame":0,"world":"door"},{"frame":90,"world":"table"}]'),
   depth: z.union([Unit(), z.literal('auto')]).optional()
     .describe('"auto" (best for something walking on a surface): each frame it takes the depth of the ground under its feet, so it is never cut off by the table it stands on but still goes behind nearer things. Or a fixed 0 far – 1 near. Needs depth on the edit'),
   stride: z.number().min(0.05).max(10).optional()
@@ -357,6 +361,15 @@ const Cue = () => z.object({
 export const tailSeconds = cue => Math.min(4, (cue.echo ? (cue.echo.delay / 1000) * 4 : 0) + (cue.reverb ? 0.4 + cue.reverb * 2 : 0));
 export const soundEffects = cue => !!(cue.pan || cue.pitch || cue.reverse || cue.lowpass || cue.highpass || cue.bass || cue.treble || cue.echo || cue.reverb || cue.normalize);
 
+// A spot in the room, rather than on the screen: marked on two or more frames the camera has moved
+// between, and turned into a 3D position with the clip's camera track. Layers placed on one stay where
+// they are in the room, so they hold still when the camera looks away and comes back.
+const WorldPoint = () => z.object({
+  name: z.string().regex(ANCHOR).describe('Name for this spot; shares the namespace with anchors'),
+  sightings: z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(12)
+    .describe('The same spot marked in 0-1 of the footage, on two or more frames the camera has moved between. One sighting works only when the track has scene points'),
+}).strict();
+
 const AnchorKeys = () => z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(900);
 
 export const EditSpec = z.object({
@@ -372,6 +385,8 @@ export const EditSpec = z.object({
     .describe('The cut, in order: {from,to[,speed]} plays source frames, {hold,frames} freezes one. Leave out to play the whole clip once'),
   // Anchor names are checked in planEdit: a key pattern in the schema becomes propertyNames, which
   // ChatGPT's tool-schema check rejects.
+  world: z.array(WorldPoint()).max(40).default([])
+    .describe('Spots in the room, for layers that should stay put as the camera moves. Needs a camera track on the clip (make_track, or an AR track uploaded with create_upload_link kind track); get_track checks one'),
   anchors: z.record(z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(900))
     .refine(a => Object.keys(a).length <= 40, 'At most 40 anchors').default({}).describe('Named points on things in the footage, keyframed on SOURCE frames in 0–1 of the footage; positions between keyframes are interpolated, and held before the first and after the last'),
   depth: z.object({
@@ -439,11 +454,27 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     if (keys.some((k, i) => i && k.frame === keys[i - 1].frame)) errors.push(`anchors.${name}: two keyframes on frame ${keys.find((k, i) => i && k.frame === keys[i - 1].frame).frame}`);
     if (keys.at(-1).frame > last) errors.push(`anchors.${name}: frame ${keys.at(-1).frame} is past the end of the clip (its last frame is ${last})`);
   }
-  const used = new Set();
+  // World spots: one name each, not clashing with an anchor, and every sighting on a real frame.
+  const worldPoints = new Map();
+  for (const [i, point] of spec.world.entries()) {
+    if (worldPoints.has(point.name)) { errors.push(`world.${i}: there are two spots called '${point.name}'`); continue; }
+    if (spec.anchors[point.name]) errors.push(`world.${i}: '${point.name}' is already an anchor; world spots and anchors share their names`);
+    point.sightings.sort((a, b) => a.frame - b.frame);
+    const past = point.sightings.find(k => k.frame > last);
+    if (past) errors.push(`world.${i} ('${point.name}'): frame ${past.frame} is past the end of the clip (its last frame is ${last})`);
+    if (point.sightings.length >= 2 && new Set(point.sightings.map(k => k.frame)).size < 2) errors.push(`world.${i} ('${point.name}'): mark it on frames the camera has moved between, not twice on one frame`);
+    worldPoints.set(point.name, point);
+  }
+  const used = new Set(), usedWorld = new Set();
   const needAnchor = (where, value) => {
     if (typeof value !== 'string') return;
     used.add(value);
     if (!spec.anchors[value]) errors.push(`${where}: there is no ${pos(value)}; define it under anchors`);
+  };
+  const needWorld = (where, value) => {
+    if (typeof value !== 'string') return;
+    usedWorld.add(value);
+    if (!worldPoints.has(value)) errors.push(`${where}: there is no world spot '${value}'; define it under world`);
   };
   const zooms = [];
   for (const [i, layer] of spec.layers.entries()) {
@@ -459,6 +490,18 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     }
     needAnchor(where, layer.at);
     needAnchor(`${where}: follow`, layer.follow);
+    if (layer.world || layer.worldPath) {
+      // Placing something in the room only means anything if we know where the camera was.
+      if (!footage.track) errors.push(`${where}: world needs a camera track for this clip - make_track solves one, or send one recorded while filming with create_upload_link kind track`);
+      if (layer.at != null || layer.path || layer.follow) errors.push(`${where}: world places it in the room, so it cannot also have at, path or follow`);
+      if (layer.world && layer.worldPath) errors.push(`${where}: give either world or worldPath, not both`);
+      needWorld(`${where}: world`, layer.world);
+      for (const [k, key] of (layer.worldPath ?? []).entries()) needWorld(`${where}: worldPath.${k}`, key.world);
+      if (layer.worldPath) {
+        layer.worldPath.sort((a, b) => a.frame - b.frame);
+        if (layer.worldPath.some((k, n) => n && k.frame === layer.worldPath[n - 1].frame)) errors.push(`${where}: worldPath has two keys on one frame`);
+      }
+    }
     if (layer.type === 'zoom') { needAnchor(where, layer.focus); zooms.push({ ...layer, i }); }
     if (layer.type === 'text' && layer.pointer && (typeof layer.at !== 'string' || !layer.offset)) warnings.push(`${where}: a pointer needs an anchor in 'at' and an 'offset' to point from`);
     if (layer.path) {
@@ -528,6 +571,7 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
   for (let k = 1; k < zooms.length; k++)
     if (zooms[k].from < zooms[k - 1].to) errors.push(`layers.${zooms[k].i} (zoom): overlaps the zoom in layers.${zooms[k - 1].i}; one zoom at a time`);
   for (const name of Object.keys(spec.anchors)) if (!used.has(name)) warnings.push(`anchors.${name}: defined but not used by any layer`);
+  for (const point of spec.world) if (!usedWorld.has(point.name)) warnings.push(`world '${point.name}': defined but not used by any layer`);
   // Each cue gets its length worked out (to the end of the file unless cut), so the renderer and the
   // answer to ChatGPT agree on when every sound starts and stops.
   const cues = [];

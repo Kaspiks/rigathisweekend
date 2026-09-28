@@ -257,6 +257,27 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   const withAssets = async id => Object.fromEntries((await assetList(store.dir, id)).map(a => [a.name, { width: a.width, height: a.height }]));
   const withSounds = async id => Object.fromEntries((await soundList(footageFiles(store.dir, id).sounds)).map(x => [x.name, { seconds: x.seconds }]));
   const withModels = async id => Object.fromEntries((await modelList(footageFiles(store.dir, id).models)).map(m => [m.name, { animations: m.animations.map(a => a.name) }]));
+  // Each world spot's marks turned into a position in the room, through the clip's camera track. Done
+  // before an edit is saved: a spot a layer stands on that cannot be placed would only fail later, in
+  // the middle of a render, where the reason is much harder to see.
+  async function resolveWorld(f, spec) {
+    if (!spec.world?.length) return { points: [], warnings: [] };
+    const track = await loadTrack(footageFiles(store.dir, f.id).dir);
+    const needed = new Set(spec.layers.flatMap(l => [l.world, ...(l.worldPath ?? []).map(k => k.world)]).filter(Boolean));
+    const points = [], warnings = [];
+    for (const point of spec.world) {
+      let got;
+      try { got = locate(track, point.sightings); }
+      catch (err) {
+        if (needed.has(point.name)) throw fail(`world '${point.name}': ${err.message}`);
+        warnings.push(`world '${point.name}': ${err.message}`);
+        continue;
+      }
+      if (got.error != null && got.error > 0.02) warnings.push(`world '${point.name}': the marks disagree by ${(got.error * 100).toFixed(1)}% of the frame height; mark the same spot more carefully, or on frames the camera has moved further between`);
+      points.push({ name: point.name, ...got });
+    }
+    return { points, warnings };
+  }
   async function runRender(job) {
     try {
       const f = store.footage(job.footage);
@@ -536,7 +557,9 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async ({ footage, version }) => {
       const f = ready(footage), edit = store.edit(f.id, version ?? null);
       const { timeline, plan, cues, warnings } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id));
-      return text({ footage: f.id, version: edit.version, note: edit.note, edit: toMcpEdit(edit.spec), durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, sounds: cues, warnings, versions: store.edits(f.id) });
+      const world = await resolveWorld(f, edit.spec).catch(err => ({ points: [], warnings: [err.message] }));
+      return text({ footage: f.id, version: edit.version, note: edit.note, edit: toMcpEdit(edit.spec), durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, sounds: cues,
+        ...(world.points.length ? { world: world.points } : {}), warnings: [...warnings, ...world.warnings], versions: store.edits(f.id) });
     });
 
     server.registerTool('save_edit', {
@@ -545,8 +568,10 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async ({ footage, edit, note }) => {
       const f = ready(footage);
       const { spec, plan, timeline, cues, warnings } = planEdit(fromMcpEdit(edit), clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id));
+      const world = await resolveWorld(f, spec);
       const saved = store.saveEdit(f.id, spec, note || null);
-      return text({ footage: f.id, version: saved.version, format: spec.format, size: [plan.width, plan.height], fps: FPS, durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, sounds: cues, warnings, next: 'preview_edit to check frames, then render_edit' });
+      return text({ footage: f.id, version: saved.version, format: spec.format, size: [plan.width, plan.height], fps: FPS, durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, sounds: cues,
+        ...(world.points.length ? { world: world.points } : {}), warnings: [...warnings, ...world.warnings], next: 'preview_edit to check frames, then render_edit' });
     });
 
     server.registerTool('preview_edit', {
