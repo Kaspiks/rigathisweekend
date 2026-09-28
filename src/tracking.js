@@ -314,5 +314,9 @@ export async function trackOverlay(frameJpeg, track, frame, { centre, points = [
     if (s) lines.push(`<circle cx="${s[0]}" cy="${s[1]}" r="${W / 90}" fill="#ff6b5b" stroke="#fff" stroke-width="${W / 400}"/><text x="${s[0] + W / 60}" y="${s[1]}" font-size="${W / 28}" font-family="sans-serif" font-weight="700" fill="#fff" stroke="#000" stroke-width="${W / 500}">${p.name}</text>`);
   }
   const svg = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">${lines.join('')}</svg>`);
-  return img.composite([{ input: svg }]).resize({ width: size }).jpeg({ quality: 82 }).toBuffer();
+  // Two passes on purpose: sharp resizes before it composites whatever order the calls are written in,
+  // so drawing and shrinking in one pipeline would shrink the frame first and then refuse the
+  // full-size overlay as too big.
+  const drawn = await img.composite([{ input: svg }]).png().toBuffer();
+  return sharp(drawn).resize({ width: size }).jpeg({ quality: 82 }).toBuffer();
 }
