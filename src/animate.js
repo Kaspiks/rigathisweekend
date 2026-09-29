@@ -270,6 +270,11 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   }
   const withAssets = async id => Object.fromEntries((await assetList(store.dir, id)).map(a => [a.name, { width: a.width, height: a.height }]));
   const withSounds = async id => Object.fromEntries((await soundList(footageFiles(store.dir, id).sounds)).map(x => [x.name, { seconds: x.seconds }]));
+  // The other clips an edit may cut between, by id: their length and shape, and whether they are real
+  // video at all. Only clips that are ready count, so a half-uploaded one is refused with a reason.
+  const withClips = () => Object.fromEntries(store.footageList()
+    .filter(f => f.status === 'ready' && f.info?.work)
+    .map(f => [f.id, { frames: f.info.work.frames, width: f.info.work.width, height: f.info.work.height, blank: !!f.info.blank }]));
   const withModels = async id => Object.fromEntries((await modelList(footageFiles(store.dir, id).models)).map(m => [m.name, { animations: m.animations.map(a => a.name) }]));
   // Each world spot's marks turned into a position in the room, through the clip's camera track. Done
   // before an edit is saved: a spot a layer stands on that cannot be placed would only fail later, in
@@ -297,7 +302,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const f = store.footage(job.footage);
       if (f.status !== 'ready') throw new Error('The footage is not ready');
       const work = f.info.work, assets = await withAssets(f.id), models = await withModels(f.id), sounds = await withSounds(f.id);
-      const planned = planEdit(store.edit(f.id, job.version).spec, clipInfo(f), assets, store.graphics(), models, sounds), plan = planned.plan;
+      const planned = planEdit(store.edit(f.id, job.version).spec, clipInfo(f), assets, store.graphics(), models, sounds, withClips()), plan = planned.plan;
       // Stills are silent. A video gets each cue's sound with its effects applied (made once, then kept).
       const folder = footageFiles(store.dir, f.id).sounds, files = {};
       const cues = job.kind === 'video' ? await Promise.all(planned.spec.sounds.map(async c => ({ ...c, file: await processedSound(folder, c) }))) : [];
@@ -312,8 +317,14 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         track = { frames: t.frames, fovY: t.fovY, aspect: t.aspect, up: t.up, scale: t.scale, poses: t.poses };
         world = Object.fromEntries((await resolveWorld(f, planned.spec)).points.map(p => [p.name, p.position]));
       }
+      // Where each named clip's video is, and what shape it is: a cut from another clip fills the frame
+      // its own way rather than being squeezed into this one's.
+      const videos = Object.fromEntries(planned.spec.clips.map(c => {
+        const about = store.footage(c.footage).info.work;
+        return [c.name, { footage: c.footage, width: about.width, height: about.height, frames: about.frames }];
+      }));
       const body = JSON.stringify({ footage: f.id, render: job.id, kind: job.kind, ...job.request,
-        props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null, models, sounds: files, track, world, blank: !!f.info.blank } });
+        props: { spec, plan, assets, source: { width: work.width, height: work.height, frames: work.frames }, depth: f.info.depth ?? null, models, sounds: files, track, world, videos, blank: !!f.info.blank } });
       let out;
       for (let waited = 0; ; waited++) {
         const r = await clipFetcher(`${renderUrl()}/clip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(job.kind === 'stills' ? 5 * 60000 : 60 * 60000) });
@@ -397,7 +408,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   async function videoRequest(f, version, quality, from, to) {
     if (!renderUrl()) throw fail('The render service is not configured (RENDER_URL)', 409);
     const edit = store.edit(f.id, version);
-    const { plan } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id));
+    const { plan } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id), withClips());
     const last = plan.durationInFrames - 1;
     const range = from != null || to != null ? [Math.min(last, from ?? 0), Math.min(last, to ?? last)] : null;
     if (range && range[1] < range[0]) throw fail('`to` must not be before `from`');
@@ -622,7 +633,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       inputSchema: { footage: Id, version: z.number().int().min(1).optional() }, annotations: read,
     }, async ({ footage, version }) => {
       const f = ready(footage), edit = store.edit(f.id, version ?? null);
-      const { timeline, plan, cues, warnings } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id));
+      const { timeline, plan, cues, warnings } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id), withClips());
       const world = await resolveWorld(f, edit.spec).catch(err => ({ points: [], warnings: [err.message] }));
       return text({ footage: f.id, version: edit.version, note: edit.note, edit: toMcpEdit(edit.spec), durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, sounds: cues,
         ...(world.points.length ? { world: world.points } : {}), warnings: [...warnings, ...world.warnings], versions: store.edits(f.id) });
@@ -633,7 +644,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       inputSchema: { footage: Id, edit: McpEditSpec, note: z.string().trim().max(200).optional().describe('What changed, for the version list') }, annotations: write,
     }, async ({ footage, edit, note }) => {
       const f = ready(footage);
-      const { spec, plan, timeline, cues, warnings } = planEdit(fromMcpEdit(edit), clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id));
+      const { spec, plan, timeline, cues, warnings } = planEdit(fromMcpEdit(edit), clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id), withClips());
       const world = await resolveWorld(f, spec);
       const saved = store.saveEdit(f.id, spec, note || null);
       return text({ footage: f.id, version: saved.version, format: spec.format, size: [plan.width, plan.height], fps: FPS, durationFrames: plan.durationInFrames, seconds: secondsOf(plan.durationInFrames), timeline, sounds: cues,
@@ -650,7 +661,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async ({ footage, version, frames, scale }) => {
       if (!renderUrl()) throw fail('The render service is not configured (RENDER_URL)');
       const f = ready(footage), edit = store.edit(f.id, version ?? null);
-      const { plan, spec } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id));
+      const { plan, spec } = planEdit(edit.spec, clipInfo(f), await withAssets(f.id), store.graphics(), await withModels(f.id), await withSounds(f.id), withClips());
       const list = frames ? [...new Set(frames)].sort((a, b) => a - b) : previewFrames(plan, spec.layers, 8);
       const outside = list.find(x => x > plan.durationInFrames - 1);
       if (outside != null) throw fail(`Frame ${outside} is past the end of the edit (its last frame is ${plan.durationInFrames - 1})`);

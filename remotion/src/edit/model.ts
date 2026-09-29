@@ -52,7 +52,7 @@ export type Level = { frame: number; value: number }[];
 export type SoundCue = { sound: string; file?: string; at: number; length: number; volume: number; from: number; loop: boolean; fadeIn: number; fadeOut: number; speed: number; volumeKeys?: Level; duck?: number };
 export type Spec = { format: string; fit: 'cover' | 'contain'; background: string; audio: 'source' | 'mute'; anchors: Record<string, Keyframe[]>; layers: Layer[]; depth?: DepthSpec;
   sounds?: SoundCue[]; sourceVolume?: number; sourceKeys?: Level };
-export type Segment = { from: number; to: number; source: number; hold?: boolean; sourceTo?: number; speed?: number };
+export type Segment = { from: number; to: number; source: number; hold?: boolean; sourceTo?: number; speed?: number; clip?: string };
 export type Plan = { width: number; height: number; fps: number; durationInFrames: number; segments: Segment[] };
 export type Asset = { src: string; width: number; height: number };
 export type DepthFrames = { base: string; frames: number };
@@ -61,7 +61,8 @@ export type DepthFrames = { base: string; frames: number };
 // convention (the camera looks along −Z, +Y up), or null on frames the track does not cover.
 export type Pose = [number, number, number, number, number, number, number];
 export type CameraTrack = { frames: number; fovY: number; aspect: number; up: [number, number, number]; scale: number; poses: (Pose | null)[] };
-export type FootageEditProps = { spec: Spec; plan: Plan; video: string; assets: Record<string, Asset>; source: { width: number; height: number; frames: number }; depth?: DepthFrames | null; models?: Record<string, { src: string }>; sounds?: Record<string, { src: string }>; track?: CameraTrack | null; world?: Record<string, [number, number, number]> | null };
+export type ClipVideo = { src: string; width: number; height: number; frames: number };
+export type FootageEditProps = { spec: Spec; plan: Plan; video: string; videos?: Record<string, ClipVideo> | null; assets: Record<string, Asset>; source: { width: number; height: number; frames: number }; depth?: DepthFrames | null; models?: Record<string, { src: string }>; sounds?: Record<string, { src: string }>; track?: CameraTrack | null; world?: Record<string, [number, number, number]> | null };
 
 export const PALETTE: Record<string, string> = { ink: '#17352d', lime: '#d4ed86', paper: '#f4f0e6', white: '#ffffff', black: '#111111', coral: '#ff6b5b', gold: '#f5c542', sky: '#7cc6fe' };
 export const colour = (c: string | undefined, fallback: string) => (c ? PALETTE[c] ?? c : fallback);
@@ -134,16 +135,25 @@ export function footagePoint(spec: Spec, place: Place, sourceFrame: number): Poi
 }
 
 // Pixels per source pixel at zoom 1: cover fills the frame, contain shows all of the clip.
-export const baseScale = (props: FootageEditProps) => {
-  const { plan, source, spec } = props;
-  const sx = plan.width / source.width, sy = plan.height / source.height;
-  return spec.fit === 'contain' ? Math.min(sx, sy) : Math.max(sx, sy);
+// How much a picture of this size is scaled to fill (or fit inside) the finished frame.
+export const scaleFor = (plan: Plan, size: { width: number; height: number }, fit: Spec['fit']) => {
+  const sx = plan.width / size.width, sy = plan.height / size.height;
+  return fit === 'contain' ? Math.min(sx, sy) : Math.max(sx, sy);
 };
+export const baseScale = (props: FootageEditProps) => scaleFor(props.plan, props.source, props.spec.fit);
 
 // The footage rectangle on screen, and where a footage point lands on screen, for a camera.
 export function footageRect(props: FootageEditProps, cam: Camera, base: number) {
   const { plan, source } = props;
   const w = source.width * base * cam.zoom, h = source.height * base * cam.zoom;
+  return { left: plan.width / 2 - cam.cx * w + cam.dx, top: plan.height / 2 - cam.cy * h + cam.dy, width: w, height: h };
+}
+// The same, for a clip cut in from somewhere else: it has its own shape, so it fills the frame its own
+// way rather than borrowing the edit's clip's.
+export function clipRect(props: FootageEditProps, cam: Camera, size: { width: number; height: number }) {
+  const { plan, spec } = props;
+  const base = scaleFor(plan, size, spec.fit);
+  const w = size.width * base * cam.zoom, h = size.height * base * cam.zoom;
   return { left: plan.width / 2 - cam.cx * w + cam.dx, top: plan.height / 2 - cam.cy * h + cam.dy, width: w, height: h };
 }
 export function toScreen(props: FootageEditProps, cam: Camera, base: number, p: Point): Point {

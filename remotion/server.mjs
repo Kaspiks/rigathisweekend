@@ -68,7 +68,13 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
     sounds[name] = { src: `http://127.0.0.1:${PORT}/footage/${footage}/sounds/${name}.wav` };
   }
   const depth = props.depth?.frames > 0 ? { frames: Number(props.depth.frames), base: `http://127.0.0.1:${PORT}/footage/${footage}/depth` } : null;
-  const inputProps = { spec: props.spec, plan: props.plan, source: props.source, assets, depth, models, sounds, track: props.track ?? null, world: props.world ?? null,
+  // Other clips this edit cuts between, each served from its own folder.
+  const videos = {};
+  for (const [name, v] of Object.entries(props.videos || {})) {
+    if (!ASSET.test(name) || !EDITION.test(v.footage || '')) throw bad(`Invalid clip ${name}`);
+    videos[name] = { src: `http://127.0.0.1:${PORT}/footage/${v.footage}/work.mp4`, width: Number(v.width), height: Number(v.height), frames: Number(v.frames) };
+  }
+  const inputProps = { spec: props.spec, plan: props.plan, source: props.source, assets, depth, models, sounds, videos, track: props.track ?? null, world: props.world ?? null,
     video: props.blank ? '' : `http://127.0.0.1:${PORT}/footage/${footage}/work.mp4` };
   const k = Math.min(1, Math.max(0.2, Number(scale) || 1));
   const out = join(dir, 'renders');

@@ -12,8 +12,8 @@ import '@fontsource/jetbrains-mono/700.css';
 import type { CSSProperties } from 'react';
 import { AbsoluteFill, Audio, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
 import { BoilFilter, IllustrationFilter, SoftenFilter } from './edit/filters';
-import type { Asset, BlurLayer, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
-import { PALETTE, baseScale, blendMode, glowFilter, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, sourceAt, travel, walked, worldAt } from './edit/model';
+import type { Asset, BlurLayer, Camera, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
+import { PALETTE, baseScale, blendMode, glowFilter, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, sourceAt, travel, walked, worldAt, clipRect } from './edit/model';
 import { ModelView } from './edit/Model3D';
 import { ParticlesView } from './edit/Particles';
 import { depthNear, useLocalImage } from './edit/depth';
@@ -34,21 +34,33 @@ Promise.all([
 type Rect = { left: number; top: number; width: number; height: number };
 
 // The clip through its timeline. Rendered once as the picture and again, muted, under each drawing layer.
-const Footage = ({ props, rect, muted, style }: { props: FootageEditProps; rect: Rect; muted: boolean; style?: CSSProperties }) => {
-  if (!props.video) return null;
-  const place: CSSProperties = { position: 'absolute', left: rect.left, top: rect.top, width: rect.width, height: rect.height, objectFit: 'fill', maxWidth: 'none' };
+const Footage = ({ props, rect, cam, muted, style }: { props: FootageEditProps; rect: Rect; cam: Camera; muted: boolean; style?: CSSProperties }) => {
+  const own = props.video;
+  const segments = props.plan.segments.filter((s) => (s.clip ? props.videos?.[s.clip] : own));
+  if (!segments.length) return null;
+  // A cut from another clip brings its own shape, so it gets its own rectangle: a portrait phone clip and
+  // a landscape one should each fill the frame the way the edit's fit says, not be squeezed into a shape
+  // borrowed from whichever clip the edit happens to belong to.
+  const box = (s: (typeof segments)[number]) => {
+    const v = s.clip ? props.videos![s.clip] : null;
+    const r = v ? clipRect(props, cam, v) : rect;
+    return { position: 'absolute' as const, left: r.left, top: r.top, width: r.width, height: r.height, objectFit: 'fill' as const, maxWidth: 'none' };
+  };
   return (
     <AbsoluteFill style={{ overflow: 'hidden', ...style }}>
-      {props.plan.segments.map((s, i) => (
-        <Sequence key={i} from={s.from} durationInFrames={s.to - s.from} layout="none">
-          {s.hold
-            // Remotion keeps a video's frame inside its sequence, so a freeze stops at the sequence's first
-            // frame and the trim picks the source frame to show.
-            ? <Freeze frame={0}><OffthreadVideo src={props.video} trimBefore={s.source || undefined} muted style={place} /></Freeze>
-            : <OffthreadVideo src={props.video} trimBefore={s.source || undefined} playbackRate={s.speed ?? 1} muted={muted || (s.speed ?? 1) !== 1} style={place}
-              volume={muted ? undefined : (f) => sourceVolumeAt(props.spec, s.from + f)} />}
-        </Sequence>
-      ))}
+      {segments.map((s, i) => {
+        const src = s.clip ? props.videos![s.clip].src : own;
+        return (
+          <Sequence key={i} from={s.from} durationInFrames={s.to - s.from} layout="none">
+            {s.hold
+              // Remotion keeps a video's frame inside its sequence, so a freeze stops at the sequence's first
+              // frame and the trim picks the source frame to show.
+              ? <Freeze frame={0}><OffthreadVideo src={src} trimBefore={s.source || undefined} muted style={box(s)} /></Freeze>
+              : <OffthreadVideo src={src} trimBefore={s.source || undefined} playbackRate={s.speed ?? 1} muted={muted || (s.speed ?? 1) !== 1} style={box(s)}
+                volume={muted ? undefined : (f) => sourceVolumeAt(props.spec, s.from + f)} />}
+          </Sequence>
+        );
+      })}
     </AbsoluteFill>
   );
 };
@@ -208,19 +220,19 @@ export const FootageEdit = (props: FootageEditProps) => {
         </defs>
       </svg>
       <AbsoluteFill style={shift ? { filter: 'url(#parallax)', transform: `scale(${1 + shift.scale / plan.width})` } : undefined}>
-        <Footage props={props} rect={rect} muted={spec.audio === 'mute'} />
+        <Footage props={props} rect={rect} cam={cam} muted={spec.audio === 'mute'} />
         {/* Drawings replace the footage, so they sit right over it and under everything else, whatever their
             place in the list. The filter works on a screen-sized layer: a zoomed-in picture costs no more. */}
         {drawings.map(([l, i]) => (
-          <Footage key={`drawn-${i}`} props={props} rect={rect} muted style={{ filter: `url(#drawn-${i})`, ...reveal(l as IllustrateLayer, frame, at(l, { x: 0.5, y: 0.5 }), plan.width, plan.height) }} />
+          <Footage key={`drawn-${i}`} props={props} rect={rect} cam={cam} muted style={{ filter: `url(#drawn-${i})`, ...reveal(l as IllustrateLayer, frame, at(l, { x: 0.5, y: 0.5 }), plan.width, plan.height) }} />
         ))}
         {/* Depth of field: blurred copies of the footage, shown only where it is out of focus. */}
         {blurs.map(([l, i]) => {
           const px = l.amount * envelope(l, frame);
           return (
             <AbsoluteFill key={`blur-${i}`}>
-              <Footage props={props} rect={rect} muted style={{ filter: `blur(${px.toFixed(2)}px)`, mask: `url(#blur-${i})` }} />
-              {l.near ? <Footage props={props} rect={rect} muted style={{ filter: `blur(${(px * 0.7).toFixed(2)}px)`, mask: `url(#blurn-${i})` }} /> : null}
+              <Footage props={props} rect={rect} cam={cam} muted style={{ filter: `blur(${px.toFixed(2)}px)`, mask: `url(#blur-${i})` }} />
+              {l.near ? <Footage props={props} rect={rect} cam={cam} muted style={{ filter: `blur(${(px * 0.7).toFixed(2)}px)`, mask: `url(#blurn-${i})` }} /> : null}
             </AbsoluteFill>
           );
         })}

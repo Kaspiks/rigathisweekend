@@ -9,6 +9,7 @@ export const FORMATS = { vertical: [1080, 1920], portrait: [1080, 1350], square:
 export const MAX_OUTPUT_FRAMES = 180 * FPS; // Instagram Reels run to three minutes
 export const PALETTE = { ink: '#17352d', lime: '#d4ed86', paper: '#f4f0e6', white: '#ffffff', black: '#111111', coral: '#ff6b5b', gold: '#f5c542', sky: '#7cc6fe' };
 const ANCHOR = /^[a-z][a-z0-9_-]{0,23}$/;
+const FOOTAGE = /^[a-f0-9]{24}$/;
 
 // Factories rather than shared schemas: a schema object used twice becomes a JSON-pointer $ref in the tool
 // definition ChatGPT reads, and plain inline JSON Schema is the safest thing to hand a model.
@@ -323,6 +324,7 @@ export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Im
 const Play = z.object({
   from: Frame().describe('First SOURCE frame'), to: Frame().describe('SOURCE frame to stop before'),
   speed: z.number().min(0.25).max(4).default(1).describe('0.5 is half-speed slow motion; sound is muted when not 1'),
+  clip: z.string().regex(ANCHOR).optional().describe('Which clip this bit comes from, named in `clips`. Left out, it is the edit\'s own clip'),
 }).strict();
 const Hold = z.object({
   hold: Frame().describe('SOURCE frame to freeze on'),
@@ -385,6 +387,11 @@ export const EditSpec = z.object({
     .describe('The cut, in order: {from,to[,speed]} plays source frames, {hold,frames} freezes one. Leave out to play the whole clip once'),
   // Anchor names are checked in planEdit: a key pattern in the schema becomes propertyNames, which
   // ChatGPT's tool-schema check rejects.
+  clips: z.array(z.object({
+    name: z.string().regex(ANCHOR).describe('Short name for this clip, used by timeline entries'),
+    footage: z.string().regex(FOOTAGE).describe('Id of another clip already uploaded here (list_footage)'),
+  }).strict()).max(12).default([])
+    .describe('Other clips this edit cuts between, for a trailer. Name them here, then a timeline entry says which one it plays: {"clip":"wide","from":0,"to":40}. Anchors, depth and world spots belong to the edit\'s own clip only'),
   world: z.array(WorldPoint()).max(40).default([])
     .describe('Spots in the room, for layers that should stay put as the camera moves. Needs a camera track on the clip (make_track, or an AR track uploaded with create_upload_link kind track); get_track checks one'),
   anchors: z.record(z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(900))
@@ -424,7 +431,7 @@ const pos = s => typeof s === 'string' ? `anchor '${s}'` : null;
 // names to {animations: [names]}; `sounds` maps sound names to {seconds}. Returns the
 // normalised spec (defaults filled in, so a stored version renders the same later), the plan the
 // renderer follows and the output↔source mapping to show back.
-export function planEdit(input, footage, assets = {}, graphics = {}, models = {}, sounds = {}) {
+export function planEdit(input, footage, assets = {}, graphics = {}, models = {}, sounds = {}, clips = {}) {
   const spec = EditSpec.parse(input);
   const errors = [], warnings = [];
   const last = footage.frames - 1;
@@ -440,22 +447,47 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     if (spec.world.length) errors.push('world: spots in the room need a clip with a camera track; this animation has no clip behind it');
     if (spec.depth) errors.push('depth: there is no clip to measure, so an animation with no clip cannot use depth');
     if (spec.audio === 'source' && (spec.sourceVolume !== 1 || spec.sourceKeys)) warnings.push('this animation has no clip, so it has no sound of its own; sounds in "sounds" still play');
+    if (spec.timeline?.some(x => !('hold' in x) && !x.clip)) errors.push('timeline: this animation has no clip of its own, so every entry has to say which clip it plays with "clip"');
   }
+  // The clips a timeline entry may name, each with its own length: a cut between two videos is bounded
+  // by whichever one it comes from, not by the edit's own.
+  const named = new Map();
+  for (const [i, c] of spec.clips.entries()) {
+    if (named.has(c.name)) { errors.push(`clips.${i}: there are two clips called '${c.name}'`); continue; }
+    const about = clips[c.footage];
+    if (!about) errors.push(`clips.${i} ('${c.name}'): there is no clip ${c.footage} here, or it is not ready yet (list_footage)`);
+    else if (about.blank) errors.push(`clips.${i} ('${c.name}'): ${c.footage} is an animation with no video of its own, so there is nothing to cut in`);
+    named.set(c.name, about ?? null);
+  }
+  const usedClips = new Set();
+  // How long the clip a timeline entry plays is, and what to call it when something is wrong.
+  const lengthOf = (s) => {
+    if (!s.clip) return { frames: footage.frames, what: footage.blank ? 'this animation' : 'the clip', missing: !!footage.blank };
+    usedClips.add(s.clip);
+    if (!named.has(s.clip)) return { frames: 0, what: `'${s.clip}'`, unknown: true };
+    const about = named.get(s.clip);
+    return { frames: about?.frames ?? 0, what: `clip '${s.clip}'`, missing: !about };
+  };
+
   const segments = [];
   let t = 0;
   for (const [i, s] of (spec.timeline ?? [{ from: 0, to: footage.frames, speed: 1 }]).entries()) {
+    const of = lengthOf(s);
+    if (of.unknown) { errors.push(`timeline.${i}: there is no clip called '${s.clip}'; name it under clips`); continue; }
+    if (of.missing) { errors.push(`timeline.${i}: ${of.what} has no video to play`); continue; }
+    const end = of.frames - 1;
     if ('hold' in s) {
-      if (s.hold > last) errors.push(`timeline.${i}: frame ${s.hold} is past the end of the clip (its last frame is ${last})`);
-      segments.push({ from: t, to: t + s.frames, source: Math.min(s.hold, last), hold: true });
+      if (s.hold > end) errors.push(`timeline.${i}: frame ${s.hold} is past the end of ${of.what} (its last frame is ${end})`);
+      segments.push({ from: t, to: t + s.frames, source: Math.min(s.hold, end), hold: true, ...(s.clip ? { clip: s.clip } : {}) });
       t += s.frames;
       continue;
     }
-    const to = Math.min(s.to, footage.frames);
-    if (s.from > last) { errors.push(`timeline.${i}: frame ${s.from} is past the end of the clip (its last frame is ${last})`); continue; }
-    if (s.to > footage.frames) warnings.push(`timeline.${i}: the clip ends at frame ${footage.frames}, so this part stops there`);
+    const to = Math.min(s.to, of.frames);
+    if (s.from > end) { errors.push(`timeline.${i}: frame ${s.from} is past the end of ${of.what} (its last frame is ${end})`); continue; }
+    if (s.to > of.frames) warnings.push(`timeline.${i}: ${of.what} ends at frame ${of.frames}, so this part stops there`);
     if (to <= s.from) { errors.push(`timeline.${i}: 'to' must be after 'from'`); continue; }
     const length = Math.ceil((to - s.from) / s.speed);
-    segments.push({ from: t, to: t + length, source: s.from, sourceTo: to, speed: s.speed });
+    segments.push({ from: t, to: t + length, source: s.from, sourceTo: to, speed: s.speed, ...(s.clip ? { clip: s.clip } : {}) });
     t += length;
   }
   const duration = t;
@@ -597,6 +629,7 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     if (zooms[k].from < zooms[k - 1].to) errors.push(`layers.${zooms[k].i} (zoom): overlaps the zoom in layers.${zooms[k - 1].i}; one zoom at a time`);
   for (const name of Object.keys(spec.anchors)) if (!used.has(name)) warnings.push(`anchors.${name}: defined but not used by any layer`);
   for (const point of spec.world) if (!usedWorld.has(point.name)) warnings.push(`world '${point.name}': defined but not used by any layer`);
+  for (const c of spec.clips) if (!usedClips.has(c.name)) warnings.push(`clips '${c.name}': named but not played by any part of the timeline`);
   // Each cue gets its length worked out (to the end of the file unless cut), so the renderer and the
   // answer to ChatGPT agree on when every sound starts and stops.
   const cues = [];
@@ -909,6 +942,27 @@ it. If the table crosses more than about a third of the frame, a layer pinned to
   cutting at the frame it returns to 0.31 costs nothing and keeps the title centred.
 - The shift is measured from the anchor's FIRST keyframe, so layers are unshifted before it: keyframe
   the anchor from the frame the move starts and everything earlier stays put on its own.
+
+## Cutting several clips together, and animations with no clip at all
+An edit belongs to one clip, but it does not have to only show that clip.
+- new_animation makes a blank canvas: a size and a length with no video behind it, for an animation drawn
+  entirely from layers on the edit's background colour. Use it when the owner asks for an animation
+  rather than for something over their own footage. It has no clip, so no anchors, follow, illustrate,
+  depth, world or zoom; place everything with at and path in 0-1 of the frame.
+- To cut between videos, name them in "clips" and say which one each part of the timeline plays:
+  "clips": [{"name": "wide", "footage": "<id from list_footage>"}, {"name": "close", "footage": "<id>"}],
+  "timeline": [{"clip": "wide", "from": 0, "to": 40}, {"clip": "close", "from": 12, "to": 44},
+               {"clip": "wide", "from": 90, "to": 150, "speed": 0.5}]
+  A timeline entry with no "clip" plays the edit's own clip, so a trailer can be built either on one of
+  the clips or on a blank canvas that holds nothing but the cuts. Each entry is bounded by the length of
+  the clip IT plays, and save_edit says so when a cut runs past the end of one.
+- Clips keep their own shape: a portrait clip and a landscape one each fill the frame the way "fit" says,
+  rather than being squeezed into the shape of whichever clip the edit belongs to.
+- Text, stickers, graphics, particles, models and sounds sit over the whole thing as usual, so titles and
+  music carry across the cuts.
+- Anchors, depth, world spots and the camera track belong to the edit's OWN clip: they are read in that
+  clip's source frames, and mean nothing during a part that plays a different video. Keep them for edits
+  built on one clip.
 
 ## Putting something in the room, not on the screen
 \`at\` and \`path\` place a layer on the SCREEN: it stays where you put it while the footage moves behind it.
