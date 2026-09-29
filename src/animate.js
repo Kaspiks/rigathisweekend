@@ -775,7 +775,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     server.registerTool('create_upload_link', {
       description: 'A one-time 30-minute link for sending a sandbox file to a clip. kind: picture (PNG/JPEG/WebP, default), model (.glb, textures embedded, no Draco), sound (MP3/WAV/OGG/FLAC/M4A, up to 3 min), depth (greyscale MP4, near = white, one frame per clip frame), track (camera track JSON recorded while filming by an AR app). PUT or POST the raw file as the body: curl --fail -T file \"<url>\".',
       inputSchema: { footage: Id.optional().describe('The clip this belongs to; leave out for kind video, which makes a new one'), kind: z.enum(['picture', 'model', 'sound', 'depth', 'track', 'video']).default('picture'), name: AssetName.optional().describe('Required for a picture, model or sound'), title: z.string().trim().min(1).max(80).optional().describe('What the clip is, for kind video') }, annotations: write,
-    }, async ({ footage, kind, name }) => {
+    }, async ({ footage, kind, name, title }) => {
       // A video has no clip to belong to: the link makes one, waiting for the file, and the upload
       // fills it in. Everything else attaches to a clip that is already here.
       const f = kind === 'video'
