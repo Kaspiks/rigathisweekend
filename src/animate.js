@@ -5,7 +5,7 @@
 import express from 'express';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, rename, rm } from 'node:fs/promises';
+import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import sharp from 'sharp';
 import { z } from 'zod';
@@ -28,6 +28,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const Id = z.string().regex(FOOTAGE_ID).describe('Footage id from list_footage');
 const AssetName = z.string().regex(ASSET_NAME).describe('Name edits use for the picture: lowercase letters, digits and dashes, e.g. pasta-drawn');
 const MAX_ASSET = 15 * 1048576, MAX_DEPTH = 1024 * 1048576, LINK_MINUTES = 30;
+// A clip fetched from a link or handed over as a file is held in memory while it is checked, so it is
+// capped well below what an upload link allows; anything bigger should stream straight to disk.
+const MAX_FETCHED_VIDEO = 220 * 1048576;
 const tokenHash = token => createHash('sha256').update(token).digest('hex');
 // What an edit is checked against: the working copy, and whether per-frame depth has been uploaded for it.
 const clipInfo = f => ({ ...f.info.work, depth: f.info.depth ?? null, track: f.info.track ?? null, blank: !!f.info.blank });
@@ -45,6 +48,26 @@ async function storeTrack(store, id, body) {
   const { trackJob, ...info } = store.footage(f.id).info;
   store.updateFootage(f.id, { info: { ...info, track: summary } });
   return { footage: f.id, track: summary };
+}
+
+// Taking in a new clip, however it arrived. `write` puts the original on disk - streamed from a request
+// for a big upload, or written from a buffer for a file or link handed over - and the rest is the same
+// either way: probe it, refuse it if it is too long, then hand it to the background transcoder.
+export async function intakeVideo(store, env, name, write) {
+  const id = newFootageId(), files = footageFiles(store.dir, id), max = limits(env);
+  store.addFootage(id, cleanName(name));
+  try {
+    await mkdir(files.dir, { recursive: true });
+    await write(files.source, max);
+    const info = describe(await probe(files.source));
+    if (info.duration > max.seconds) throw fail(`That clip is ${Math.round(info.duration)} s long; keep footage under ${max.seconds} s (FOOTAGE_MAX_SECONDS)`);
+    store.updateFootage(id, { status: 'processing', info: { source: info } });
+  } catch (err) {
+    store.deleteFootage(id);
+    await rm(files.dir, { recursive: true, force: true });
+    throw err;
+  }
+  return id;
 }
 
 // An animation with no clip behind it. Kept as a footage row with `info.blank`, rather than a second
@@ -84,7 +107,7 @@ async function readBody(req, max) {
   }
   return Buffer.concat(chunks);
 }
-export function uploadLinkRoute(store) {
+export function uploadLinkRoute(store, env = process.env) {
   const upload = async (req, res) => {
     const hash = tokenHash(req.params[0]);
     res.set('Cache-Control', 'no-store');
@@ -92,6 +115,24 @@ export function uploadLinkRoute(store) {
     if (!link) return res.status(404).json({ error: 'This upload link does not exist, was already used or has expired; ask for a new one' });
     try {
       if (/multipart\/form-data/i.test(req.headers['content-type'] || '')) throw fail('Send the file itself as the body (curl --data-binary @file or -T file), not as a form');
+      if (link.kind === 'video') {
+        // The clip row was made when the link was, so the original streams straight into its folder
+        // rather than through memory: this is the door for footage too big to hand over as a file.
+        const f = store.footage(link.footage);
+        if (f.status !== 'uploading') throw fail('That link has already been used', 409);
+        const files = footageFiles(store.dir, f.id), max = limits(env);
+        await mkdir(files.dir, { recursive: true });
+        await receive(req, files.source, max.bytes);
+        const info = describe(await probe(files.source));
+        if (info.duration > max.seconds) throw fail(`That clip is ${Math.round(info.duration)} s long; keep footage under ${max.seconds} s (FOOTAGE_MAX_SECONDS)`);
+        store.updateFootage(f.id, { status: 'processing', info: { source: info } });
+        store.finishUploadLink(hash);
+        // createAnimator puts the transcoder here; the two are mounted separately, so the route
+        // reaches it through the app rather than through an argument it would have to be given first.
+        req.app.locals.queueProcessing?.(f.id);
+        res.status(201).json({ footage: f.id, status: 'processing' });
+        return;
+      }
       if (link.kind === 'depth') {
         const f = store.footage(link.footage);
         if (f.status !== 'ready') throw fail('The clip is not ready yet', 409);
@@ -190,6 +231,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }
   }
   const queueProcessing = id => tracked(processing = processing.then(() => processClip(id)));
+  app.locals.queueProcessing = queueProcessing;
 
   // Depth made here (src/depth.js), one clip at a time. Its state lives in the clip's info as depthJob
   // while it is waiting or running, or failed with the reason; finished depth replaces info.depth.
@@ -435,19 +477,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }) });
   });
   app.post('/api/footage', async (req, res) => {
-    const id = newFootageId(), files = footageFiles(store.dir, id), max = limits(env);
-    store.addFootage(id, cleanName(req.query.name));
-    try {
-      await mkdir(files.dir, { recursive: true });
-      await receive(req, files.source, max.bytes);
-      const info = describe(await probe(files.source));
-      if (info.duration > max.seconds) throw fail(`That clip is ${Math.round(info.duration)} s long; keep footage under ${max.seconds} s (FOOTAGE_MAX_SECONDS)`);
-      store.updateFootage(id, { status: 'processing', info: { source: info } });
-    } catch (err) {
-      store.deleteFootage(id);
-      await rm(files.dir, { recursive: true, force: true });
-      throw err;
-    }
+    const id = await intakeVideo(store, env, req.query.name, (file, max) => receive(req, file, max.bytes));
     queueProcessing(id);
     res.status(202).json(await summary(store.footage(id)));
   });
@@ -744,14 +774,24 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
 
     server.registerTool('create_upload_link', {
       description: 'A one-time 30-minute link for sending a sandbox file to a clip. kind: picture (PNG/JPEG/WebP, default), model (.glb, textures embedded, no Draco), sound (MP3/WAV/OGG/FLAC/M4A, up to 3 min), depth (greyscale MP4, near = white, one frame per clip frame), track (camera track JSON recorded while filming by an AR app). PUT or POST the raw file as the body: curl --fail -T file \"<url>\".',
-      inputSchema: { footage: Id, kind: z.enum(['picture', 'model', 'sound', 'depth', 'track']).default('picture'), name: AssetName.optional().describe('Required for a picture, model or sound') }, annotations: write,
+      inputSchema: { footage: Id.optional().describe('The clip this belongs to; leave out for kind video, which makes a new one'), kind: z.enum(['picture', 'model', 'sound', 'depth', 'track', 'video']).default('picture'), name: AssetName.optional().describe('Required for a picture, model or sound'), title: z.string().trim().min(1).max(80).optional().describe('What the clip is, for kind video') }, annotations: write,
     }, async ({ footage, kind, name }) => {
-      const f = store.footage(footage);
-      if (!['depth', 'track'].includes(kind) && !name) throw fail(`Give the ${kind} a name`);
+      // A video has no clip to belong to: the link makes one, waiting for the file, and the upload
+      // fills it in. Everything else attaches to a clip that is already here.
+      const f = kind === 'video'
+        ? store.addFootage(newFootageId(), cleanName(title || name || 'Clip'))
+        : store.footage(footage ?? '');
+      if (!['depth', 'track', 'video'].includes(kind) && !name) throw fail(`Give the ${kind} a name`);
       if (['depth', 'track'].includes(kind) && f.status !== 'ready') throw fail('The clip is not ready yet', 409);
       const token = randomBytes(24).toString('base64url'), expires = new Date(Date.now() + LINK_MINUTES * 60000);
-      store.addUploadLink(tokenHash(token), f.id, ['depth', 'track'].includes(kind) ? kind : name, expires, kind);
+      store.addUploadLink(tokenHash(token), f.id, ['depth', 'track', 'video'].includes(kind) ? kind : name, expires, kind);
       const url = `${origin}/u/${token}`;
+      if (kind === 'video') {
+        const max = limits(env);
+        return text({ url, expires: expires.toISOString(), footage: f.id, kind, name: f.name, maxMB: max.bytes / 1048576, maxSeconds: max.seconds,
+          upload: `curl --fail -sS -T /path/to/clip.mp4 "${url}"`,
+          then: 'The server makes a 30 fps working copy in the background. Watch list_footage until this clip is ready; it then has a frame count and can be animated, or named in another edit\'s clips to cut between videos.' });
+      }
       if (kind === 'track') return text({ url, expires: expires.toISOString(), footage: f.id, kind, maxMB: MAX_TRACK / 1048576, frames: f.info.work.frames, fps: FPS,
         upload: `curl --fail -sS -H 'content-type: application/json' -T /path/to/track.json "${url}"`,
         format: '{"frames":[{"t":<seconds>,"matrix":[16 numbers]}...],"intrinsics":{"fx","fy","width","height"}}, or "position"+"quaternion" [x,y,z,w] per frame and "fovY" in degrees. Optional: "convention" opengl|opencv (default opengl, which is ARKit and three.js), "space" camera-to-world|world-to-camera, "roll" 0|90|-90|180 if the video was rotated on export, "up" [x,y,z], "points" for placing a spot seen on one frame only.',
@@ -872,6 +912,28 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const values = await depthAt(file, points);
       const image = await sharp(file).resize({ width: 540, withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
       return picture(image, { footage: f.id, ...(asset ? { asset } : { frame }), points: points.map((p, i) => ({ ...p, depth: values[i] })), note: '1 is nearest, 0 farthest' });
+    });
+
+    server.registerTool('add_video', {
+      description: 'Adds a video clip to animate over, from a file in this conversation or a public HTTPS link. The server makes a 30 fps working copy in the background; list_footage shows it as processing, then ready with its frame count. Use it when the owner gives you footage to work with, or to bring in the clips a montage cuts between. For anything over about 200 MB, use create_upload_link with kind video instead.',
+      inputSchema: {
+        name: z.string().trim().min(1).max(80).describe('What this clip is, for the dashboard'),
+        file: z.object({ download_url: z.string().url(), file_id: z.string(), mime_type: z.string().optional(), file_name: z.string().optional() }).optional().describe('The video as a ChatGPT file'),
+        url: z.string().url().max(2000).optional().describe('Or a public HTTPS link to the video file itself (not a page it is embedded in)'),
+      },
+      annotations: { ...write, openWorldHint: true },
+      _meta: { 'openai/fileParams': ['file'] },
+    }, async ({ name, file, url }) => {
+      const source = file?.download_url || url;
+      if (!source) throw fail('No video arrived. Attach it to the conversation, give a direct link to the file, or use create_upload_link with kind video');
+      let got;
+      try { got = await fetchPublic(source, 'video/*, application/octet-stream, */*', MAX_FETCHED_VIDEO, fetcher, 120000); }
+      catch (err) { throw fail(`Could not fetch the video (${err.message}). If it is large, use create_upload_link with kind video and curl it up instead`); }
+      const id = await intakeVideo(store, env, name, async (dest) => { await writeFile(dest, got.buffer); });
+      queueProcessing(id);
+      const f = store.footage(id);
+      return text({ footage: id, name: f.name, status: f.status, mb: Math.round(got.buffer.length / 104857.6) / 10,
+        then: 'Watch list_footage until this clip is ready; it then has a frame count and can be animated, or named in another edit\'s clips to cut between videos.' });
     });
 
     server.registerTool('add_picture', {

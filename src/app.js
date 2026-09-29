@@ -34,7 +34,7 @@ export function createApp(store,env=process.env,{fetcher=fetch,animator:animator
     res.redirect(302,url);
   });
   // One-time upload links for pictures ChatGPT sends from its sandbox: the token is the permission.
-  app.use(uploadLinkRoute(store));
+  app.use(uploadLinkRoute(store,env));
   const link=captionLinker(store,env);
   const hasPhoto=(e,i)=>existsSync(uploadPath(store.dir,e.id,i))||existsSync(resolve(store.dir,'media',e.id,`photo-${i}.jpg`));
   const gridsFor=e=>eventsByDay(e.data,e.approved?e.selected:null).map(({date,items})=>{

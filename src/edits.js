@@ -819,6 +819,10 @@ export const GUIDE = `# Animating over footage
 
 You direct; the server renders. Work in this order:
 
+0. Need a clip that is not here yet? add_video takes a file from the conversation or a public HTTPS
+   link to the video itself, and the server makes the 30 fps working copy in the background. Over about
+   200 MB, use create_upload_link with kind video and curl it up instead. Either way, watch list_footage
+   until the clip is ready. new_animation instead makes a blank canvas with no video at all.
 1. list_footage: pick a clip whose status is ready. Frame numbers are at 30 fps (frame 90 = 3.00 s).
 2. sample_footage: a contact sheet of the clip, each picture labelled with its SOURCE frame and time.
    Narrow in with from/to to find the exact frame something happens (a fork lifting food, a pour, a turn).
@@ -1100,6 +1104,8 @@ An edit belongs to one clip, but it does not have to only show that clip.
   entirely from layers on the edit's background colour. Use it when the owner asks for an animation
   rather than for something over their own footage. It has no clip, so no anchors, follow, illustrate,
   depth, world or zoom; place everything with at and path in 0-1 of the frame.
+- The clips have to be here first: add_video brings one in from a file or a link, create_upload_link
+  with kind video takes a big one by curl, or the owner uploads it on the dashboard.
 - To cut between videos, name them in "clips" and say which one each part of the timeline plays:
   "clips": [{"name": "wide", "footage": "<id from list_footage>"}, {"name": "close", "footage": "<id>"}],
   "timeline": [{"clip": "wide", "from": 0, "to": 40}, {"clip": "close", "from": 12, "to": 44},
