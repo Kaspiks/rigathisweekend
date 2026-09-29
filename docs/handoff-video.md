@@ -104,6 +104,30 @@ Still to do:
   history" section on the dashboard showing every render ever made across all clips and animations.
   Each clip card also lists all its edit versions, newest first.
 
+## Grading, dissolves and speed ramps
+- `src/grade.js` is the colour grading board: ten named film looks, each with what it is for, the knobs
+  it sets, and the colours it pulls a picture towards. `list_looks` hands ChatGPT the board; `get_colors`
+  reads a frame's main colours and scores every look against them in Lab space (RGB distance does not
+  match what the eye calls "the same colour"), so a look can be chosen to suit the shot rather than
+  fought against it. A warm/cyan shot scores teal-orange 100; a grey one scores bleach-bypass 100.
+- A `grade` layer colours the PICTURES and leaves text and graphics alone. It names a look, mixes it in
+  at `strength`, and may override any knob (exposure, contrast, saturation, temperature, tint, lift,
+  gain, fade, vignette, grain) plus letterbox `bars` at 2.39/2.00/1.85. One grade at a time.
+  The look is resolved to plain numbers by planEdit and stored with the edit, so the renderer needs no
+  copy of the board and tuning a look later cannot change an edit that was already approved. Because of
+  that, `knobs` MUST stay declared on the Grade schema: a saved spec is read back through it, and when
+  it was missing every preview and render of a perfectly-saved edit failed on `unrecognized_keys`.
+- `dissolve` on a timeline entry overlaps it with the shot before, so the edit gets shorter; the first
+  shot has nothing to dissolve from and a too-long dissolve is clamped. For a dip to black, cut and put
+  a `flash` with `color: black` over the join.
+- `ramp` is the speed a shot ENDS at, eased from `speed`. It is built as ten stepped constant-rate
+  pieces, not a curve, because one video element plays at one rate. Split by SOURCE frames so the shot
+  still ends exactly where it was asked to.
+- `test/grade.test.js` covers the board, the matching, the save/re-read round trip, dissolve arithmetic
+  and ramp monotonicity. `npm test`: 78 pass.
+- Verified in pictures: six looks side by side on one frame, all clearly distinct, vignette and grain
+  visible; and a trailer cutting three clips with dissolves, a slow-down ramp and 2.39 bars.
+
 ## Other notes
 - `remotion/src/PinboardStory.tsx` (owner's) imports `./autumnOpener`, which is not in the repo. Nothing
   imports PinboardStory yet, so renders are unaffected, but `tsc` reports it.
