@@ -21,9 +21,9 @@ export type ImageLayer = Span & { type: 'image'; asset: string; place: 'footage'
 export type ZoomLayer = Span & { type: 'zoom'; scale: number; focus: Place };
 export type ShakeLayer = Span & { type: 'shake'; strength: number };
 export type FlashLayer = Span & { type: 'flash'; color: string };
-export type GradeKnobs = { exposure: number; contrast: number; saturation: number; temperature: number; tint: number; lift: string; gain: string; fade: number; vignette: number; grain: number };
+export type GradeKnobs = { exposure: number; contrast: number; saturation: number; temperature: number; tint: number; lift: string; gain: string; fade: number; vignette: number; grain: number; halation?: number; aberration?: number };
 // A grade's look is already resolved to plain numbers by the time the renderer sees it (src/grade.js).
-export type GradeLayer = Span & { type: 'grade'; look?: string; strength: number; knobs: GradeKnobs; bars: 'none' | '2.39' | '2.00' | '1.85' | number };
+export type GradeLayer = Span & { type: 'grade'; look?: string; clip?: string; strength: number; knobs: GradeKnobs; bars: 'none' | '2.39' | '2.00' | '1.85' | number };
 export type SequenceLayer = Span & { type: 'sequence'; asset: string; count: number; columns?: number; range?: { from: number; to: number }; playback?: 'loop' | 'once' | 'pingpong'; rotate?: number; spin?: number; blend?: Blend; glow?: number; tint?: string; fps: number; loop: boolean; at?: Place; offset?: Point; path?: PathKey[]; facing: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none'; motion: 'none' | 'bob' | 'sway' };
 export type Track = { frame: number; value: number }[];
 export type ParticlesLayer = Span & { type: 'particles'; shape?: 'dot' | 'soft' | 'spark' | 'star' | 'ring' | 'streak' | 'heart' | 'confetti' | 'square'; asset?: string; count: number; columns?: number; fps: number;
@@ -55,7 +55,8 @@ export type Level = { frame: number; value: number }[];
 export type SoundCue = { sound: string; file?: string; at: number; length: number; volume: number; from: number; loop: boolean; fadeIn: number; fadeOut: number; speed: number; volumeKeys?: Level; duck?: number };
 export type Spec = { format: string; fit: 'cover' | 'contain'; background: string; audio: 'source' | 'mute'; anchors: Record<string, Keyframe[]>; layers: Layer[]; depth?: DepthSpec;
   sounds?: SoundCue[]; sourceVolume?: number; sourceKeys?: Level };
-export type Segment = { from: number; to: number; source: number; hold?: boolean; sourceTo?: number; speed?: number; clip?: string; dissolve?: number };
+export type Enter = { kind: 'dissolve' | 'wipe' | 'slide' | 'push'; frames: number; from: 'left' | 'right' | 'up' | 'down' };
+export type Segment = { from: number; to: number; source: number; hold?: boolean; sourceTo?: number; speed?: number; clip?: string; enter?: Enter };
 export type Plan = { width: number; height: number; fps: number; durationInFrames: number; segments: Segment[] };
 export type Asset = { src: string; width: number; height: number };
 export type DepthFrames = { base: string; frames: number };

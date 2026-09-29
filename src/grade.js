@@ -21,6 +21,8 @@ export const NEUTRAL = {
   fade: 0,            // 0…1, milky lifted blacks, like an old print
   vignette: 0,        // 0…1, darkening towards the corners
   grain: 0,           // 0…1, film grain
+  halation: 0,        // 0…1, warm bloom out of the highlights
+  aberration: 0,      // 0…1, colour fringing, as a lens gives
 };
 
 // The board. `palette` is what each look pulls a picture towards, darkest first; it is what matchLooks
@@ -44,7 +46,7 @@ export const LOOKS = {
   'golden-hour': {
     about: 'Late afternoon sun: warm, soft and slightly hazy. Flatters food, faces and wood.',
     palette: ['#3a2a1c', '#8a5a2f', '#d9a05b', '#f6e0b4'],
-    set: { temperature: 0.42, exposure: 0.18, contrast: -0.06, saturation: 0.16, lift: '#8a7f6e', gain: '#918872', fade: 0.1, vignette: 0.18 },
+    set: { temperature: 0.42, exposure: 0.18, contrast: -0.06, saturation: 0.16, lift: '#8a7f6e', gain: '#918872', fade: 0.1, vignette: 0.18, halation: 0.26 },
   },
   moonlight: {
     about: 'Night without blackness: cool blue, low key, everything a little under. For evening streets and windows.',
@@ -54,7 +56,7 @@ export const LOOKS = {
   'vintage-film': {
     about: 'An old print: faded blacks, warm highlights, grain. For anything that should feel remembered rather than filmed.',
     palette: ['#33302a', '#6f6252', '#b49a78', '#e8d9bd'],
-    set: { fade: 0.26, temperature: 0.22, saturation: -0.14, contrast: 0.08, lift: '#8d8577', gain: '#8f8877', grain: 0.3, vignette: 0.26 },
+    set: { fade: 0.26, temperature: 0.22, saturation: -0.14, contrast: 0.08, lift: '#8d8577', gain: '#8f8877', grain: 0.3, vignette: 0.26, halation: 0.3, aberration: 0.16 },
   },
   'cold-thriller': {
     about: 'Drained cyan-green with hard shadows. Tension, hospitals, rain.',
@@ -74,7 +76,7 @@ export const LOOKS = {
   'neon-night': {
     about: 'Crushed blacks with magenta and cyan in the lights. Bars, signs, late cities.',
     palette: ['#08060f', '#2a1040', '#b3319a', '#3fd0e0'],
-    set: { contrast: 0.4, saturation: 0.35, temperature: -0.18, tint: 0.2, lift: '#6b6a80', gain: '#8f8496', vignette: 0.36 },
+    set: { contrast: 0.4, saturation: 0.35, temperature: -0.18, tint: 0.2, lift: '#6b6a80', gain: '#8f8496', vignette: 0.36, halation: 0.42, aberration: 0.2 },
   },
 };
 export const LOOK_NAMES = Object.keys(LOOKS);
@@ -133,6 +135,6 @@ export { hexToRgb, rgbToHex };
 export function gradeKnobs(layer) {
   const out = layer.look ? lookKnobs(layer.look, layer.strength ?? 1) : { ...NEUTRAL };
   for (const k of Object.keys(NEUTRAL)) if (layer[k] != null) out[k] = layer[k];
-  for (const k of ['exposure', 'contrast', 'saturation', 'temperature', 'tint', 'fade', 'vignette', 'grain']) out[k] = +Number(out[k]).toFixed(4);
+  for (const k of ['exposure', 'contrast', 'saturation', 'temperature', 'tint', 'fade', 'vignette', 'grain', 'halation', 'aberration']) out[k] = +Number(out[k]).toFixed(4);
   return out;
 }

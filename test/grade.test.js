@@ -62,16 +62,16 @@ test('a dissolve overlaps the shots, so the edit gets shorter', () => {
   assert.equal(cut.plan.durationInFrames, 120);
   const mixed = plan([], [{ from: 0, to: 60 }, { from: 100, to: 160, dissolve: 12 }]);
   assert.equal(mixed.plan.durationInFrames, 108, 'twelve frames of overlap');
-  assert.equal(mixed.plan.segments[1].dissolve, 12);
+  assert.deepEqual(mixed.plan.segments[1].enter, { kind: 'dissolve', frames: 12, from: 'left' });
   assert.equal(mixed.plan.segments[1].from, 48, 'the second shot starts inside the first');
 });
 
 test('the first shot has nothing to dissolve from, and a long dissolve is cut to fit', () => {
   const first = plan([], [{ from: 0, to: 60, dissolve: 20 }]);
   assert.equal(first.plan.durationInFrames, 60);
-  assert.equal(first.plan.segments[0].dissolve, undefined);
+  assert.equal(first.plan.segments[0].enter, undefined);
   const long = plan([], [{ from: 0, to: 20 }, { from: 100, to: 160, dissolve: 60 }]);
-  assert.equal(long.plan.segments[1].dissolve, 20, 'no longer than the shot before it');
+  assert.equal(long.plan.segments[1].enter.frames, 20, 'no longer than the shot before it');
 });
 
 test('a speed ramp is a staircase between the two rates, ending where it was asked to', () => {
@@ -91,4 +91,53 @@ test('an edit with no timeline of its own still plans', () => {
   assert.equal(p.durationInFrames, clip.frames);
   assert.equal(p.segments.length, 1);
   assert.ok(Number.isInteger(p.segments[0].to), `to is ${p.segments[0].to}`);
+});
+
+test('a wipe, a slide and a push are planned like a dissolve but remembered as themselves', () => {
+  const { plan: p } = plan([], [
+    { from: 0, to: 40 },
+    { from: 60, to: 100, transition: { kind: 'wipe', frames: 10, from: 'right' } },
+    { from: 120, to: 160, transition: { kind: 'push', frames: 12, from: 'down' } },
+  ]);
+  assert.equal(p.segments[0].enter, undefined, 'the first shot has nothing to come in over');
+  assert.deepEqual(p.segments[1].enter, { kind: 'wipe', frames: 10, from: 'right' });
+  assert.deepEqual(p.segments[2].enter, { kind: 'push', frames: 12, from: 'down' });
+  assert.equal(p.durationInFrames, 120 - 10 - 12, 'every transition shortens the edit by its own length');
+});
+
+test('a shot is asked to arrive one way, not two', () => {
+  assert.throws(() => plan([], [{ from: 0, to: 40 }, { from: 60, to: 100, dissolve: 8, transition: { kind: 'wipe', frames: 10 } }]),
+    /either dissolve or transition/);
+});
+
+test('a freeze can be brought in the same ways a shot can', () => {
+  const { plan: p } = plan([], [{ from: 0, to: 60 }, { hold: 120, frames: 40, transition: { kind: 'slide', frames: 12, from: 'up' } }]);
+  assert.deepEqual(p.segments[1].enter, { kind: 'slide', frames: 12, from: 'up' });
+  assert.equal(p.segments[1].hold, true);
+  assert.equal(p.durationInFrames, 88);
+});
+
+test('one grade per clip may be on at once, two over the same pictures may not', () => {
+  const library = { aaaaaaaaaaaaaaaaaaaaaaaa: { frames: 253, width: 1080, height: 1920, blank: false }, bbbbbbbbbbbbbbbbbbbbbbbb: { frames: 200, width: 464, height: 832, blank: false } };
+  const clips = [{ name: 'a', footage: 'aaaaaaaaaaaaaaaaaaaaaaaa' }, { name: 'b', footage: 'bbbbbbbbbbbbbbbbbbbbbbbb' }];
+  const timeline = [{ clip: 'a', from: 0, to: 60 }, { clip: 'b', from: 0, to: 60 }];
+  const build = (layers) => planEdit({ format: 'vertical', anchors: {}, clips, timeline, layers }, clip, {}, {}, {}, {}, library);
+  // Matching two cameras to each other: a grade each, both live at the same time.
+  assert.doesNotThrow(() => build([
+    { type: 'grade', from: 0, to: 120, look: 'teal-orange', clip: 'a' },
+    { type: 'grade', from: 0, to: 120, look: 'moonlight', clip: 'b' },
+  ]));
+  assert.throws(() => build([
+    { type: 'grade', from: 0, to: 120, look: 'noir', clip: 'a' },
+    { type: 'grade', from: 60, to: 120, look: 'moonlight', clip: 'a' },
+  ]), /one grade at a time/);
+  assert.throws(() => build([{ type: 'grade', from: 0, to: 120, look: 'noir', clip: 'nope' }]), /no clip called 'nope'/);
+});
+
+test('halation and aberration come through a look and can be set on their own', () => {
+  const fromLook = plan([{ type: 'grade', from: 0, to: 100, look: 'neon-night' }]).spec.layers[0].knobs;
+  assert.ok(fromLook.halation > 0 && fromLook.aberration > 0, 'neon-night glows and fringes');
+  const byHand = plan([{ type: 'grade', from: 0, to: 100, halation: 0.5 }]).spec.layers[0].knobs;
+  assert.equal(byHand.halation, 0.5);
+  assert.equal(byHand.aberration, 0, 'the rest stays neutral');
 });

@@ -318,6 +318,8 @@ const Parallax = z.object({
 const Grade = z.object({
   type: z.literal('grade'), ...Span(),
   look: z.enum(LOOK_NAMES).optional().describe('A named film look (list_looks shows them with the colours each pulls towards, and get_colors says which suit a clip)'),
+  clip: z.string().regex(ANCHOR).optional()
+    .describe('Grade only the parts that play this clip, named in `clips`. That is how several cameras are matched to each other: one grade per clip, each pulling it towards the same place. Without it, the grade covers everything on screen'),
   strength: Unit().default(1).describe('How far towards the look, 0 none, 1 all of it'),
   exposure: z.number().min(-2).max(2).optional().describe('Stops brighter or darker'),
   contrast: z.number().min(-1).max(1).optional(),
@@ -329,6 +331,8 @@ const Grade = z.object({
   fade: Unit().optional().describe('Milky lifted blacks, like an old print'),
   vignette: Unit().optional().describe('Darkening towards the corners'),
   grain: Unit().optional().describe('Film grain'),
+  halation: Unit().optional().describe('Warm bloom bleeding out of the bright parts, the way film glows around a highlight. 0.2-0.4 is plenty'),
+  aberration: Unit().optional().describe('Colour fringing at the edges of things, as a cheap lens gives. Keep it small, 0.1-0.3'),
   bars: z.union([z.enum(['none', '2.39', '2.00', '1.85']), z.number().min(0).max(0.3)]).default('none')
     .describe('Letterbox bars over everything. A ratio ("2.39") crops to that shape, which suits a landscape or square edit; on a tall Reel it leaves a narrow strip, so give a fraction of the height instead (0.08 is a thin cinematic band top and bottom)'),
   // Worked out from the look when the edit is saved and kept with it, so the renderer needs no copy of
@@ -336,6 +340,7 @@ const Grade = z.object({
   knobs: z.object({
     exposure: z.number(), contrast: z.number(), saturation: z.number(), temperature: z.number(), tint: z.number(),
     lift: z.string(), gain: z.string(), fade: z.number(), vignette: z.number(), grain: z.number(),
+    halation: z.number(), aberration: z.number(),
   }).strict().optional().describe('Filled in when the edit is saved; do not write it yourself'),
 }).strict();
 
@@ -355,13 +360,26 @@ const Play = z.object({
   speed: z.number().min(0.25).max(4).default(1).describe('0.5 is half-speed slow motion; sound is muted when not 1'),
   clip: z.string().regex(ANCHOR).optional().describe('Which clip this bit comes from, named in `clips`. Left out, it is the edit\'s own clip'),
   dissolve: z.number().int().min(0).max(90).default(0)
-    .describe('Frames this shot takes to fade up over the one before it, instead of cutting. The two overlap, so the edit is that much shorter'),
+    .describe('Frames this shot takes to fade up over the one before it, instead of cutting. The two overlap, so the edit is that much shorter. For a wipe or a push, use `transition` instead'),
+  transition: z.object({
+    kind: z.enum(['dissolve', 'wipe', 'slide', 'push']).default('dissolve')
+      .describe('dissolve fades through; wipe uncovers this shot across the old one; slide brings it in over the top; push shoves the old one out as it comes'),
+    frames: z.number().int().min(1).max(90).describe('How long it takes; the two shots overlap for this long'),
+    from: z.enum(['left', 'right', 'up', 'down']).default('left').describe('The side it comes in from, for wipe, slide and push'),
+  }).strict().optional().describe('How this shot arrives. Instead of `dissolve`, which is the same as {"kind":"dissolve"}'),
   ramp: z.number().min(0.25).max(4).optional()
     .describe('Speed at the END of this shot, eased from `speed` at its start: a slow-down into a hit, or a ramp up out of one. Sound is muted across a ramp'),
 }).strict();
 const Hold = z.object({
   hold: Frame().describe('SOURCE frame to freeze on'),
   frames: z.number().int().min(1).max(30 * FPS).describe('How many OUTPUT frames the freeze lasts (silent)'),
+  clip: z.string().regex(ANCHOR).optional().describe('Which clip to freeze a frame of, named in `clips`. Left out, it is the edit\'s own clip'),
+  dissolve: z.number().int().min(0).max(90).default(0).describe('Frames this freeze takes to come up over the shot before it'),
+  transition: z.object({
+    kind: z.enum(['dissolve', 'wipe', 'slide', 'push']).default('dissolve'),
+    frames: z.number().int().min(1).max(90),
+    from: z.enum(['left', 'right', 'up', 'down']).default('left'),
+  }).strict().optional().describe('How the freeze arrives, instead of dissolve'),
 }).strict();
 
 // Sound effects and music on the timeline, in OUTPUT frames, from sound files uploaded for the clip.
@@ -493,6 +511,8 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     named.set(c.name, about ?? null);
   }
   const usedClips = new Set();
+  for (const [i, entry] of (spec.timeline ?? []).entries())
+    if (!('hold' in entry) && entry.dissolve && entry.transition) errors.push(`timeline.${i}: give either dissolve or transition, not both`);
   // How long the clip a timeline entry plays is, and what to call it when something is wrong.
   const lengthOf = (s) => {
     if (!s.clip) return { frames: footage.frames, what: footage.blank ? 'this animation' : 'the clip', missing: !!footage.blank };
@@ -511,9 +531,10 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     const end = of.frames - 1;
     if ('hold' in s) {
       if (s.hold > end) errors.push(`timeline.${i}: frame ${s.hold} is past the end of ${of.what} (its last frame is ${end})`);
-      const held = Math.min(s.dissolve ?? 0, segments.length ? segments.at(-1).to - segments.at(-1).from : 0, t);
+      const asked = s.transition ?? (s.dissolve ? { kind: 'dissolve', frames: s.dissolve, from: 'left' } : null);
+      const held = Math.min(asked?.frames ?? 0, segments.length ? segments.at(-1).to - segments.at(-1).from : 0, t);
       t -= held;
-      segments.push({ from: t, to: t + s.frames, source: Math.min(s.hold, end), hold: true, ...(s.clip ? { clip: s.clip } : {}), ...(held ? { dissolve: held } : {}) });
+      segments.push({ from: t, to: t + s.frames, source: Math.min(s.hold, end), hold: true, ...(s.clip ? { clip: s.clip } : {}), ...(held ? { enter: { kind: asked.kind, frames: held, from: asked.from } } : {}) });
       t += s.frames;
       continue;
     }
@@ -523,7 +544,9 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     if (to <= s.from) { errors.push(`timeline.${i}: 'to' must be after 'from'`); continue; }
     // A dissolve overlaps this shot with the one before it, so the edit gets shorter by that much. The
     // first shot has nothing to dissolve from.
-    const overlap = Math.min(s.dissolve ?? 0, segments.length ? segments.at(-1).to - segments.at(-1).from : 0, t);
+    const asked = s.transition ?? (s.dissolve ? { kind: 'dissolve', frames: s.dissolve, from: 'left' } : null);
+    const overlap = Math.min(asked?.frames ?? 0, segments.length ? segments.at(-1).to - segments.at(-1).from : 0, t);
+    const enter = overlap ? { kind: asked.kind, frames: overlap, from: asked.from } : null;
     t -= overlap;
     const ease = k => k * k * (3 - 2 * k);
     if (s.ramp != null && s.ramp !== s.speed) {
@@ -536,13 +559,13 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
         if (b <= a) continue;
         const rate = s.speed + (s.ramp - s.speed) * ease((k + 0.5) / STEPS);
         const piece = Math.max(1, Math.ceil((b - a) / rate));
-        segments.push({ from: t, to: t + piece, source: a, sourceTo: b, speed: rate, ...(s.clip ? { clip: s.clip } : {}), ...(k === 0 && overlap ? { dissolve: overlap } : {}) });
+        segments.push({ from: t, to: t + piece, source: a, sourceTo: b, speed: rate, ...(s.clip ? { clip: s.clip } : {}), ...(k === 0 && enter ? { enter } : {}) });
         t += piece;
       }
       continue;
     }
     const length = Math.ceil((to - s.from) / s.speed);
-    segments.push({ from: t, to: t + length, source: s.from, sourceTo: to, speed: s.speed, ...(s.clip ? { clip: s.clip } : {}), ...(overlap ? { dissolve: overlap } : {}) });
+    segments.push({ from: t, to: t + length, source: s.from, sourceTo: to, speed: s.speed, ...(s.clip ? { clip: s.clip } : {}), ...(enter ? { enter } : {}) });
     t += length;
   }
   const duration = t;
@@ -690,11 +713,22 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
       const strip = width / Number(layer.bars);
       if (strip < height * 0.6) warnings.push(`layers.${i} (grade): bars ${layer.bars} on a ${width}x${height} frame leave a strip only ${Math.round(strip)}px tall, so most of the picture is black. On a tall video give bars as a fraction of the height instead, e.g. 0.08`);
     }
+    if (layer.clip) {
+      usedClips.add(layer.clip);
+      if (!named.has(layer.clip)) errors.push(`layers.${i} (grade): there is no clip called '${layer.clip}'; name it under clips`);
+    }
     grades.push({ ...layer, i });
   }
+  // Two grades may only be on at once if they cannot both apply to the same picture: one per clip is
+  // the point of clip grades, but two that both cover everything would be arguing over the same frame.
   grades.sort((a, b) => a.from - b.from);
-  for (let k = 1; k < grades.length; k++)
-    if (grades[k].from < grades[k - 1].to) errors.push(`layers.${grades[k].i} (grade): overlaps the grade in layers.${grades[k - 1].i}; one grade at a time`);
+  for (let k = 1; k < grades.length; k++) {
+    const now = grades[k], before = grades[k - 1];
+    if (now.from >= before.to) continue;
+    if (now.clip && before.clip && now.clip !== before.clip) continue;
+    const which = now.clip ? `for clip '${now.clip}'` : 'covering everything';
+    errors.push(`layers.${now.i} (grade): overlaps the grade in layers.${before.i} ${which}; one grade at a time over the same pictures`);
+  }
   zooms.sort((a, b) => a.from - b.from);
   for (let k = 1; k < zooms.length; k++)
     if (zooms[k].from < zooms[k - 1].to) errors.push(`layers.${zooms[k].i} (zoom): overlaps the zoom in layers.${zooms[k - 1].i}; one zoom at a time`);
@@ -1032,13 +1066,27 @@ alone, which is how an editor works: you grade the picture, not the titles.
   frame to that shape, which is right for a landscape or square edit; on a tall Reel it leaves a narrow
   strip with most of the picture black, so give a fraction of the height instead - "bars": 0.08 is a
   thin band top and bottom. save_edit warns if a ratio would eat most of the frame.
-- One grade at a time. Two in a row is how you change look partway through.
+- One grade at a time over the same pictures. Two in a row is how you change look partway through.
+- "clip": "wide" grades only the parts that play that clip. That is how several cameras are matched to
+  each other - one grade per clip, each pulling it towards the same place - and those grades are all on
+  at once, because they never cover the same frame. A grade naming no clip covers everything else.
+- "halation" is the warm bloom film gives around a highlight, "aberration" the colour fringing a cheap
+  lens leaves at the edges of things. Both are small numbers: 0.2-0.4 and 0.1-0.3. Some looks bring
+  their own (vintage-film, neon-night, golden-hour).
 
-### Dissolves
-A timeline entry with "dissolve": 12 fades up over the shot before it for twelve frames instead of
-cutting. The two overlap, so the edit gets that much shorter - save_edit answers with the real length.
-The first shot has nothing to dissolve from, and a dissolve longer than the shot before it is shortened
-to fit. For a dip to black instead, cut as usual and put a flash layer with "color": "black" over the join.
+### How a shot arrives
+"dissolve": 12 fades a shot up over the one before it for twelve frames instead of cutting. For the
+others, use "transition" instead: {"kind": "wipe", "frames": 14, "from": "right"}.
+- dissolve  - fades through, the quiet one
+- wipe      - uncovers the new shot across the old one, which stays put
+- slide     - the new shot comes in over the top of the old one
+- push      - the new shot shoves the old one out of frame as it arrives
+"from" is the side it comes in on: left, right, up or down.
+Whichever it is, the two shots OVERLAP for that many frames, so the edit gets shorter - save_edit
+answers with the real length. The first shot has nothing to arrive over, and a transition longer than
+the shot before it is shortened to fit. A freeze can arrive the same ways. Give either dissolve or
+transition, not both. For a dip to black, cut as usual and put a flash layer with "color": "black"
+over the join.
 
 ### Speed ramps
 "speed" is the rate a shot starts at; "ramp" is the rate it ENDS at, eased between the two: {"from": 0,

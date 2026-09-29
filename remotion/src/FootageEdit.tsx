@@ -12,7 +12,7 @@ import '@fontsource/jetbrains-mono/700.css';
 import type { CSSProperties } from 'react';
 import { AbsoluteFill, Audio, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
 import { BoilFilter, GradeFilter, IllustrationFilter, SoftenFilter } from './edit/filters';
-import type { Asset, BlurLayer, Camera, FogLayer, FootageEditProps, GradeLayer, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
+import type { Asset, BlurLayer, Camera, Enter, FogLayer, FootageEditProps, GradeLayer, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
 import { PALETTE, baseScale, blendMode, glowFilter, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, sourceAt, travel, walked, worldAt, clipRect } from './edit/model';
 import { ModelView } from './edit/Model3D';
 import { ParticlesView } from './edit/Particles';
@@ -34,7 +34,7 @@ Promise.all([
 type Rect = { left: number; top: number; width: number; height: number };
 
 // The clip through its timeline. Rendered once as the picture and again, muted, under each drawing layer.
-const Footage = ({ props, rect, cam, muted, style }: { props: FootageEditProps; rect: Rect; cam: Camera; muted: boolean; style?: CSSProperties }) => {
+const Footage = ({ props, rect, cam, muted, style, gradeFor }: { props: FootageEditProps; rect: Rect; cam: Camera; muted: boolean; style?: CSSProperties; gradeFor?: (clip?: string) => readonly [unknown, number] | null }) => {
   const now = useCurrentFrame();
   const own = props.video;
   const segments = props.plan.segments.filter((s) => (s.clip ? props.videos?.[s.clip] : own));
@@ -42,13 +42,39 @@ const Footage = ({ props, rect, cam, muted, style }: { props: FootageEditProps; 
   // A cut from another clip brings its own shape, so it gets its own rectangle: a portrait phone clip and
   // a landscape one should each fill the frame the way the edit's fit says, not be squeezed into a shape
   // borrowed from whichever clip the edit happens to belong to.
-  // A shot that dissolves overlaps the one before it and fades up over it. Later segments are drawn
-  // last, so the incoming shot is already on top; all it needs is its opacity.
-  const box = (s: (typeof segments)[number]) => {
+  // A shot arriving over the one before it. Later segments are drawn last, so the incoming shot is
+  // already on top: a dissolve only needs its opacity, a wipe an inset that opens, and a slide a
+  // translate. A push also drags the outgoing shot along, which is why a segment looks at whether the
+  // NEXT one is pushing it out.
+  const ease = (t: number) => t * t * (3 - 2 * t);
+  const arriving = (s: (typeof segments)[number]) => (s.enter ? Math.max(0, Math.min(1, (now - s.from + 1) / s.enter.frames)) : 1);
+  const leaving = (i: number) => {
+    const next = segments[i + 1];
+    return next?.enter?.kind === 'push' && now >= next.from ? { t: ease(arriving(next)), from: next.enter.from } : null;
+  };
+  const shove = (t: number, from: Enter['from'], w: number, h: number) => {
+    const d = from === 'left' ? [-w, 0] : from === 'right' ? [w, 0] : from === 'up' ? [0, -h] : [0, h];
+    return `translate(${(d[0] * t).toFixed(1)}px, ${(d[1] * t).toFixed(1)}px)`;
+  };
+  const box = (s: (typeof segments)[number], i: number) => {
     const v = s.clip ? props.videos![s.clip] : null;
     const r = v ? clipRect(props, cam, v) : rect;
-    const fade = s.dissolve ? Math.max(0, Math.min(1, (now - s.from + 1) / s.dissolve)) : 1;
-    return { position: 'absolute' as const, left: r.left, top: r.top, width: r.width, height: r.height, objectFit: 'fill' as const, maxWidth: 'none', opacity: fade };
+    const g = gradeFor?.(s.clip);
+    const base = { position: 'absolute' as const, left: r.left, top: r.top, width: r.width, height: r.height, objectFit: 'fill' as const, maxWidth: 'none',
+      ...(g ? { filter: `url(#grade-${g[1]})` } : {}) };
+    const out = leaving(i);
+    if (out) return { ...base, transform: shove(out.t - 1, out.from, props.plan.width, props.plan.height) };
+    if (!s.enter) return base;
+    const t = ease(arriving(s));
+    if (s.enter.kind === 'dissolve') return { ...base, opacity: t };
+    if (s.enter.kind === 'wipe') {
+      // An inset that opens from the side it comes in on, so the new shot is uncovered rather than moved.
+      const gone = `${((1 - t) * 100).toFixed(2)}%`;
+      const inset = s.enter.from === 'left' ? `0 ${gone} 0 0` : s.enter.from === 'right' ? `0 0 0 ${gone}`
+        : s.enter.from === 'up' ? `0 0 ${gone} 0` : `${gone} 0 0 0`;
+      return { ...base, clipPath: `inset(${inset})` };
+    }
+    return { ...base, transform: shove(t - 1, s.enter.from, props.plan.width, props.plan.height) };
   };
   return (
     <AbsoluteFill style={{ overflow: 'hidden', ...style }}>
@@ -59,8 +85,8 @@ const Footage = ({ props, rect, cam, muted, style }: { props: FootageEditProps; 
             {s.hold
               // Remotion keeps a video's frame inside its sequence, so a freeze stops at the sequence's first
               // frame and the trim picks the source frame to show.
-              ? <Freeze frame={0}><OffthreadVideo src={src} trimBefore={s.source || undefined} muted style={box(s)} /></Freeze>
-              : <OffthreadVideo src={src} trimBefore={s.source || undefined} playbackRate={s.speed ?? 1} muted={muted || (s.speed ?? 1) !== 1} style={box(s)}
+              ? <Freeze frame={0}><OffthreadVideo src={src} trimBefore={s.source || undefined} muted style={box(s, i)} /></Freeze>
+              : <OffthreadVideo src={src} trimBefore={s.source || undefined} playbackRate={s.speed ?? 1} muted={muted || (s.speed ?? 1) !== 1} style={box(s, i)}
                 volume={muted ? undefined : (f) => sourceVolumeAt(props.spec, s.from + f)} />}
           </Sequence>
         );
@@ -151,8 +177,15 @@ export const FootageEdit = (props: FootageEditProps) => {
     layerPoint(props, cam, base, frame, layer as never, fallback);
   const active = (l: Layer) => frame >= l.from && frame < l.to;
   const drawings = spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'illustrate' && active(l));
-  // At most one grade is on at a time (planEdit refuses overlapping ones), so this is a find.
-  const grade = spec.layers.find((l): l is GradeLayer => l.type === 'grade' && active(l)) ?? null;
+  // Several grades can be on at once now, as long as they cover different clips: that is how two
+  // cameras are matched to each other. A grade naming a clip wins for that clip; one naming none is
+  // the fallback for everything else.
+  const grades = spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'grade' && active(l)) as (readonly [GradeLayer, number])[];
+  const gradeFor = (clip?: string) => grades.find(([g]) => g.clip && g.clip === clip) ?? grades.find(([g]) => !g.clip) ?? null;
+  const showing = plan.segments.find((sg) => frame >= sg.from && frame < sg.to) ?? plan.segments[0];
+  // Vignette and letterbox belong to the frame, not to one shot, so they come from whatever is grading
+  // the picture on screen now.
+  const grade = gradeFor(showing?.clip)?.[0] ?? null;
   const boils = spec.layers.some((l) => (l.type === 'image' && l.motion === 'boil' || l.type === 'model' && l.boil) && active(l));
 
   // Depth: one greyscale picture for this frame, laid exactly over the footage (so it follows zooms), turned
@@ -215,7 +248,7 @@ export const FootageEdit = (props: FootageEditProps) => {
             const [r, g, b] = hex(colour(l.color, PALETTE.paper)), s = l.strength * envelope(l, frame), st = Math.max(0.01, l.start);
             return <g key={`fog-${i}`}>{flat(`fogf-${i}`, `0 0 0 0 ${r}  0 0 0 0 ${g}  0 0 0 0 ${b}  ${nearRow(near, -s / st, s)}`)}</g>;
           })}
-          {grade ? <GradeFilter id="grade" knobs={grade.knobs} frame={frame} /> : null}
+          {grades.map(([g, i]) => <GradeFilter key={`grade-${i}`} id={`grade-${i}`} knobs={g.knobs} frame={frame} />)}
           {shift ? (
             <filter id="parallax" x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
               <feImage href={depthSrc!} x={rect.left} y={rect.top} width={rect.width} height={rect.height} preserveAspectRatio="none" result="depth" />
@@ -227,7 +260,7 @@ export const FootageEdit = (props: FootageEditProps) => {
         </defs>
       </svg>
       <AbsoluteFill style={shift ? { filter: 'url(#parallax)', transform: `scale(${1 + shift.scale / plan.width})` } : undefined}>
-        <Footage props={props} rect={rect} cam={cam} muted={spec.audio === 'mute'} style={grade ? { filter: `url(#grade)` } : undefined} />
+        <Footage props={props} rect={rect} cam={cam} muted={spec.audio === 'mute'} gradeFor={gradeFor} />
         {/* Drawings replace the footage, so they sit right over it and under everything else, whatever their
             place in the list. The filter works on a screen-sized layer: a zoomed-in picture costs no more. */}
         {drawings.map(([l, i]) => (

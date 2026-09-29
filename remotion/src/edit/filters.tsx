@@ -178,7 +178,7 @@ export const BoilFilter = ({ id, frame }: { id: string; frame: number }) => (
 // are composed into ONE slope and intercept per channel rather than stacked as four passes: fewer
 // passes, and no rounding to 8 bits between each of them. Temperature, tint and saturation are a matrix
 // after that, and the grain goes on last so it is not itself stretched by the contrast.
-export type Knobs = { exposure: number; contrast: number; saturation: number; temperature: number; tint: number; lift: string; gain: string; fade: number; vignette: number; grain: number };
+export type Knobs = { exposure: number; contrast: number; saturation: number; temperature: number; tint: number; lift: string; gain: string; fade: number; vignette: number; grain: number; halation?: number; aberration?: number };
 const channel = (hex: string, i: number) => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16) / 255;
 
 export const GradeFilter = ({ id, knobs, frame }: { id: string; knobs: Knobs; frame: number }) => {
@@ -196,7 +196,8 @@ export const GradeFilter = ({ id, knobs, frame }: { id: string; knobs: Knobs; fr
   // Warmth pulls red up and blue down; tint trades green against magenta.
   const t = knobs.temperature * 0.22, ti = knobs.tint * 0.16;
   const warm = [1 + t, 0, 0, 0, 0, 0, 1 - ti, 0, 0, 0, 0, 0, 1 - t, 0, 0, 0, 0, 0, 1, 0].join(' ');
-  const grain = knobs.grain * 0.38;
+  const grain = knobs.grain * 0.38, halation = knobs.halation ?? 0, fringe = (knobs.aberration ?? 0) * 6;
+  const last = fringe > 0 ? 'split' : halation > 0 ? 'bloomed' : 'graded';
   const bias = (0.5 - 0.5 * grain).toFixed(4), k = grain.toFixed(4);
   const grey = `${k} 0 0 0 ${bias}`;
   return (
@@ -208,13 +209,41 @@ export const GradeFilter = ({ id, knobs, frame }: { id: string; knobs: Knobs; fr
       </feComponentTransfer>
       <feColorMatrix in="levels" type="matrix" values={warm} result="warmed" />
       <feColorMatrix in="warmed" type="saturate" values={Math.max(0, 1 + knobs.saturation).toFixed(4)} result="graded" />
+      {/* Halation: film's highlights bleed into the emulsion around them, warm and soft. Keep only the
+          bright parts, blur them wide, push them red, and add that back on top of the picture. */}
+      {halation > 0 ? (
+        <>
+          <feComponentTransfer in="graded" result="tops">
+            <feFuncR type="linear" slope="3.2" intercept="-2.1" />
+            <feFuncG type="linear" slope="3.2" intercept="-2.1" />
+            <feFuncB type="linear" slope="3.2" intercept="-2.1" />
+          </feComponentTransfer>
+          <feGaussianBlur in="tops" stdDeviation={(6 + halation * 26).toFixed(1)} result="bloom" />
+          <feColorMatrix in="bloom" type="matrix" result="warmBloom"
+            values="1.15 0.05 0 0 0  0 0.62 0 0 0  0 0 0.34 0 0  0 0 0 1 0" />
+          <feComposite in="warmBloom" in2="graded" operator="arithmetic" k1="0" k2={(halation * 0.9).toFixed(3)} k3="1" k4="0" result="bloomed" />
+        </>
+      ) : null}
+      {/* Chromatic aberration: red and blue pulled apart, the way a cheap lens fails to land all three
+          colours in the same place. */}
+      {fringe > 0 ? (
+        <>
+          <feColorMatrix in={halation > 0 ? 'bloomed' : 'graded'} type="matrix" result="onlyR" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" />
+          <feOffset in="onlyR" dx={(-fringe).toFixed(2)} result="shiftR" />
+          <feColorMatrix in={halation > 0 ? 'bloomed' : 'graded'} type="matrix" result="onlyG" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0" />
+          <feColorMatrix in={halation > 0 ? 'bloomed' : 'graded'} type="matrix" result="onlyB" values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0" />
+          <feOffset in="onlyB" dx={fringe.toFixed(2)} result="shiftB" />
+          <feComposite in="shiftR" in2="onlyG" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="rg" />
+          <feComposite in="rg" in2="shiftB" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="split" />
+        </>
+      ) : null}
       {grain > 0 ? (
         <>
           <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed={1 + (frame % 71)} result="noise" />
           <feColorMatrix in="noise" type="matrix" values={`${grey}  ${grey}  ${grey}  0 0 0 0 1`} result="film" />
-          <feBlend in="graded" in2="film" mode="overlay" />
+          <feBlend in={last} in2="film" mode="overlay" />
         </>
-      ) : null}
+      ) : last === 'graded' ? null : <feComposite in={last} in2={last} operator="over" />}
     </filter>
   );
 };
