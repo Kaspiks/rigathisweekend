@@ -52,9 +52,14 @@ const Footage = ({ props, rect, cam, muted, style, gradeFor }: { props: FootageE
     const next = segments[i + 1];
     return next?.enter?.kind === 'push' && now >= next.from ? { t: ease(arriving(next)), from: next.enter.from } : null;
   };
-  const shove = (t: number, from: Enter['from'], w: number, h: number) => {
-    const d = from === 'left' ? [-w, 0] : from === 'right' ? [w, 0] : from === 'up' ? [0, -h] : [0, h];
-    return `translate(${(d[0] * t).toFixed(1)}px, ${(d[1] * t).toFixed(1)}px)`;
+  // `d` is where a shot coming in from that side waits before it arrives. The incoming shot travels d→0
+  // as the transition runs; a shot being PUSHED travels 0→−d, the opposite way, so the two always cover
+  // the frame between them and no gap opens up behind either of them.
+  const offscreen = (from: Enter['from'], w: number, h: number) =>
+    (from === 'left' ? [-w, 0] : from === 'right' ? [w, 0] : from === 'up' ? [0, -h] : [0, h]);
+  const shove = (k: number, from: Enter['from'], w: number, h: number) => {
+    const d = offscreen(from, w, h);
+    return `translate(${(d[0] * k).toFixed(1)}px, ${(d[1] * k).toFixed(1)}px)`;
   };
   const box = (s: (typeof segments)[number], i: number) => {
     const v = s.clip ? props.videos![s.clip] : null;
@@ -63,7 +68,7 @@ const Footage = ({ props, rect, cam, muted, style, gradeFor }: { props: FootageE
     const base = { position: 'absolute' as const, left: r.left, top: r.top, width: r.width, height: r.height, objectFit: 'fill' as const, maxWidth: 'none',
       ...(g ? { filter: `url(#grade-${g[1]})` } : {}) };
     const out = leaving(i);
-    if (out) return { ...base, transform: shove(out.t - 1, out.from, props.plan.width, props.plan.height) };
+    if (out) return { ...base, transform: shove(-out.t, out.from, props.plan.width, props.plan.height) };
     if (!s.enter) return base;
     const t = ease(arriving(s));
     if (s.enter.kind === 'dissolve') return { ...base, opacity: t };
@@ -74,7 +79,7 @@ const Footage = ({ props, rect, cam, muted, style, gradeFor }: { props: FootageE
         : s.enter.from === 'up' ? `0 0 ${gone} 0` : `${gone} 0 0 0`;
       return { ...base, clipPath: `inset(${inset})` };
     }
-    return { ...base, transform: shove(t - 1, s.enter.from, props.plan.width, props.plan.height) };
+    return { ...base, transform: shove(1 - t, s.enter.from, props.plan.width, props.plan.height) };
   };
   return (
     <AbsoluteFill style={{ overflow: 'hidden', ...style }}>
