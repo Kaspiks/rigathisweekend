@@ -4,6 +4,7 @@
 // clip); everything else uses OUTPUT frames (the finished video, after trims, holds and speed changes).
 import { z } from 'zod';
 import { FPS } from './footage.js';
+import { LOOK_NAMES, gradeKnobs } from './grade.js';
 
 export const FORMATS = { vertical: [1080, 1920], portrait: [1080, 1350], square: [1080, 1080], landscape: [1920, 1080] };
 export const MAX_OUTPUT_FRAMES = 180 * FPS; // Instagram Reels run to three minutes
@@ -310,6 +311,27 @@ const Parallax = z.object({
   amount: z.number().min(0.005).max(0.15).default(0.04).describe('How far the nearest things move, as a fraction of the frame width'),
 }).strict();
 
+// Colour grading over the pictures: a named film look, anything the edit wants to change itself, and
+// the bits that are not colour at all (vignette, grain, letterbox). It grades the FOOTAGE - the clips,
+// however many the timeline cuts between - and leaves text and graphics alone, which is how an editor
+// works: you grade the picture, not the titles.
+const Grade = z.object({
+  type: z.literal('grade'), ...Span(),
+  look: z.enum(LOOK_NAMES).optional().describe('A named film look (list_looks shows them with the colours each pulls towards, and get_colors says which suit a clip)'),
+  strength: Unit().default(1).describe('How far towards the look, 0 none, 1 all of it'),
+  exposure: z.number().min(-2).max(2).optional().describe('Stops brighter or darker'),
+  contrast: z.number().min(-1).max(1).optional(),
+  saturation: z.number().min(-1).max(1).optional().describe('-1 is black and white'),
+  temperature: z.number().min(-1).max(1).optional().describe('-1 cold blue, 1 warm orange'),
+  tint: z.number().min(-1).max(1).optional().describe('-1 green, 1 magenta'),
+  lift: Color().optional().describe('What black turns into: the colour in the shadows'),
+  gain: Color().optional().describe('What white turns into: the colour in the highlights'),
+  fade: Unit().optional().describe('Milky lifted blacks, like an old print'),
+  vignette: Unit().optional().describe('Darkening towards the corners'),
+  grain: Unit().optional().describe('Film grain'),
+  bars: z.enum(['none', '2.39', '2.00', '1.85']).default('none').describe('Letterbox bars to that width-to-height ratio, drawn over everything'),
+}).strict();
+
 const Zoom = z.object({
   type: z.literal('zoom'), ...Span(),
   scale: z.number().min(1).max(4).describe('1.5 fills the frame with the middle two thirds'),
@@ -319,12 +341,16 @@ const Zoom = z.object({
 const Shake = z.object({ type: z.literal('shake'), ...Span(), strength: Unit().default(0.4) }).strict();
 const Flash = z.object({ type: z.literal('flash'), ...Span(), color: Color().default('white') }).strict();
 
-export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Particles, Graphic, Model, Blur, Fog, Parallax, Zoom, Shake, Flash]);
+export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Particles, Graphic, Model, Blur, Fog, Parallax, Zoom, Shake, Flash, Grade]);
 
 const Play = z.object({
   from: Frame().describe('First SOURCE frame'), to: Frame().describe('SOURCE frame to stop before'),
   speed: z.number().min(0.25).max(4).default(1).describe('0.5 is half-speed slow motion; sound is muted when not 1'),
   clip: z.string().regex(ANCHOR).optional().describe('Which clip this bit comes from, named in `clips`. Left out, it is the edit\'s own clip'),
+  dissolve: z.number().int().min(0).max(90).default(0)
+    .describe('Frames this shot takes to fade up over the one before it, instead of cutting. The two overlap, so the edit is that much shorter'),
+  ramp: z.number().min(0.25).max(4).optional()
+    .describe('Speed at the END of this shot, eased from `speed` at its start: a slow-down into a hit, or a ramp up out of one. Sound is muted across a ramp'),
 }).strict();
 const Hold = z.object({
   hold: Frame().describe('SOURCE frame to freeze on'),
@@ -478,7 +504,9 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     const end = of.frames - 1;
     if ('hold' in s) {
       if (s.hold > end) errors.push(`timeline.${i}: frame ${s.hold} is past the end of ${of.what} (its last frame is ${end})`);
-      segments.push({ from: t, to: t + s.frames, source: Math.min(s.hold, end), hold: true, ...(s.clip ? { clip: s.clip } : {}) });
+      const held = Math.min(s.dissolve ?? 0, segments.length ? segments.at(-1).to - segments.at(-1).from : 0, t);
+      t -= held;
+      segments.push({ from: t, to: t + s.frames, source: Math.min(s.hold, end), hold: true, ...(s.clip ? { clip: s.clip } : {}), ...(held ? { dissolve: held } : {}) });
       t += s.frames;
       continue;
     }
@@ -486,8 +514,28 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     if (s.from > end) { errors.push(`timeline.${i}: frame ${s.from} is past the end of ${of.what} (its last frame is ${end})`); continue; }
     if (s.to > of.frames) warnings.push(`timeline.${i}: ${of.what} ends at frame ${of.frames}, so this part stops there`);
     if (to <= s.from) { errors.push(`timeline.${i}: 'to' must be after 'from'`); continue; }
+    // A dissolve overlaps this shot with the one before it, so the edit gets shorter by that much. The
+    // first shot has nothing to dissolve from.
+    const overlap = Math.min(s.dissolve ?? 0, segments.length ? segments.at(-1).to - segments.at(-1).from : 0, t);
+    t -= overlap;
+    const ease = k => k * k * (3 - 2 * k);
+    if (s.ramp != null && s.ramp !== s.speed) {
+      // Speed ramps are a staircase: one video element plays at one rate, so a smooth ramp is several
+      // short pieces at stepped rates. Split by SOURCE frames, so the shot still ends exactly where it
+      // was asked to, whatever the rounding does to each step's length.
+      const STEPS = 10, span = to - s.from;
+      for (let k = 0; k < STEPS; k++) {
+        const a = s.from + Math.round((span * k) / STEPS), b = s.from + Math.round((span * (k + 1)) / STEPS);
+        if (b <= a) continue;
+        const rate = s.speed + (s.ramp - s.speed) * ease((k + 0.5) / STEPS);
+        const piece = Math.max(1, Math.ceil((b - a) / rate));
+        segments.push({ from: t, to: t + piece, source: a, sourceTo: b, speed: rate, ...(s.clip ? { clip: s.clip } : {}), ...(k === 0 && overlap ? { dissolve: overlap } : {}) });
+        t += piece;
+      }
+      continue;
+    }
     const length = Math.ceil((to - s.from) / s.speed);
-    segments.push({ from: t, to: t + length, source: s.from, sourceTo: to, speed: s.speed, ...(s.clip ? { clip: s.clip } : {}) });
+    segments.push({ from: t, to: t + length, source: s.from, sourceTo: to, speed: s.speed, ...(s.clip ? { clip: s.clip } : {}), ...(overlap ? { dissolve: overlap } : {}) });
     t += length;
   }
   const duration = t;
@@ -624,6 +672,17 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
       if (layer.place === 'footage' && Math.abs(ratio - 1) > 0.03) warnings.push(`${where}: '${layer.asset}' is not the shape of the footage (${asset.width}×${asset.height} against ${footage.width}×${footage.height}), so it is cropped to cover it`);
     }
   }
+  // A grade's look is turned into plain numbers here and kept with the edit, so the renderer needs no
+  // copy of the board and an edit saved today still grades the same if a look is tuned tomorrow.
+  const grades = [];
+  for (const [i, layer] of spec.layers.entries()) {
+    if (layer.type !== 'grade') continue;
+    layer.knobs = gradeKnobs(layer);
+    grades.push({ ...layer, i });
+  }
+  grades.sort((a, b) => a.from - b.from);
+  for (let k = 1; k < grades.length; k++)
+    if (grades[k].from < grades[k - 1].to) errors.push(`layers.${grades[k].i} (grade): overlaps the grade in layers.${grades[k - 1].i}; one grade at a time`);
   zooms.sort((a, b) => a.from - b.from);
   for (let k = 1; k < zooms.length; k++)
     if (zooms[k].from < zooms[k - 1].to) errors.push(`layers.${zooms[k].i} (zoom): overlaps the zoom in layers.${zooms[k - 1].i}; one zoom at a time`);
@@ -942,6 +1001,35 @@ it. If the table crosses more than about a third of the frame, a layer pinned to
   cutting at the frame it returns to 0.31 costs nothing and keeps the title centred.
 - The shift is measured from the anchor's FIRST keyframe, so layers are unshifted before it: keyframe
   the anchor from the frame the move starts and everything earlier stays put on its own.
+
+## Making it look like a film
+Three things do most of the work, and they are separate from the layers you draw on top.
+
+### Grading
+A grade layer colours the PICTURES - every clip the timeline cuts between - and leaves text and graphics
+alone, which is how an editor works: you grade the picture, not the titles.
+  {"type": "grade", "from": 0, "to": 460, "look": "teal-orange", "bars": "2.39"}
+- list_looks is the board: ten named film looks, what each is for, and the colours each pulls a picture
+  towards. get_colors reads a frame and says which of them suit that shot, with a fit out of 100, so the
+  look can be chosen to match what the clip is already made of rather than fought against it.
+- "strength" 0-1 mixes a look in. Any knob can be set as well, and overrides the look: exposure (stops),
+  contrast, saturation (-1 is black and white), temperature (-1 cold, 1 warm), tint (-1 green, 1 magenta),
+  lift (the colour black becomes), gain (the colour white becomes), fade (milky lifted blacks),
+  vignette, grain.
+- "bars" draws letterbox to 2.39, 2.00 or 1.85, over everything including titles.
+- One grade at a time. Two in a row is how you change look partway through.
+
+### Dissolves
+A timeline entry with "dissolve": 12 fades up over the shot before it for twelve frames instead of
+cutting. The two overlap, so the edit gets that much shorter - save_edit answers with the real length.
+The first shot has nothing to dissolve from, and a dissolve longer than the shot before it is shortened
+to fit. For a dip to black instead, cut as usual and put a flash layer with "color": "black" over the join.
+
+### Speed ramps
+"speed" is the rate a shot starts at; "ramp" is the rate it ENDS at, eased between the two: {"from": 0,
+"to": 120, "speed": 1, "ramp": 0.4} slows into the end of the shot. A ramp is built as ten stepped
+pieces rather than one smooth curve, because one video plays at one rate; ten steps over a shot reads as
+smooth. Sound is muted across a ramp, as it is at any speed but 1.
 
 ## Cutting several clips together, and animations with no clip at all
 An edit belongs to one clip, but it does not have to only show that clip.

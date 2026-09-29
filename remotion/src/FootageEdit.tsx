@@ -11,8 +11,8 @@ import '@fontsource/bebas-neue/400.css';
 import '@fontsource/jetbrains-mono/700.css';
 import type { CSSProperties } from 'react';
 import { AbsoluteFill, Audio, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
-import { BoilFilter, IllustrationFilter, SoftenFilter } from './edit/filters';
-import type { Asset, BlurLayer, Camera, FogLayer, FootageEditProps, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
+import { BoilFilter, GradeFilter, IllustrationFilter, SoftenFilter } from './edit/filters';
+import type { Asset, BlurLayer, Camera, FogLayer, FootageEditProps, GradeLayer, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
 import { PALETTE, baseScale, blendMode, glowFilter, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, sourceAt, travel, walked, worldAt, clipRect } from './edit/model';
 import { ModelView } from './edit/Model3D';
 import { ParticlesView } from './edit/Particles';
@@ -35,16 +35,20 @@ type Rect = { left: number; top: number; width: number; height: number };
 
 // The clip through its timeline. Rendered once as the picture and again, muted, under each drawing layer.
 const Footage = ({ props, rect, cam, muted, style }: { props: FootageEditProps; rect: Rect; cam: Camera; muted: boolean; style?: CSSProperties }) => {
+  const now = useCurrentFrame();
   const own = props.video;
   const segments = props.plan.segments.filter((s) => (s.clip ? props.videos?.[s.clip] : own));
   if (!segments.length) return null;
   // A cut from another clip brings its own shape, so it gets its own rectangle: a portrait phone clip and
   // a landscape one should each fill the frame the way the edit's fit says, not be squeezed into a shape
   // borrowed from whichever clip the edit happens to belong to.
+  // A shot that dissolves overlaps the one before it and fades up over it. Later segments are drawn
+  // last, so the incoming shot is already on top; all it needs is its opacity.
   const box = (s: (typeof segments)[number]) => {
     const v = s.clip ? props.videos![s.clip] : null;
     const r = v ? clipRect(props, cam, v) : rect;
-    return { position: 'absolute' as const, left: r.left, top: r.top, width: r.width, height: r.height, objectFit: 'fill' as const, maxWidth: 'none' };
+    const fade = s.dissolve ? Math.max(0, Math.min(1, (now - s.from + 1) / s.dissolve)) : 1;
+    return { position: 'absolute' as const, left: r.left, top: r.top, width: r.width, height: r.height, objectFit: 'fill' as const, maxWidth: 'none', opacity: fade };
   };
   return (
     <AbsoluteFill style={{ overflow: 'hidden', ...style }}>
@@ -147,6 +151,8 @@ export const FootageEdit = (props: FootageEditProps) => {
     layerPoint(props, cam, base, frame, layer as never, fallback);
   const active = (l: Layer) => frame >= l.from && frame < l.to;
   const drawings = spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'illustrate' && active(l));
+  // At most one grade is on at a time (planEdit refuses overlapping ones), so this is a find.
+  const grade = spec.layers.find((l): l is GradeLayer => l.type === 'grade' && active(l)) ?? null;
   const boils = spec.layers.some((l) => (l.type === 'image' && l.motion === 'boil' || l.type === 'model' && l.boil) && active(l));
 
   // Depth: one greyscale picture for this frame, laid exactly over the footage (so it follows zooms), turned
@@ -209,6 +215,7 @@ export const FootageEdit = (props: FootageEditProps) => {
             const [r, g, b] = hex(colour(l.color, PALETTE.paper)), s = l.strength * envelope(l, frame), st = Math.max(0.01, l.start);
             return <g key={`fog-${i}`}>{flat(`fogf-${i}`, `0 0 0 0 ${r}  0 0 0 0 ${g}  0 0 0 0 ${b}  ${nearRow(near, -s / st, s)}`)}</g>;
           })}
+          {grade ? <GradeFilter id="grade" knobs={grade.knobs} frame={frame} /> : null}
           {shift ? (
             <filter id="parallax" x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
               <feImage href={depthSrc!} x={rect.left} y={rect.top} width={rect.width} height={rect.height} preserveAspectRatio="none" result="depth" />
@@ -220,7 +227,7 @@ export const FootageEdit = (props: FootageEditProps) => {
         </defs>
       </svg>
       <AbsoluteFill style={shift ? { filter: 'url(#parallax)', transform: `scale(${1 + shift.scale / plan.width})` } : undefined}>
-        <Footage props={props} rect={rect} cam={cam} muted={spec.audio === 'mute'} />
+        <Footage props={props} rect={rect} cam={cam} muted={spec.audio === 'mute'} style={grade ? { filter: `url(#grade)` } : undefined} />
         {/* Drawings replace the footage, so they sit right over it and under everything else, whatever their
             place in the list. The filter works on a screen-sized layer: a zoomed-in picture costs no more. */}
         {drawings.map(([l, i]) => (
@@ -239,6 +246,9 @@ export const FootageEdit = (props: FootageEditProps) => {
         {fogs.map(([, i]) => (
           <svg key={`fog-${i}`} width={plan.width} height={plan.height} style={{ position: 'absolute', left: 0, top: 0 }}>{depthImage(`fogf-${i}`)}</svg>
         ))}
+        {grade && grade.knobs.vignette > 0 ? (
+          <AbsoluteFill style={{ background: `radial-gradient(ellipse at 50% 50%, rgba(0,0,0,0) ${Math.round(46 - grade.knobs.vignette * 14)}%, rgba(0,0,0,${(grade.knobs.vignette * 0.72).toFixed(3)}) 100%)` }} />
+        ) : null}
       </AbsoluteFill>
       {/* Sound effects and music, each on its own stretch of the timeline. Volume keys count on through
           loops ("extend"), so a swell over a looping sound does not start again every repeat. */}
@@ -258,8 +268,22 @@ export const FootageEdit = (props: FootageEditProps) => {
         const deep = spec.depth && ((l as { depth?: number }).depth != null || (l as { path?: { depth?: number }[] }).path?.some((k) => k.depth != null));
         return node && deep ? <AbsoluteFill key={i} style={nearness[i] != null ? { mask: `url(#occ-${i})` } : undefined}>{node}</AbsoluteFill> : node;
       })}
+      {bars()}
     </AbsoluteFill>
   );
+
+  function bars() {
+    if (!grade || grade.bars === 'none') return null;
+    const want = Number(grade.bars);
+    const h = Math.max(0, Math.round((plan.height - plan.width / want) / 2));
+    if (!h) return null;
+    return (
+      <>
+        <div style={{ position: 'absolute', left: 0, top: 0, width: plan.width, height: h, background: '#000' }} />
+        <div style={{ position: 'absolute', left: 0, top: plan.height - h, width: plan.width, height: h, background: '#000' }} />
+      </>
+    );
+  }
 
   function drawLayer(l: Layer, i: number) {
         switch (l.type) {

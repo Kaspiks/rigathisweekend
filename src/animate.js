@@ -9,6 +9,7 @@ import { mkdir, readdir, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import sharp from 'sharp';
 import { z } from 'zod';
+import { LOOKS, LOOK_NAMES, matchLooks, rgbToHex } from './grade.js';
 import { FORMATS, GUIDE, GraphicDef, McpEditSpec, fromMcpEdit, graphicErrors, toMcpEdit, planEdit, previewFrames, sourceFrameAt } from './edits.js';
 import {
   ASSET_NAME, FOOTAGE_ID, FPS, cleanName, contactSheet, describe, footageFiles, frameWithGrid, grabFrame, limits,
@@ -763,6 +764,38 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         then: `The answer lists its animations. Use it as {"type":"model","asset":"${name}","animation":"<one of them>",...}; list_footage shows it under models.` });
       return text({ url, expires: expires.toISOString(), footage: f.id, name, maxMB: MAX_ASSET / 1048576, upload: `curl --fail -sS -T /path/to/${name}.png "${url}"`,
         then: `Use it in an edit as {"type":"image","asset":"${name}",...}; list_footage shows it with its size.` });
+    });
+
+    server.registerTool('list_looks', {
+      description: 'The colour grading board: every named film look, when it suits a shot, and the colours it pulls a picture towards. Use one on a grade layer: {"type":"grade","from":0,"to":<end>,"look":"teal-orange"}. get_colors says which of them suit a particular clip.',
+      inputSchema: {}, annotations: read,
+    }, async () => text({ looks: LOOK_NAMES.map(name => ({ look: name, about: LOOKS[name].about, palette: LOOKS[name].palette, sets: LOOKS[name].set })),
+      note: 'A grade layer can name a look and still change any knob itself (exposure, contrast, saturation, temperature, tint, lift, gain, fade, vignette, grain), and add letterbox bars. strength 0-1 mixes the look in.' }));
+
+    server.registerTool('get_colors', {
+      description: 'What a frame of a clip is actually made of: its main colours with how much of the picture each covers, and which looks from the grading board suit it. Use it before choosing a grade, so the look matches the shot instead of fighting it.',
+      inputSchema: { footage: Id, frame: z.number().int().min(0).default(0).describe('SOURCE frame to read') }, annotations: read,
+    }, async ({ footage, frame }) => {
+      const f = needsClip(ready(footage));
+      const jpeg = await grabFrame(footageFiles(store.dir, f.id).work, checkFrame(f, frame), { width: 160 });
+      const { data, info } = await sharp(jpeg).resize(64, 64, { fit: 'inside' }).raw().toBuffer({ resolveWithObject: true });
+      // Bucket into a coarse grid and keep the busiest cells: enough to say what a shot is made of,
+      // without pretending to a precision that a grading decision does not need.
+      const bins = new Map();
+      for (let i = 0; i < data.length; i += info.channels) {
+        const key = [0, 1, 2].map(k => data[i + k] >> 5).join(',');
+        const got = bins.get(key) ?? { n: 0, r: 0, g: 0, b: 0 };
+        got.n++; got.r += data[i]; got.g += data[i + 1]; got.b += data[i + 2];
+        bins.set(key, got);
+      }
+      const pixels = Math.max(1, Math.floor(data.length / info.channels));
+      const colours = [...bins.values()].sort((a, b) => b.n - a.n).slice(0, 6)
+        .map(c => ({ rgb: [Math.round(c.r / c.n), Math.round(c.g / c.n), Math.round(c.b / c.n)], share: c.n / pixels }));
+      const image = await sharp(jpeg).resize({ width: 420 }).jpeg({ quality: 78 }).toBuffer();
+      return picture(image, { footage: f.id, frame,
+        colours: colours.map(c => ({ hex: rgbToHex(c.rgb), share: +c.share.toFixed(3) })),
+        suits: matchLooks(colours, 4),
+        note: 'fit is 0-100: how close the shot already is to that look\'s colours. A high fit needs little pushing; a low one is a bigger change, which may still be what you want.' });
     });
 
     server.registerTool('make_depth', {

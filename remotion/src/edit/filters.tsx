@@ -173,3 +173,48 @@ export const BoilFilter = ({ id, frame }: { id: string; frame: number }) => (
     <Boil input="SourceGraphic" seed={boilSeed(frame)} amount={6} />
   </filter>
 );
+
+// Colour grading. Exposure, contrast, lift/gain and fade are all straight lines on each channel, so they
+// are composed into ONE slope and intercept per channel rather than stacked as four passes: fewer
+// passes, and no rounding to 8 bits between each of them. Temperature, tint and saturation are a matrix
+// after that, and the grain goes on last so it is not itself stretched by the contrast.
+export type Knobs = { exposure: number; contrast: number; saturation: number; temperature: number; tint: number; lift: string; gain: string; fade: number; vignette: number; grain: number };
+const channel = (hex: string, i: number) => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16) / 255;
+
+export const GradeFilter = ({ id, knobs, frame }: { id: string; knobs: Knobs; frame: number }) => {
+  const e = 2 ** knobs.exposure;
+  const c = 1 + (knobs.contrast >= 0 ? knobs.contrast * 1.2 : knobs.contrast * 0.85);
+  const f = knobs.fade * 0.28;
+  const line = (i: number) => {
+    // y = lift + (gain − lift)·x, over contrast(exposure(x)), then faded towards a milky black.
+    const lift = (channel(knobs.lift, i) - 0.5) * 0.5, gain = 1 + (channel(knobs.gain, i) - 0.5) * 0.5;
+    let slope = e * c * (gain - lift), intercept = (0.5 - 0.5 * c) * (gain - lift) + lift;
+    slope *= 1 - f; intercept = intercept * (1 - f) + f;
+    return { slope: +slope.toFixed(5), intercept: +intercept.toFixed(5) };
+  };
+  const [r, g, b] = [line(0), line(1), line(2)];
+  // Warmth pulls red up and blue down; tint trades green against magenta.
+  const t = knobs.temperature * 0.22, ti = knobs.tint * 0.16;
+  const warm = [1 + t, 0, 0, 0, 0, 0, 1 - ti, 0, 0, 0, 0, 0, 1 - t, 0, 0, 0, 0, 0, 1, 0].join(' ');
+  const grain = knobs.grain * 0.38;
+  const bias = (0.5 - 0.5 * grain).toFixed(4), k = grain.toFixed(4);
+  const grey = `${k} 0 0 0 ${bias}`;
+  return (
+    <filter id={id} x="0%" y="0%" width="100%" height="100%" colorInterpolationFilters="sRGB">
+      <feComponentTransfer in="SourceGraphic" result="levels">
+        <feFuncR type="linear" slope={r.slope} intercept={r.intercept} />
+        <feFuncG type="linear" slope={g.slope} intercept={g.intercept} />
+        <feFuncB type="linear" slope={b.slope} intercept={b.intercept} />
+      </feComponentTransfer>
+      <feColorMatrix in="levels" type="matrix" values={warm} result="warmed" />
+      <feColorMatrix in="warmed" type="saturate" values={Math.max(0, 1 + knobs.saturation).toFixed(4)} result="graded" />
+      {grain > 0 ? (
+        <>
+          <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed={1 + (frame % 71)} result="noise" />
+          <feColorMatrix in="noise" type="matrix" values={`${grey}  ${grey}  ${grey}  0 0 0 0 1`} result="film" />
+          <feBlend in="graded" in2="film" mode="overlay" />
+        </>
+      ) : null}
+    </filter>
+  );
+};
