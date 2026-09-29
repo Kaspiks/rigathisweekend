@@ -330,6 +330,12 @@ const Grade = z.object({
   vignette: Unit().optional().describe('Darkening towards the corners'),
   grain: Unit().optional().describe('Film grain'),
   bars: z.enum(['none', '2.39', '2.00', '1.85']).default('none').describe('Letterbox bars to that width-to-height ratio, drawn over everything'),
+  // Worked out from the look when the edit is saved and kept with it, so the renderer needs no copy of
+  // the board. Declared here because a saved edit is read back through this same schema.
+  knobs: z.object({
+    exposure: z.number(), contrast: z.number(), saturation: z.number(), temperature: z.number(), tint: z.number(),
+    lift: z.string(), gain: z.string(), fade: z.number(), vignette: z.number(), grain: z.number(),
+  }).strict().optional().describe('Filled in when the edit is saved; do not write it yourself'),
 }).strict();
 
 const Zoom = z.object({
