@@ -149,6 +149,24 @@ Still to do:
      them and a black band opened up. A push is two shots travelling together: incoming d→0, outgoing
      0→−d. Checked arithmetically over all four directions, not by eye.
 
+## Bringing clips in
+Until now nothing could add a clip except the dashboard: there were `add_picture`, `add_model` and
+`add_sound` but no video equivalent, so multi-clip editing could only ever use footage the owner had
+uploaded by hand. Two doors now:
+- `add_video`: a file from the conversation or a public HTTPS link to the video FILE (not a page it is
+  embedded in). It goes through `fetchPublic`, so it keeps the SSRF, redirect and size guards the other
+  fetches use. Capped at 220 MB because the body is held in memory while it is checked.
+- `create_upload_link` kind `video`: for anything larger. The link MAKES the clip row (there is no clip
+  to attach to yet) and the upload streams straight to disk. `footage` is optional for this kind.
+Both share `intakeVideo`, which the dashboard route now uses too, so there is one probe-and-queue path
+rather than three. The upload-link route is mounted before createAnimator, so it reaches the transcoder
+through `app.locals.queueProcessing` rather than through an argument.
+Verified live: an upload link streamed a file to ready (464x832, 100f), and a URL import fetched,
+transcoded and came up ready (320x176, 299f).
+Known: some CDNs answer the fetch with 403 because of the User-Agent `fetchPublic` sends
+("RigaWeekend/0.1 (+event listing preview)") - Google's gtv-videos-bucket does. The failure is clean and
+says to use an upload link instead. Worth revisiting if it turns up often, but it is shared with photos.
+
 ## Other notes
 - `remotion/src/PinboardStory.tsx` (owner's) imports `./autumnOpener`, which is not in the repo. Nothing
   imports PinboardStory yet, so renders are unaffected, but `tsc` reports it.
