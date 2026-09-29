@@ -84,6 +84,26 @@ Still to do:
 6. Anchors and path keys are still clamped to 0-1, so a 2D anchor cannot be followed off screen and back.
    That only limits the last-resort path; world spots do not care.
 
+## Animations with no clip, and cutting several clips together
+- `new_animation` (MCP) / `POST /api/animations` / "Start an animation" on the dashboard makes a BLANK
+  CANVAS: a size and a length with no video behind it. It is a footage row carrying `info.blank`, not a
+  second kind of thing, so versions, previews, renders, pictures, models, sounds and the dashboard all
+  work on it unchanged and only the video underneath is missing. This is what stops ChatGPT reaching for
+  a random clip as a base when the owner just asks for an animation.
+  planEdit refuses what needs a clip on one (illustrate, blur, fog, parallax, zoom, anchors, world,
+  depth, image place "footage") with the reason, at save time rather than mid-render.
+  Verified: a canvas rendered text, a caption, a sticker and looping particles on a plain background.
+- An edit can now cut between several videos. Name them in `clips: [{name, footage}]` and give a timeline
+  entry a `clip`; an entry with none plays the edit's own clip, so a trailer can be built on a blank
+  canvas that holds nothing but the cuts. Each entry is bounded by the length of the clip IT plays.
+  Clips keep their own shape (`clipRect`), so a portrait and a landscape clip each fill the frame the way
+  `fit` says instead of being squeezed into the host's shape.
+  Anchors, depth, world spots and the camera track stay the edit's OWN clip's: they are read in that
+  clip's source frames and mean nothing during a part playing a different video.
+- Render history: `store.allRenders`, `GET /api/renders`, a `list_renders` MCP tool, and a "Render
+  history" section on the dashboard showing every render ever made across all clips and animations.
+  Each clip card also lists all its edit versions, newest first.
+
 ## Other notes
 - `remotion/src/PinboardStory.tsx` (owner's) imports `./autumnOpener`, which is not in the repo. Nothing
   imports PinboardStory yet, so renders are unaffected, but `tsc` reports it.
