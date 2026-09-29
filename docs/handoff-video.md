@@ -128,6 +128,27 @@ Still to do:
 - Verified in pictures: six looks side by side on one frame, all clearly distinct, vignette and grain
   visible; and a trailer cutting three clips with dissolves, a slow-down ramp and 2.39 bars.
 
+## Lens effects, shot matching and transitions
+- `halation` (warm bloom out of the highlights) and `aberration` (colour fringing) are grade knobs, and
+  some looks carry them: neon-night 0.42/0.2, vintage-film 0.3/0.16, golden-hour 0.26 halation.
+  Halation isolates the bright parts with a steep transfer curve, blurs them wide, pushes them red and
+  adds that back; aberration splits R and B apart with feOffset and recombines them.
+- A grade may name a `clip`, and then it only touches the parts playing that clip. That is SHOT
+  MATCHING: one grade per camera, several live at once, because they can never cover the same frame.
+  The overlap rule allows that and still refuses two grades for one clip, or two covering everything.
+  This needed the filter to move off the Footage wrapper and onto each segment.
+- A shot arrives by `dissolve`, `wipe`, `slide` or `push`, from left/right/up/down, given as
+  `transition: {kind, frames, from}` (`dissolve: N` stays as shorthand). Freezes can arrive the same
+  ways - before this the Hold schema had no dissolve field at all, so `{hold, dissolve}` was silently
+  ignored. The segment carries `enter: {kind, frames, from}`; `dissolve` as a segment field is gone.
+- Two bugs worth not repeating, both found by rendering the exact midpoint of each transition rather
+  than a frame either side of it:
+  1. `from` was inverted - `shove(t - 1)` negated the offset, so everything arrived from the opposite
+     side to the one asked for. It is `shove(1 - t)`.
+  2. A push moved the OUTGOING shot the same way as the incoming, so nothing covered the space behind
+     them and a black band opened up. A push is two shots travelling together: incoming d→0, outgoing
+     0→−d. Checked arithmetically over all four directions, not by eye.
+
 ## Other notes
 - `remotion/src/PinboardStory.tsx` (owner's) imports `./autumnOpener`, which is not in the repo. Nothing
   imports PinboardStory yet, so renders are unaffected, but `tsc` reports it.
