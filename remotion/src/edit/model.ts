@@ -23,7 +23,7 @@ export type ShakeLayer = Span & { type: 'shake'; strength: number };
 export type FlashLayer = Span & { type: 'flash'; color: string };
 export type GradeKnobs = { exposure: number; contrast: number; saturation: number; temperature: number; tint: number; lift: string; gain: string; fade: number; vignette: number; grain: number };
 // A grade's look is already resolved to plain numbers by the time the renderer sees it (src/grade.js).
-export type GradeLayer = Span & { type: 'grade'; look?: string; strength: number; knobs: GradeKnobs; bars: 'none' | '2.39' | '2.00' | '1.85' };
+export type GradeLayer = Span & { type: 'grade'; look?: string; strength: number; knobs: GradeKnobs; bars: 'none' | '2.39' | '2.00' | '1.85' | number };
 export type SequenceLayer = Span & { type: 'sequence'; asset: string; count: number; columns?: number; range?: { from: number; to: number }; playback?: 'loop' | 'once' | 'pingpong'; rotate?: number; spin?: number; blend?: Blend; glow?: number; tint?: string; fps: number; loop: boolean; at?: Place; offset?: Point; path?: PathKey[]; facing: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none'; motion: 'none' | 'bob' | 'sway' };
 export type Track = { frame: number; value: number }[];
 export type ParticlesLayer = Span & { type: 'particles'; shape?: 'dot' | 'soft' | 'spark' | 'star' | 'ring' | 'streak' | 'heart' | 'confetti' | 'square'; asset?: string; count: number; columns?: number; fps: number;

@@ -329,7 +329,8 @@ const Grade = z.object({
   fade: Unit().optional().describe('Milky lifted blacks, like an old print'),
   vignette: Unit().optional().describe('Darkening towards the corners'),
   grain: Unit().optional().describe('Film grain'),
-  bars: z.enum(['none', '2.39', '2.00', '1.85']).default('none').describe('Letterbox bars to that width-to-height ratio, drawn over everything'),
+  bars: z.union([z.enum(['none', '2.39', '2.00', '1.85']), z.number().min(0).max(0.3)]).default('none')
+    .describe('Letterbox bars over everything. A ratio ("2.39") crops to that shape, which suits a landscape or square edit; on a tall Reel it leaves a narrow strip, so give a fraction of the height instead (0.08 is a thin cinematic band top and bottom)'),
   // Worked out from the look when the edit is saved and kept with it, so the renderer needs no copy of
   // the board. Declared here because a saved edit is read back through this same schema.
   knobs: z.object({
@@ -684,6 +685,11 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
   for (const [i, layer] of spec.layers.entries()) {
     if (layer.type !== 'grade') continue;
     layer.knobs = gradeKnobs(layer);
+    if (typeof layer.bars === 'string' && layer.bars !== 'none') {
+      const [width, height] = FORMATS[spec.format];
+      const strip = width / Number(layer.bars);
+      if (strip < height * 0.6) warnings.push(`layers.${i} (grade): bars ${layer.bars} on a ${width}x${height} frame leave a strip only ${Math.round(strip)}px tall, so most of the picture is black. On a tall video give bars as a fraction of the height instead, e.g. 0.08`);
+    }
     grades.push({ ...layer, i });
   }
   grades.sort((a, b) => a.from - b.from);
@@ -1022,7 +1028,10 @@ alone, which is how an editor works: you grade the picture, not the titles.
   contrast, saturation (-1 is black and white), temperature (-1 cold, 1 warm), tint (-1 green, 1 magenta),
   lift (the colour black becomes), gain (the colour white becomes), fade (milky lifted blacks),
   vignette, grain.
-- "bars" draws letterbox to 2.39, 2.00 or 1.85, over everything including titles.
+- "bars" draws letterbox over everything, titles included. A ratio ("2.39", "2.00", "1.85") crops the
+  frame to that shape, which is right for a landscape or square edit; on a tall Reel it leaves a narrow
+  strip with most of the picture black, so give a fraction of the height instead - "bars": 0.08 is a
+  thin band top and bottom. save_edit warns if a ratio would eat most of the frame.
 - One grade at a time. Two in a row is how you change look partway through.
 
 ### Dissolves

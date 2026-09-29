@@ -274,8 +274,11 @@ export const FootageEdit = (props: FootageEditProps) => {
 
   function bars() {
     if (!grade || grade.bars === 'none') return null;
-    const want = Number(grade.bars);
-    const h = Math.max(0, Math.round((plan.height - plan.width / want) / 2));
+    // A ratio crops the frame to that shape; a plain number is simply that fraction of the height,
+    // which is what a tall video wants - cropping a Reel to 2.39 leaves a strip and little else.
+    const h = typeof grade.bars === 'number'
+      ? Math.round(plan.height * grade.bars)
+      : Math.max(0, Math.round((plan.height - plan.width / Number(grade.bars)) / 2));
     if (!h) return null;
     return (
       <>
