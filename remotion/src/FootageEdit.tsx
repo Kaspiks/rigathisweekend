@@ -313,52 +313,52 @@ export const FootageEdit = (props: FootageEditProps) => {
           that turning one on never moves a layer: only the filter on it changes. The letterbox bars stay
           outside, because a matte added in post does not carry the print's grain. */}
       <AbsoluteFill style={finishing ? { filter: 'url(#finish)' } : undefined}>
-      <AbsoluteFill style={shift ? { filter: 'url(#parallax)', transform: `scale(${1 + shift.scale / plan.width})` } : undefined}>
-        <Footage props={props} rect={rect} cam={cam} muted={spec.audio === 'mute'} gradeFor={gradeFor} />
-        {/* Drawings replace the footage, so they sit right over it and under everything else, whatever their
-            place in the list. The filter works on a screen-sized layer: a zoomed-in picture costs no more. */}
-        {drawings.map(([l, i]) => (
-          <Footage key={`drawn-${i}`} props={props} rect={rect} cam={cam} muted style={{ filter: `url(#drawn-${i})`, ...reveal(l as IllustrateLayer, frame, at(l, { x: 0.5, y: 0.5 }), plan.width, plan.height) }} />
-        ))}
-        {/* Depth of field: blurred copies of the footage, shown only where it is out of focus. */}
-        {blurs.map(([l, i]) => {
-          const px = l.amount * envelope(l, frame);
-          return (
-            <AbsoluteFill key={`blur-${i}`}>
-              <Footage props={props} rect={rect} cam={cam} muted style={{ filter: `blur(${px.toFixed(2)}px)`, mask: `url(#blur-${i})` }} />
-              {l.near ? <Footage props={props} rect={rect} cam={cam} muted style={{ filter: `blur(${(px * 0.7).toFixed(2)}px)`, mask: `url(#blurn-${i})` }} /> : null}
-            </AbsoluteFill>
-          );
+        <AbsoluteFill style={shift ? { filter: 'url(#parallax)', transform: `scale(${1 + shift.scale / plan.width})` } : undefined}>
+          <Footage props={props} rect={rect} cam={cam} muted={spec.audio === 'mute'} gradeFor={gradeFor} />
+          {/* Drawings replace the footage, so they sit right over it and under everything else, whatever their
+              place in the list. The filter works on a screen-sized layer: a zoomed-in picture costs no more. */}
+          {drawings.map(([l, i]) => (
+            <Footage key={`drawn-${i}`} props={props} rect={rect} cam={cam} muted style={{ filter: `url(#drawn-${i})`, ...reveal(l as IllustrateLayer, frame, at(l, { x: 0.5, y: 0.5 }), plan.width, plan.height) }} />
+          ))}
+          {/* Depth of field: blurred copies of the footage, shown only where it is out of focus. */}
+          {blurs.map(([l, i]) => {
+            const px = l.amount * envelope(l, frame);
+            return (
+              <AbsoluteFill key={`blur-${i}`}>
+                <Footage props={props} rect={rect} cam={cam} muted style={{ filter: `blur(${px.toFixed(2)}px)`, mask: `url(#blur-${i})` }} />
+                {l.near ? <Footage props={props} rect={rect} cam={cam} muted style={{ filter: `blur(${(px * 0.7).toFixed(2)}px)`, mask: `url(#blurn-${i})` }} /> : null}
+              </AbsoluteFill>
+            );
+          })}
+          {fogs.map(([, i]) => (
+            <svg key={`fog-${i}`} width={plan.width} height={plan.height} style={{ position: 'absolute', left: 0, top: 0 }}>{depthImage(`fogf-${i}`)}</svg>
+          ))}
+          {grade && grade.knobs.vignette > 0 ? (
+            <AbsoluteFill style={{ background: `radial-gradient(ellipse at 50% 50%, rgba(0,0,0,0) ${Math.round(46 - grade.knobs.vignette * 14)}%, rgba(0,0,0,${(grade.knobs.vignette * 0.72).toFixed(3)}) 100%)` }} />
+          ) : null}
+        </AbsoluteFill>
+        {/* Sound effects and music, each on its own stretch of the timeline. Volume keys count on through
+            loops ("extend"), so a swell over a looping sound does not start again every repeat. */}
+        {(spec.sounds ?? []).map((c, i) => {
+          const src = props.sounds?.[c.file ?? c.sound]?.src;
+          return src ? (
+            <Sequence key={`sound-${i}`} from={c.at} durationInFrames={c.length} layout="none">
+              <Audio src={src} trimBefore={Math.round(c.from * plan.fps) || undefined} playbackRate={c.speed} loop={c.loop} loopVolumeCurveBehavior="extend" volume={(f) => cueVolume(c, f)} />
+            </Sequence>
+          ) : null;
         })}
-        {fogs.map(([, i]) => (
-          <svg key={`fog-${i}`} width={plan.width} height={plan.height} style={{ position: 'absolute', left: 0, top: 0 }}>{depthImage(`fogf-${i}`)}</svg>
-        ))}
-        {grade && grade.knobs.vignette > 0 ? (
-          <AbsoluteFill style={{ background: `radial-gradient(ellipse at 50% 50%, rgba(0,0,0,0) ${Math.round(46 - grade.knobs.vignette * 14)}%, rgba(0,0,0,${(grade.knobs.vignette * 0.72).toFixed(3)}) 100%)` }} />
+        {spec.layers.map((l, i) => {
+          if (!active(l)) return null;
+          const node = drawLayer(l, i);
+          // A layer with a depth is cut away wherever the scene is nearer. Its wrapper is there from the start,
+          // before the depth picture has loaded, so the layer is not rebuilt (a 3D view would start over).
+          const deep = spec.depth && ((l as { depth?: number }).depth != null || (l as { path?: { depth?: number }[] }).path?.some((k) => k.depth != null));
+          return node && deep ? <AbsoluteFill key={i} style={nearness[i] != null ? { mask: `url(#occ-${i})` } : undefined}>{node}</AbsoluteFill> : node;
+        })}
+        {/* The finish's own vignette darkens the titles too, unlike a grade's, which is under them. */}
+        {finish && finish.vignette * finishAmount > 0.002 ? (
+          <AbsoluteFill style={{ background: `radial-gradient(ellipse at 50% 50%, rgba(0,0,0,0) ${Math.round(46 - finish.vignette * finishAmount * 14)}%, rgba(0,0,0,${(finish.vignette * finishAmount * 0.72).toFixed(3)}) 100%)` }} />
         ) : null}
-      </AbsoluteFill>
-      {/* Sound effects and music, each on its own stretch of the timeline. Volume keys count on through
-          loops ("extend"), so a swell over a looping sound does not start again every repeat. */}
-      {(spec.sounds ?? []).map((c, i) => {
-        const src = props.sounds?.[c.file ?? c.sound]?.src;
-        return src ? (
-          <Sequence key={`sound-${i}`} from={c.at} durationInFrames={c.length} layout="none">
-            <Audio src={src} trimBefore={Math.round(c.from * plan.fps) || undefined} playbackRate={c.speed} loop={c.loop} loopVolumeCurveBehavior="extend" volume={(f) => cueVolume(c, f)} />
-          </Sequence>
-        ) : null;
-      })}
-      {spec.layers.map((l, i) => {
-        if (!active(l)) return null;
-        const node = drawLayer(l, i);
-        // A layer with a depth is cut away wherever the scene is nearer. Its wrapper is there from the start,
-        // before the depth picture has loaded, so the layer is not rebuilt (a 3D view would start over).
-        const deep = spec.depth && ((l as { depth?: number }).depth != null || (l as { path?: { depth?: number }[] }).path?.some((k) => k.depth != null));
-        return node && deep ? <AbsoluteFill key={i} style={nearness[i] != null ? { mask: `url(#occ-${i})` } : undefined}>{node}</AbsoluteFill> : node;
-      })}
-      {/* The finish's own vignette darkens the titles too, unlike a grade's, which is under them. */}
-      {finish && finish.vignette * finishAmount > 0.002 ? (
-        <AbsoluteFill style={{ background: `radial-gradient(ellipse at 50% 50%, rgba(0,0,0,0) ${Math.round(46 - finish.vignette * finishAmount * 14)}%, rgba(0,0,0,${(finish.vignette * finishAmount * 0.72).toFixed(3)}) 100%)` }} />
-      ) : null}
       </AbsoluteFill>
       {bars()}
     </AbsoluteFill>
