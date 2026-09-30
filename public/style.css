@@ -12,6 +12,8 @@
 .photo-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px 34px}
 .photo-row img{width:54px;height:auto;border-radius:4px;display:block}
 .photo-row.needs{background:#fbf3e6;border-radius:8px;padding:8px}
+.photo-note{flex-basis:100%;font-size:13px;line-height:1.5;color:var(--muted)}
+.photo-note.error{color:#a13c2e;font-weight:600}
 button.small{padding:7px 11px;font-size:12px}
 .tag{font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:4px 8px;border-radius:20px}
 .tag.ok{background:#e8efdf;color:var(--ink)}

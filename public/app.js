@@ -19,6 +19,18 @@ function photoRow(e,i){
   const story=`<label class="story-tick"><input type="checkbox" data-story="${e.id}" value="${i}"${e.stories.includes(i)?' checked':''}${locked?' disabled':''}> Story</label>`;
   return `<div class="photo-row${!mine&&!organiser&&!locked?' needs':''}"><a href="${media(e,`feed-${i}.jpg`)}" target="_blank" rel="noopener"><img ${lazy} src="${thumb(e,`feed-${i}.jpg`)}" alt="Slide for ${esc(e.data.events[i].title)}"></a>${state}${add}${remove}${story}</div>`;
 }
+// Photo messages go on the event's own row: #status is at the top of the page, far from an event
+// lower down. The row is looked up when the message is shown, in case the page was redrawn meanwhile.
+function photoNote(id,i,text,error=false){
+  const row=document.querySelector(`[data-upload="${id}"][data-index="${i}"],[data-unphoto="${id}"][data-index="${i}"]`)?.closest('.photo-row');if(!row)return;
+  const note=row.querySelector('.photo-note')||row.appendChild(Object.assign(document.createElement('span'),{className:'photo-note'}));
+  note.textContent=text;note.classList.toggle('error',error);note.setAttribute('role',error?'alert':'status');
+}
+async function photoRequest(id,i,busy,send,fallback){
+  photoNote(id,i,busy);
+  try{const r=await send();const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||fallback);}
+  catch(err){photoNote(id,i,err.message,true);throw err;}
+}
 
 // Other days an event is also on, Monday to Sunday of the weekend's week. They only change the day tag on
 // its slides: the event is still posted once, on its own day. Editable on drafts; shown as text once approved.
@@ -199,10 +211,11 @@ document.addEventListener('click',ev=>{
   if(footageClick(b)) return;
   if(b.dataset.upload){
     const input=document.createElement('input');input.type='file';input.accept='image/jpeg,image/png,image/webp';
-    input.onchange=()=>{const f=input.files[0];if(!f)return;action(async()=>{const r=await fetch(`/api/editions/${b.dataset.upload}/events/${b.dataset.index}/photo`,{method:'POST',headers:{'Content-Type':f.type||'application/octet-stream'},body:f});const d=await r.json();if(!r.ok)throw Error(d.error||'Upload failed');});};
+    const {upload:id,index:i}=b.dataset;
+    input.onchange=()=>{const f=input.files[0];if(!f)return;action(()=>photoRequest(id,i,`Uploading ${f.name}…`,()=>fetch(`/api/editions/${id}/events/${i}/photo`,{method:'POST',headers:{'Content-Type':f.type||'application/octet-stream'},body:f}),'Upload failed'));};
     input.click();return;
   }
-  if(b.dataset.unphoto){action(async()=>{const r=await fetch(`/api/editions/${b.dataset.unphoto}/events/${b.dataset.index}/photo`,{method:'DELETE'});const d=await r.json();if(!r.ok)throw Error(d.error||'Could not remove the photo');});return;}
+  if(b.dataset.unphoto){const {unphoto:id,index:i}=b.dataset;action(()=>photoRequest(id,i,'Removing…',()=>fetch(`/api/editions/${id}/events/${i}/photo`,{method:'DELETE'}),'Could not remove the photo'));return;}
   if(b.dataset.tone||b.dataset.palette){
     const row=b.closest('.themes');
     if(b.getAttribute('aria-pressed')==='true'||document.querySelector('.themes.busy')) return;
