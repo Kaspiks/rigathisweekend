@@ -69,6 +69,10 @@ Done since the last handoff:
   OpenCV world-to-camera round trip. No COLMAP needed. `npm test`: 68 pass.
 
 Still to do:
+0. **Deploy.** The finishing pass, per-shot framing, smoothed slow motion and `match_grade` are pushed
+   but not on the server: `scripts/remote.sh deploy` was refused by the tooling as a production deploy.
+   Nothing below this line depends on it, but ChatGPT cannot see any of it until it happens, and the
+   connector needs reconnecting afterwards to pick up `match_grade`.
 1. **Render a world-placed model and look at it.** Everything above is checked except the last step: no
    edit with `world` has been rendered yet, so `setViewOffset`, the up/facing basis and the size rule are
    unproven in a picture. Do this first - put a model on the espresso clip's cup and render frames either
@@ -166,6 +170,63 @@ transcoded and came up ready (320x176, 299f).
 Known: some CDNs answer the fetch with 403 because of the User-Agent `fetchPublic` sends
 ("RigaWeekend/0.1 (+event listing preview)") - Google's gtv-videos-bucket does. The failure is clean and
 says to use an upload link instead. Worth revisiting if it turns up often, but it is shared with photos.
+
+## The finishing pass, per-shot framing and real slow motion (built, NOT deployed)
+ChatGPT's own review of a trailer it had cut named what was missing. Most of the list was sourcing
+(better close-ups, real engine sound, a bigger crescendo, fewer title cards) and needed no code. Four
+things did, and all four are built, measured and pushed - but the deploy was refused by the tooling, so
+**none of this is on the server yet**. Deploy before telling anyone it is there.
+
+- **Highlight roll-off** (`rolloff`, on a grade and on a finish). A sensor clips its highlights to a flat
+  wall of white; film bends them over. That flat wall is most of what makes a shot look like video. The
+  curve is a knee at 1 − 0.65r rising to 1 − 0.10r, and the exponent is not a taste number: 13/11 is
+  whatever makes the slope exactly 1 where the straight part meets the curve, so no bright band shows at
+  the knee. Every look now carries some. Written out twice, in `src/grade.js` and
+  `remotion/src/edit/filters.tsx`, because the renderer runs in its own container and cannot import the
+  app - `test/finish.test.js` compares the two function bodies so they cannot drift apart.
+- **A `finish` layer**: one shoulder, one glow and one grain over the WHOLE frame, titles included, after
+  everything else is drawn. A grade colours the pictures and is per clip; two clips graded separately
+  still sit apart while each keeps its own highlight behaviour and its own texture. The finish is what
+  puts them on one print. Knobs: rolloff, grain, bloom (neutral diffusion), halation (warm), aberration,
+  vignette. `in`/`out` default to 0, unlike every other layer, because a grain that fades up over eight
+  frames is a fault and not an effect.
+- **`reframe` and `mirror` on a timeline entry**: the framing of ONE shot, where the `zoom` layer is one
+  move over the whole edit. `scale`/`x`/`y` and `scaleTo`/`xTo`/`yTo`, plus `blur` for motion blur while
+  it moves. Mirror is the continuity tool (match screen direction across a cut). The framing carries the
+  shot's OUTPUT span in `shot`, so a punch-in eases across a speed ramp's ten segments as one move
+  instead of restarting on each. Defaults are an exact no-op, and the crop is clamped the way the camera
+  is, so it can never uncover the edge of the picture.
+- **`smooth` on a slow shot**: below speed 1 a source frame was simply shown two or three output frames
+  running. Now each output frame is mixed from the two source frames it falls between, as two frozen
+  `OffthreadVideo`s cross-faded. Only carried on segments below 0.9 (a ramp blends its slow end only),
+  and save_edit warns when a shot is slow enough to need it and has not asked. Minimum speed dropped
+  0.25 -> 0.1.
+- **`match_grade` and levels on `get_colors`**: what an editor does by eye when cutting a phone clip
+  against stock. `levelsFrom` measures the 1st/50th/99th luma percentiles and the channel means;
+  `matchKnobs` solves exposure and contrast exactly against the filter's own arithmetic
+  (y = e·c·x + (1−c)/2), puts the leftover black offset into a lift, and then solves temperature and
+  tint from channel RATIOS **after** the levels - solving both stages against the raw means was wrong
+  on any clip needing a real contrast correction. It reports which knobs hit their limit rather than
+  handing back a number at its stop and letting it look like a match.
+
+How it was verified without a deploy, which is worth repeating:
+- `npx remotion bundle` builds the whole project; `tsc --noEmit` is clean.
+- Every filter graph was rendered to markup with react-dom/server and walked: a primitive whose `in`
+  names a result nothing produced renders TRANSPARENT BLACK, which over the whole frame means the
+  picture disappears. All paths sound, including an old saved edit whose knobs have no `rolloff` key.
+- Then a real render, through the same selectComposition/renderStill the render service uses, against a
+  test clip built to be MEASURED: a black-to-white ramp down the frame (so the roll-off can be read
+  straight off the picture), a blown white square, a red block on the left only, and a dot moving 8 px a
+  frame. Results: the rendered ramp follows the curve within 1.2/255 at every sample; grain lifts the
+  noise on a flat row from sd 0.00 to 4.09 and leaves the brightness alone; bloom spills 33 levels just
+  outside the square and falls off with distance; a reframe puts the square's centre exactly at frame
+  centre; a mirror moves the red block from left to right; mid punch-in the sharpest edge in the frame
+  drops from 129 to 4; and halfway between two source frames the blend reads 188.7 where the unblended
+  one reads 124.9 (predicted 191 and 127).
+- The claim that separates a finish from a grade was measured too: on a white title band, a finish takes
+  the noise from sd 0.00 to 6.02 and a grade leaves it at 0.00.
+- Gotcha: `selectComposition` resolves the props, and `renderStill` handed DIFFERENT props renders the
+  ones the composition was selected with. Nine renders came out identical before that was spotted.
 
 ## Other notes
 - `remotion/src/PinboardStory.tsx` (owner's) imports `./autumnOpener`, which is not in the repo. Nothing
