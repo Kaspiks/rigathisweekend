@@ -9,7 +9,7 @@ import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import sharp from 'sharp';
 import { z } from 'zod';
-import { LOOKS, LOOK_NAMES, matchLooks, rgbToHex } from './grade.js';
+import { LOOKS, LOOK_NAMES, levelsFrom, matchKnobs, matchLooks, rgbToHex } from './grade.js';
 import { FORMATS, GUIDE, GraphicDef, McpEditSpec, fromMcpEdit, graphicErrors, toMcpEdit, planEdit, previewFrames, sourceFrameAt } from './edits.js';
 import {
   ASSET_NAME, FOOTAGE_ID, FPS, cleanName, contactSheet, describe, footageFiles, frameWithGrid, grabFrame, limits,
@@ -810,7 +810,9 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       description: 'The colour grading board: every named film look, when it suits a shot, and the colours it pulls a picture towards. Use one on a grade layer: {"type":"grade","from":0,"to":<end>,"look":"teal-orange"}. get_colors says which of them suit a particular clip.',
       inputSchema: {}, annotations: read,
     }, async () => text({ looks: LOOK_NAMES.map(name => ({ look: name, about: LOOKS[name].about, palette: LOOKS[name].palette, sets: LOOKS[name].set })),
-      note: 'A grade layer can name a look and still change any knob itself (exposure, contrast, saturation, temperature, tint, lift, gain, fade, vignette, grain), and add letterbox bars. strength 0-1 mixes the look in.' }));
+      note: 'A grade layer can name a look and still change any knob itself (exposure, contrast, saturation, temperature, tint, lift, gain, fade, vignette, grain, halation, aberration, rolloff), and add letterbox bars. strength 0-1 mixes the look in.',
+      matching: 'A look pushes every clip the same way, which only lands if they start from the same place. match_grade measures two clips and works out the knobs that bring one to the other; match the clips to each other first, then put one look over all of them.',
+      finishing: 'Grain, bloom and highlight roll-off over the WHOLE frame, titles included, belong on a finish layer rather than a grade: {"type":"finish","from":0,"to":<end>}. That is what makes clips from different cameras look like one print. get_edit_guide has the section.' }));
 
     server.registerTool('get_colors', {
       description: 'What a frame of a clip is actually made of: its main colours with how much of the picture each covers, and which looks from the grading board suit it. Use it before choosing a grade, so the look matches the shot instead of fighting it.',
@@ -834,8 +836,38 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const image = await sharp(jpeg).resize({ width: 420 }).jpeg({ quality: 78 }).toBuffer();
       return picture(image, { footage: f.id, frame,
         colours: colours.map(c => ({ hex: rgbToHex(c.rgb), share: +c.share.toFixed(3) })),
+        levels: levelsFrom(data, info.channels),
         suits: matchLooks(colours, 4),
-        note: 'fit is 0-100: how close the shot already is to that look\'s colours. A high fit needs little pushing; a low one is a bigger change, which may still be what you want.' });
+        note: 'fit is 0-100: how close the shot already is to that look\'s colours. A high fit needs little pushing; a low one is a bigger change, which may still be what you want.',
+        levelsNote: 'levels are 0-1: black and white are where the dark and bright ends of the picture actually sit (1st and 99th percentile), mid its middle, and r/g/b the mean of each channel. Two clips that cut together want the same black. match_grade works the knobs out for you.' });
+    });
+
+    server.registerTool('match_grade', {
+      description: 'Measures two clips and works out the grade knobs that carry the second towards the first, so a phone clip and stock footage cut together instead of looking like two different films. Answers with both measurements and a grade layer ready to paste. Match every clip in a trailer to the same one.',
+      inputSchema: {
+        reference: Id.describe('The clip whose look the others should match - usually the best-looking one, or the one the edit opens on'),
+        clip: Id.describe('The clip to bring towards it'),
+        referenceFrame: z.number().int().min(0).default(0).describe('SOURCE frame of the reference to read'),
+        clipFrame: z.number().int().min(0).default(0).describe('SOURCE frame of the other clip to read'),
+        name: z.string().regex(/^[a-z][a-z0-9_-]{0,23}$/).optional().describe('The name this clip has in the edit\'s "clips" list, so the grade layer comes back ready to use'),
+      },
+      annotations: read,
+    }, async ({ reference, clip, referenceFrame, clipFrame, name }) => {
+      const measure = async (id, frame) => {
+        const f = needsClip(ready(id));
+        const jpeg = await grabFrame(footageFiles(store.dir, f.id).work, checkFrame(f, frame), { width: 160 });
+        const { data, info } = await sharp(jpeg).resize(96, 96, { fit: 'inside' }).raw().toBuffer({ resolveWithObject: true });
+        return { id: f.id, frame, ...levelsFrom(data, info.channels) };
+      };
+      const [a, b] = await Promise.all([measure(reference, referenceFrame), measure(clip, clipFrame)]);
+      const { knobs, limited } = matchKnobs(a, b);
+      return text({
+        reference: a, clip: b, knobs,
+        layer: { type: 'grade', from: 0, to: 0, ...(name ? { clip: name } : {}), ...knobs },
+        ...(limited.length ? { limited, limitedNote: `${limited.join(' and ')} ran out of range: these two clips are further apart than the knobs reach, so this is as close as grading alone gets. Consider a look on both, or a different clip.` } : {}),
+        note: 'Put this on the edit as a grade layer with its own from/to and "clip" set to the name that clip has in "clips", so it covers only the parts that play it. Give the reference clip its own grade too (a look, or nothing) - these knobs move the second clip to where the first ALREADY is, not to where the look will put it.',
+        caveat: 'One frame of each. If either clip changes a lot across its length, measure a frame from the part the edit actually uses.',
+      });
     });
 
     server.registerTool('make_depth', {
