@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
+import { DateTime } from 'luxon';
 import { Store } from '../src/store.js';
 import { createApp } from '../src/app.js';
 import { gridLayout, suggestPicks, checkPicks, gridFiles, GRID_W, GRID_H, BAR_H } from '../src/grids.js';
@@ -45,6 +46,9 @@ test('Grid layout fills the story sheet without overlaps for every card count', 
     }
   }
   assert.equal(gridLayout(5)[4].width, GRID_W, 'the odd card out spans the row');
+  const two = gridLayout(2);
+  assert.ok(two.every(c => c.width === GRID_W), 'two cards stack, each full width');
+  assert.ok(two.every(c => c.height / c.width < 1), 'and each is wider than tall, not a sliver');
   assert.deepEqual(gridLayout(1)[0], { left: 0, top: 0, width: GRID_W, height: GRID_H - BAR_H });
   assert.throws(() => gridLayout(7), /1 to 6/);
 });
@@ -62,7 +66,7 @@ test('Suggestion takes six of the day in time order, preferring real photos, and
 test('Building a grid writes the sheet, and rendering goes to the render service only when asked', async t => {
   const { dir, store, e, app, calls, post, get, release } = await setup(t, { hold: true, vars: { RENDER_URL: 'http://render:3200/' } });
   const listed = (await get('/api/editions'))[0].grids;
-  assert.deepEqual(listed.map(g => [g.date, g.day, g.suggested.length, g.collage]), [['2099-10-24', 'SATURDAY', 6, false], ['2099-10-25', 'SUNDAY', 1, false]]);
+  assert.deepEqual(listed.map(g => [g.date, g.day, g.suggested.length, g.collage]), [['2099-10-24', 'SATURDAY', 6, false], ['2099-10-25', 'SUNDAY', 1, false], ['weekend', 'WEEKEND', 6, false]]);
 
   assert.equal((await post(`/api/editions/${e.id}/grids/2099-10-24/render`, {})).status, 400, 'no render before a grid exists');
   assert.equal((await post(`/api/editions/${e.id}/grids/2099-10-24`, { events: [0, 1, 2, 3, 4, 5, 6] })).status, 400, 'at most six cards');
@@ -90,6 +94,33 @@ test('Building a grid writes the sheet, and rendering goes to the render service
   assert.equal((await post(`/api/editions/${e.id}/grids/2099-10-24`, { events: [1] })).status, 200);
   assert.equal(existsSync(gridFiles(dir, e.id, '2099-10-24').mp4), false);
   assert.equal(store.grid(e.id, '2099-10-24').status, 'built');
+});
+
+test('A whole-weekend grid renders through the same endpoint, with a weekend date key', async t => {
+  const { dir, store, e, app, calls, post, release } = await setup(t, { hold: true, vars: { RENDER_URL: 'http://render:3200/' } });
+  await post(`/api/editions/${e.id}/grids/weekend`, { events: [0, 1, 2, 3, 4, 5] });
+  const started = await post(`/api/editions/${e.id}/grids/weekend/render`, {});
+  assert.equal(started.status, 202, 'weekend grid render is accepted');
+  release();
+  await Promise.all(app.locals.renders);
+  assert.equal(calls[0].body.date, 'weekend');
+  assert.equal(calls[0].body.day, 'WEEKEND');
+  assert.equal(existsSync(gridFiles(dir, e.id, 'weekend').png), true);
+  assert.equal(store.grid(e.id, 'weekend').status, 'ready');
+});
+
+test('The pinboard opener gets the picked events for its flyers; the other openers do not', async t => {
+  const { e, app, calls, post, release } = await setup(t, { hold: true, vars: { RENDER_URL: 'http://render:3200/' } });
+  assert.equal((await post(`/api/editions/${e.id}/grids/2099-10-24`, { events: [0, 1], style: 'pinboard' })).status, 200);
+  await post(`/api/editions/${e.id}/grids/2099-10-24/render`, {});
+  release();
+  await Promise.all(app.locals.renders);
+  const { style, events } = calls[0].body;
+  assert.equal(style, 'pinboard');
+  assert.deepEqual(events.map(x => x.index), [0, 1], 'one flyer per picked card, in pick order');
+  const first = e.data.events[0];
+  assert.deepEqual(events[0], { index: 0, title: first.title, when: DateTime.fromISO(first.startsAt).setZone('Europe/Riga').setLocale('en').toFormat('ccc, d LLL · HH:mm'), price: first.price, venue: first.venue, ...(first.languages ? { languages: first.languages } : {}) });
+  assert.match(events[0].when, /^Sat, 24 Oct · \d\d:\d\d$/);
 });
 
 test('A failed or interrupted render is reported, and nothing renders without a render service', async t => {
@@ -195,13 +226,20 @@ test('Finished weekends stay on disk but drop out of the listing', async t => {
 
 test('Grid tiles are the cards without the carousel number, drawn to fit their cell', async t => {
   const { dir, e, post } = await setup(t);
-  const { tilePath, gridLayout, GRID_W } = await import('../src/grids.js');
+  const { tilePath: themedTile, gridLayout, GRID_W } = await import('../src/grids.js');
+  const { themeKey } = await import('../src/themes.js');
+  const tilePath = (d, id, i, h) => themedTile(d, id, i, h, themeKey(e, '2099-10-24'));
   const { cardSvg } = await import('../src/render.js');
   const fs = await import('node:fs');
 
-  // The number badge is what separates a carousel slide from a grid tile.
-  assert.match(cardSvg(e.data.events[0], 2, 9, e.weekend), /OF 9/);
-  assert.doesNotMatch(cardSvg(e.data.events[0], 0, 0, e.weekend), /OF /);
+  // A carousel slide is numbered and dated; a grid tile is neither, because the grid shows one day at once.
+  const slide = cardSvg(e.data.events[0], 2, 9, e.weekend);
+  const tile = cardSvg(e.data.events[0], 0, 0, e.weekend, false, false, null, null, true);
+  assert.match(slide, /OF 9/);
+  assert.doesNotMatch(tile, /OF /);
+  assert.match(slide, /Sat, 24 Oct · 10:00/);
+  assert.match(tile, />10:00</, 'the tile keeps the clock time');
+  assert.doesNotMatch(tile, /Oct/, 'and drops the weekday and date');
 
   const cell = gridLayout(2)[0], cellHeight = Math.round((GRID_W * cell.height) / cell.width);
   assert.equal(existsSync(tilePath(dir, e.id, 0, cellHeight)), false);
@@ -225,4 +263,100 @@ test('Grid tiles are the cards without the carousel number, drawn to fit their c
   const six = gridLayout(6)[0], sixHeight = Math.round((GRID_W * six.height) / six.width);
   assert.ok(existsSync(tilePath(dir, e.id, 0, sixHeight)));
   assert.notEqual(sixHeight, cellHeight);
+});
+
+// Placeholder cards for an edition, so its grids can actually be built.
+async function cards(dir, edition) {
+  await mkdir(join(dir, 'media', edition.id), { recursive: true });
+  for (let i = 0; i < edition.data.events.length; i++)
+    await sharp({ create: { width: 1080, height: 1350, channels: 3, background: { r: 30, g: 40 + 10 * i, b: 60 } } }).jpeg().toFile(join(dir, 'media', edition.id, `feed-${i}.jpg`));
+}
+
+test('An event already in a grid is greyed out everywhere else, and cannot be built into a second story', async t => {
+  const { dir, store, e, post, get } = await setup(t);
+  assert.equal((await post(`/api/editions/${e.id}/grids/2099-10-24`, { events: [0, 1] })).status, 200);
+  const saturday = (await get('/api/editions')).find(x => x.id === e.id).grids.find(g => g.date === '2099-10-24');
+  assert.equal(saturday.events.find(x => x.index === 0).blocked, null, 'its own day can still be rebuilt with the cards it already has');
+  assert.equal(saturday.events.find(x => x.index === 2).blocked, null);
+
+  // The same event in a later weekend: matched by the organiser link, so a repeated exhibition is caught.
+  const again = store.submit({ weekend: '2099-10-30', events: [{ ...e.data.events[0], startsAt: '2099-10-31T12:00:00+03:00' }, { ...e.data.events[3], startsAt: '2099-10-31T14:00:00+03:00' }] });
+  await cards(dir, again);
+  const next = (await get('/api/editions')).find(x => x.id === again.id).grids[0];
+  assert.match(next.events[0].blocked, /already in a story for the weekend of 2099-10-23/);
+  assert.equal(next.events[1].blocked, null, 'an event that has not been used is still free');
+  assert.deepEqual(next.suggested, [1], 'the suggestion skips the blocked card');
+  const refused = await post(`/api/editions/${again.id}/grids/2099-10-31`, { events: [0, 1] });
+  assert.equal(refused.status, 400);
+  assert.match((await refused.json()).error, /cannot go in this story: already in a story/);
+  assert.equal((await post(`/api/editions/${again.id}/grids/2099-10-31`, { events: [1] })).status, 200, 'the free card builds fine');
+});
+
+test('Events left out of the weekend’s posts are not offered in the story grids', async t => {
+  const { store, e, post, get } = await setup(t);
+  store.approve(e.id, undefined, [0, 1, 2, 8]);
+  const saturday = (await get('/api/editions')).find(x => x.id === e.id).grids.find(g => g.date === '2099-10-24');
+  assert.deepEqual(saturday.events.map(x => x.index), [0, 1, 2], 'only the events being published are offered');
+  const refused = await post(`/api/editions/${e.id}/grids/2099-10-24`, { events: [0, 3] });
+  assert.equal(refused.status, 400, 'and one left out cannot be slipped in from a stale page');
+  assert.match((await refused.json()).error, /Only events on 2099-10-24/);
+});
+
+test('A whole-weekend grid takes cards from any day, and says so', async t => {
+  const { dir, e, post, get } = await setup(t);
+  const { gridText, tilePath: themedTile } = await import('../src/grids.js');
+  const { themeKey } = await import('../src/themes.js');
+  const { gridCaption } = await import('../src/providers.js');
+  let grids = (await get('/api/editions')).find(x => x.id === e.id).grids;
+  const weekend = grids.find(g => g.date === 'weekend');
+  assert.ok(weekend, 'offered after the day grids, since the edition spans two days');
+  assert.equal(weekend.day, 'WEEKEND');
+  assert.equal(weekend.events.length, 9, 'every published event, Saturday and Sunday alike');
+  assert.deepEqual(gridText(e, 'weekend'), { dateLabel: '23–25 OCTOBER', number: '1023' });
+
+  // A Saturday card and the Sunday one, together.
+  assert.equal((await post(`/api/editions/${e.id}/grids/weekend`, { events: [0, 8] })).status, 200);
+  const { gridLayout, GRID_W } = await import('../src/grids.js');
+  const cell = gridLayout(2)[0], h = Math.round((GRID_W * cell.height) / cell.width);
+  assert.ok(existsSync(themedTile(dir, e.id, 8, h, `${themeKey(e, '2099-10-25')}-d`)), 'its tiles are the weekday-and-time kind');
+
+  // The weekend round-up and the day stories may share cards, in either order.
+  grids = (await get('/api/editions')).find(x => x.id === e.id).grids;
+  assert.equal(grids.find(g => g.date === '2099-10-24').events.find(x => x.index === 0).blocked, null, 'a weekend card is still free for its day');
+  assert.equal((await post(`/api/editions/${e.id}/grids/2099-10-24`, { events: [0, 1] })).status, 200);
+  grids = (await get('/api/editions')).find(x => x.id === e.id).grids;
+  assert.equal(grids.find(g => g.date === 'weekend').events.find(x => x.index === 1).blocked, null, 'and a day card is free for the weekend');
+  assert.equal((await post(`/api/editions/${e.id}/grids/weekend`, { events: [0, 1, 8] })).status, 200);
+
+  // Its Reel caption lists the cards in the video, not a single day.
+  const caption = gridCaption(e, 'weekend', null, [0, 8]);
+  assert.match(caption, /This weekend in Rīga/);
+  assert.match(caption, /Event number 0/); assert.match(caption, /Event number 9/);
+  assert.doesNotMatch(caption, /Event number 1</);
+});
+
+test('No grid, of any size, cuts a card\'s text off, and every tile in a grid prints at one text size', async () => {
+  const { gridLayout, GRID_W } = await import('../src/grids.js');
+  const { cardSvg } = await import('../src/render.js');
+  // The longest copy the schema allows, and the realistic long price from the Open-Air Museum.
+  const worst = { title: 'W'.repeat(40) + ' ' + 'o'.repeat(59), startsAt: '2099-10-24T10:00:00+03:00', venue: 'Latvian Ethnographic Open-Air Museum, Brīvības gatve 440, Rīga, entrance by the main gate', price: '€9 adults; seniors €6; pupils/students €4; family €20', summary: 'x x x x x', sourceUrl: 'https://example.com/w', languages: ['EN', 'LV', 'RU'], alsoOn: ['2099-10-25'] };
+  for (let n = 1; n <= 6; n++) {
+    const cells = gridLayout(n), smallest = Math.min(...cells.map(c => c.width));
+    const sizes = new Set();
+    for (const cell of cells) {
+      const height = Math.round((GRID_W * cell.height) / cell.width), ui = smallest / cell.width;
+      for (const credit of [null, 'PHOTO: LIVERIGA.COM']) for (const timeOnly of [true, 'day']) {
+        const svg = cardSvg(worst, 0, 0, '2099-10-23', false, false, credit, height, timeOnly, undefined, ui);
+        const [, top, fit] = svg.match(/translate\(0,([\d.]+)\) scale\(([\d.]+)\)/).map(Number);
+        const stack = svg.slice(svg.indexOf(`scale(${fit.toFixed(4)})">`));
+        const lowest = Math.max(...[...stack.slice(0, stack.indexOf('</g>')).matchAll(/ y="([\d.]+)"/g)].map(m => Number(m[1])));
+        const bottom = ui * (top + fit * lowest);
+        assert.ok(bottom <= height - 20, `${n} cards: copy ends at ${bottom.toFixed(0)} on a ${height} tile`);
+        assert.ok(ui * top >= 60, `${n} cards: copy starts below the tags`);
+      }
+      // What the title prints at once the tile is shrunk into its cell: the same for every cell of the grid.
+      sizes.add(Math.round((cell.width / GRID_W) * ui * 1000));
+    }
+    assert.equal(sizes.size, 1, `${n} cards: one text size across the grid`);
+  }
 });

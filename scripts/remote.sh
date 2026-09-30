@@ -21,7 +21,7 @@ cli() { compose "run --rm --no-deps app node src/cli.js $*"; }
 set_env() { remote "sed -i 's/^$1=.*/$1=$2/' .env && grep -q '^$1=' .env || echo '$1=$2' >> .env"; }
 case "${1:-}" in
   deploy)
-    rsync -az --no-owner --no-group --delete --include '.env.example' --include '.env.deploy.example' --exclude '.env*' --exclude .git --exclude node_modules --exclude data --exclude backups --exclude .DS_Store --exclude 'remotion/out' --exclude 'remotion/build' ./ "$VPS:$DIR/"
+    rsync -az --no-owner --no-group --delete --include '.env.example' --include '.env.deploy.example' --exclude '.env*' --exclude .git --exclude node_modules --exclude data --exclude backups --exclude .DS_Store --exclude 'remotion/out' --exclude 'remotion/build' --exclude tools ./ "$VPS:$DIR/"
     remote "[ -f .env ] || sh scripts/bootstrap.sh"
     compose "up -d --build --remove-orphans"; compose ps
     echo 'Deployed. If this was the first deploy, run: scripts/remote.sh env  and set APP_DOMAIN, POSTIZ_DOMAIN, APP_ORIGIN, POSTIZ_PUBLIC_URL.';;

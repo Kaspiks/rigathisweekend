@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { digest, validateSubmission, plannedJobs, eventsByDay, validatePublication } from './domain.js';
 import { GRID_KINDS } from './providers.js';
+import { FAMILY_KEYS, TONES } from './themes.js';
 import { DateTime } from 'luxon';
 
 export class Store {
@@ -23,12 +24,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS graphics(name TEXT PRIMARY KEY, def TEXT NOT NULL, note TEXT, updated TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS guide_notes(title TEXT PRIMARY KEY, text TEXT NOT NULL, updated TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS upload_links(token TEXT PRIMARY KEY, footage TEXT NOT NULL, name TEXT NOT NULL, expires TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open');
-      CREATE TABLE IF NOT EXISTS footage_renders(id INTEGER PRIMARY KEY, footage TEXT NOT NULL, version INTEGER NOT NULL, kind TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', error TEXT, result TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS footage_renders(id INTEGER PRIMARY KEY, footage TEXT NOT NULL, version INTEGER NOT NULL, kind TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', error TEXT, result TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS animations(id TEXT PRIMARY KEY, name TEXT NOT NULL, composition TEXT NOT NULL, caption TEXT NOT NULL DEFAULT '', hold_seconds REAL NOT NULL DEFAULT 5, status TEXT NOT NULL DEFAULT 'new', error TEXT, postiz TEXT, updated TEXT NOT NULL);`);
     // Instagram posts are per day, so the approval rule moved from one edition per weekend
     // to one per weekend day. Editions approved under the old rule keep their days.
     this.db.exec('DROP INDEX IF EXISTS one_approved_weekend');
     try {this.db.exec('ALTER TABLE editions ADD COLUMN selected TEXT');} catch {} // added with per-event selection
     try {this.db.exec('ALTER TABLE editions ADD COLUMN stories TEXT');} catch {} // added with opt-in stories
+    try {this.db.exec('ALTER TABLE editions ADD COLUMN themes TEXT');} catch {} // colours: {palette, days:{date:tone}}
     try {this.db.exec('ALTER TABLE jobs ADD COLUMN publish_at TEXT');} catch {} // when Postiz should publish it
     try {this.db.exec('ALTER TABLE jobs ADD COLUMN finished_at TEXT');} catch {}
     try {this.db.exec("ALTER TABLE grids ADD COLUMN style TEXT NOT NULL DEFAULT 'ticket'");} catch {} // added with the ticket opener
@@ -37,7 +40,7 @@ export class Store {
       try {this.db.exec(`ALTER TABLE short_links ADD COLUMN ${column}`);} catch {} // ej.uz links alongside the app's own
     if(!this.db.prepare('SELECT count(*) n FROM day_locks').get().n)
       for(const row of this.db.prepare('SELECT id,data FROM editions WHERE approved=1 AND demo=0').all())
-        for(const day of eventsByDay(JSON.parse(row.data)))
+        if(!JSON.parse(row.data).headline) for(const day of eventsByDay(JSON.parse(row.data)))
           this.db.prepare('INSERT OR IGNORE INTO day_locks(date,edition) VALUES(?,?)').run(day.date,row.id);
   }
   submit(input, demo=false) {
@@ -45,7 +48,7 @@ export class Store {
     this.db.prepare('INSERT OR IGNORE INTO editions(id,weekend,data,demo) VALUES(?,?,?,?)').run(id,data.weekend,JSON.stringify(data),+demo);
     return this.get(id);
   }
-  get(id) { const row=this.db.prepare('SELECT * FROM editions WHERE id=?').get(id); if(!row) throw new Error('Edition not found'); return {...row,data:JSON.parse(row.data),selected:row.selected?JSON.parse(row.selected):null,stories:row.stories?JSON.parse(row.stories):[]}; }
+  get(id) { const row=this.db.prepare('SELECT * FROM editions WHERE id=?').get(id); if(!row) throw new Error('Edition not found'); return {...row,data:JSON.parse(row.data),selected:row.selected?JSON.parse(row.selected):null,stories:row.stories?JSON.parse(row.stories):[],themes:colours(row.themes)}; }
   list() { return this.db.prepare('SELECT id FROM editions ORDER BY created DESC, rowid DESC').all().map(r=>this.get(r.id)); }
   jobs(id) { return this.db.prepare('SELECT * FROM jobs WHERE edition=? ORDER BY id').all(id); }
   // `selected` lists the events to publish (omit for all); `stories` lists which of those also get a story draft.
@@ -66,7 +69,8 @@ export class Store {
     const publishing=validatePublication(e.data,picks);
     // Only the events you chose have to still be in the future; skipping a started one is the point of selecting.
     if(publishing.some(d=>d.items.some(x=>Date.parse(x.event.startsAt)<=now.toMillis()))) throw new Error('Selection contains events that already started; deselect them or submit an updated edition');
-    for(const date of new Set(publishing.map(p=>p.date))) {
+    // A special post (one with a headline) sits alongside the day's regular post, so it neither needs nor takes the day.
+    if(!e.data.headline) for(const date of new Set(publishing.map(p=>p.date))) {
       const owner=this.db.prepare('SELECT edition FROM day_locks WHERE date=?').get(date)?.edition;
       if(owner&&owner!==id) throw new Error(`Another approved edition already covers ${date}; submit an updated edition for the remaining days`);
     }
@@ -80,7 +84,7 @@ export class Store {
       this.db.prepare('UPDATE editions SET selected=?, stories=? WHERE id=?').run(picks?JSON.stringify(picks):null,JSON.stringify(storyPicks),id);
       // One approved edition per weekend day: a later edition may cover a day nothing has claimed,
       // but two editions can never publish the same day twice.
-      for(const day of [...new Map(publishing.map(p=>[p.date,p])).values()]) {
+      if(!e.data.headline) for(const day of [...new Map(publishing.map(p=>[p.date,p])).values()]) {
         this.db.prepare('INSERT OR IGNORE INTO day_locks(date,edition) VALUES(?,?)').run(day.date,id);
         if(this.db.prepare('SELECT edition FROM day_locks WHERE date=?').get(day.date).edition!==id)
           throw new Error(`Another approved edition already covers ${day.date}; submit an updated edition for the remaining days`);
@@ -174,10 +178,47 @@ export class Store {
     this.db.prepare('UPDATE editions SET data=? WHERE id=?').run(JSON.stringify(e.data),id);
     return this.get(id);
   }
+  // Colours: the week's family for the whole edition, and a tone of it per day. Images go to Postiz at
+  // approval, so the colours are fixed from then on.
+  #colourable(id) {
+    const e=this.get(id);
+    if(e.approved) throw new Error('This edition is approved and its images are already in Postiz, so its colours can no longer be changed here');
+    return e;
+  }
+  setPalette(id,palette) {
+    const e=this.#colourable(id);
+    if(!FAMILY_KEYS.includes(palette)) throw new Error(`Unknown colour family ${palette}`);
+    this.db.prepare('UPDATE editions SET themes=? WHERE id=?').run(JSON.stringify({...e.themes,palette}),id);
+    return this.get(id);
+  }
+  setTone(id,date,tone) {
+    const e=this.#colourable(id);
+    if(!TONES[tone]) throw new Error(`Unknown tone ${tone}`);
+    if(!eventsByDay(e.data).some(d=>d.date===date)) throw new Error(`No events on ${date} in this edition`);
+    this.db.prepare('UPDATE editions SET themes=? WHERE id=?').run(JSON.stringify({...e.themes,days:{...e.themes.days,[date]:tone}}),id);
+    return this.get(id);
+  }
   // Story grids, one per edition day: the cards you picked, the envelope label, and the render state.
   grid(edition,date) {
     const row=this.db.prepare('SELECT * FROM grids WHERE edition=? AND date=?').get(edition,date);
     return row?{date:row.date,picks:JSON.parse(row.picks),kicker:row.kicker,category:row.category,holdSeconds:row.hold_seconds,style:row.style,status:row.status,error:row.error,updated:row.updated}:null;
+  }
+  // Every event that is already in a grid somebody built, keyed by its organiser link so the same event is
+  // recognised from one weekend to the next (a run of an exhibition is submitted again each week). Used to
+  // grey it out in the pickers: a story video should not go out twice with the same card in it.
+  gridUsage() {
+    const used=new Map();
+    for(const row of this.db.prepare('SELECT edition,date,picks FROM grids').all()) {
+      const e=this.db.prepare('SELECT weekend,data FROM editions WHERE id=?').get(row.edition);
+      if(!e) continue;
+      const events=JSON.parse(e.data).events;
+      for(const i of JSON.parse(row.picks)) {
+        const url=events[i]?.sourceUrl; if(!url) continue;
+        if(!used.has(url)) used.set(url,[]);
+        used.get(url).push({edition:row.edition,date:row.date,weekend:e.weekend});
+      }
+    }
+    return used;
   }
   grids(edition) {return this.db.prepare('SELECT date FROM grids WHERE edition=? ORDER BY date').all(edition).map(r=>this.grid(edition,r.date));}
   saveGrid(edition,date,{picks,kicker,category,holdSeconds,style='ticket'}) {
@@ -278,9 +319,42 @@ export class Store {
     this.db.prepare("UPDATE footage SET status='failed', error='Processing was interrupted; press Retry', progress=NULL WHERE status='processing'").run();
     this.db.prepare("UPDATE footage_renders SET status='failed', error='Rendering was interrupted; render again' WHERE status='rendering'").run();
   }
+  // Standalone animations: a Remotion composition rendered on its own, with no edition, no weekend and
+  // no day lock behind it. The grid flow exists to stop two editions publishing the same day twice;
+  // a one-off clip has nothing to collide with, so it deliberately sits outside all of that.
+  #animation(row) {
+    return row?{id:row.id,name:row.name,composition:row.composition,caption:row.caption,holdSeconds:row.hold_seconds,
+      status:row.status,error:row.error,postiz:row.postiz?JSON.parse(row.postiz):null,updated:row.updated}:null;
+  }
+  animations() {return this.db.prepare('SELECT * FROM animations ORDER BY updated DESC').all().map(r=>this.#animation(r));}
+  animation(id) {const a=this.#animation(this.db.prepare('SELECT * FROM animations WHERE id=?').get(id)); if(!a) throw new Error('Animation not found'); return a;}
+  saveAnimation({id,name,composition,caption='',holdSeconds=5}) {
+    const key=id||[...Array(12)].map(()=>randomInt(16).toString(16)).join('');
+    if(id&&this.animation(id).status==='rendering') throw new Error('This animation is rendering; wait for it to finish before changing it');
+    this.db.prepare(`INSERT INTO animations(id,name,composition,caption,hold_seconds,status,error,updated) VALUES(?,?,?,?,?,'new',NULL,?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name,composition=excluded.composition,caption=excluded.caption,hold_seconds=excluded.hold_seconds,updated=excluded.updated`)
+      .run(key,name,composition,caption,holdSeconds,new Date().toISOString());
+    return this.animation(key);
+  }
+  // Claims the render atomically, so two clicks cannot start two renders of the same clip.
+  startAnimationRender(id) {
+    const r=this.db.prepare("UPDATE animations SET status='rendering',error=NULL,updated=? WHERE id=? AND status!='rendering'").run(new Date().toISOString(),id);
+    if(!r.changes) throw new Error('This animation is already rendering');
+    return this.animation(id);
+  }
+  finishAnimationRender(id,error=null) {this.db.prepare('UPDATE animations SET status=?,error=?,updated=? WHERE id=?').run(error?'failed':'ready',error,new Date().toISOString(),id); return this.animation(id);}
+  recoverAnimations() {this.db.prepare("UPDATE animations SET status='failed', error='Rendering was interrupted; render again' WHERE status='rendering'").run();}
+  setAnimationPostiz(id,info) {this.db.prepare('UPDATE animations SET postiz=?,updated=? WHERE id=?').run(JSON.stringify(info),new Date().toISOString(),id); return this.animation(id);}
+  deleteAnimation(id) {this.animation(id); this.db.prepare('DELETE FROM animations WHERE id=?').run(id);}
   close(){this.db.close();}
 }
 
+// The stored colour choices. The first version kept one whole theme per day ({date: key}); those picks
+// predate week families and are dropped, so such an edition falls back to its week's defaults.
+function colours(json) {
+  const c=json?JSON.parse(json):{};
+  return {...(c.palette?{palette:c.palette}:{}),days:c.days||{}};
+}
 // Where short links point: SHORT_LINK_BASE (a bare host such as kurejam.lv) once you own a short
 // domain, otherwise the dashboard's own host, which already serves them.
 export function shortBase(env=process.env) {

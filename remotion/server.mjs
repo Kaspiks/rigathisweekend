@@ -1,5 +1,6 @@
 // Render service for the app. POST /render turns a day's grid into its story video (ticket or envelope
-// opener); POST /clip renders an animated edit over uploaded footage, as stills or as a video.
+// opener); POST /clip renders an animated edit over uploaded footage, as stills or as a video; POST
+// /animation renders any composition on its own.
 // Chrome loads grids, footage and pictures from this server over localhost, so nothing outside the
 // container is fetched. Only one render runs at a time; the app shows a second request as busy.
 import http from 'node:http';
@@ -13,8 +14,12 @@ const DATA = resolve(process.env.DATA_DIR || '/data');
 const SERVE_URL = resolve('build');
 // Chrome Headless Shell from `npx remotion browser ensure` unless another build is named (for local runs).
 const browserExecutable = process.env.BROWSER_EXECUTABLE || null;
-const EDITION = /^[a-f0-9]{24}$/, DATE = /^\d{4}-\d{2}-\d{2}$/, ASSET = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const EDITION = /^[a-f0-9]{24}$/, ASSET = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const DATE = /^(?:\d{4}-\d{2}-\d{2}|weekend)$/;
+const ANIM = /^[a-f0-9]{12}$/, COMPOSITION = /^[A-Za-z][A-Za-z0-9_-]{0,40}$/;
 let busy = false;
+// Compositions that draw with three.js; they need the software GL backend in a container with no GPU.
+const WEBGL = ['AutumnStory', 'BaroqueStory', 'MosaicStory', 'ResearchersStory', 'LeafGustStory'];
 
 const send = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
 const readJson = (req, max = 16_000) => new Promise((ok, fail) => {
@@ -25,21 +30,47 @@ const readJson = (req, max = 16_000) => new Promise((ok, fail) => {
 const text = (v, max) => typeof v === 'string' && v.trim() && v.length <= max ? v.trim() : null;
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 
-// The ticket opener is the default; the envelope stays available.
-const STYLES = { ticket: 'TicketStory', envelope: 'EnvelopeStory' };
+// The ticket opener is the default; the envelope, the three autumn openers and the three hands-on ones are
+// the alternatives.
+const STYLES = { ticket: 'TicketStory', envelope: 'EnvelopeStory', leaves: 'LeafGustStory', bag: 'HarvestBagStory', book: 'PressedLeafStory',
+  mark: 'MarkStory', sketch: 'SketchStory', pinboard: 'PinboardStory' };
+// An event's photo for the pinboard's flyers: your upload first, then the organiser's image (as the cards use).
+const photoFile = async (edition, index) => {
+  for (const name of [`upload-${index}.jpg`, `photo-${index}.jpg`]) {
+    const file = join(DATA, 'media', edition, name);
+    if (await stat(file).then(() => true, () => false)) return file;
+  }
+  return null;
+};
+const clipText = (v, max) => typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined;
 
-async function render({ style = 'ticket', edition, date, day, dateLabel, number, count, kicker, category, holdSeconds }) {
+async function render({ style = 'ticket', edition, date, day, dateLabel, number, count, kicker, category, holdSeconds, events }) {
   if (!EDITION.test(edition || '') || !DATE.test(date || '')) throw bad('Invalid edition or date');
   if (!STYLES[style]) throw bad(`Unknown story style ${style}`);
   const props = { day: text(day, 20), kicker: text(kicker, 24), category: text(category, 32), holdSeconds: Math.min(15, Math.max(2, Number(holdSeconds) || 6)) };
   if (!props.day || !props.kicker || !props.category) throw bad('Day, kicker and category are required');
-  if (style === 'ticket') Object.assign(props, { date: text(dateLabel, 24) || '', number: /^\d{4}$/.test(number || '') ? number : '0000', count: Math.min(6, Math.max(1, Number(count) || 1)) });
+  // Everything but the envelope prints the date and the card count; only the ticket has a serial number.
+  if (style !== 'envelope') Object.assign(props, { date: text(dateLabel, 24) || '', count: Math.min(6, Math.max(1, Number(count) || 1)) });
+  if (style === 'ticket') props.number = /^\d{4}$/.test(number || '') ? number : '0000';
+  // The pinboard's flyers are the day's events, each with its photo in the corner when there is one.
+  if (style === 'pinboard' && Array.isArray(events)) {
+    props.events = [];
+    for (const e of events.slice(0, 6)) {
+      const title = clipText(e?.title, 120), when = clipText(e?.when, 40);
+      if (!title || !when) continue;
+      const index = Number.isInteger(e.index) && e.index >= 0 ? e.index : null;
+      const photo = index != null && await photoFile(edition, index) ? `http://127.0.0.1:${PORT}/photo/${edition}/${index}.jpg` : undefined;
+      const languages = Array.isArray(e.languages) ? e.languages.filter(l => ['EN', 'LV', 'RU'].includes(l)).slice(0, 3) : [];
+      props.events.push({ title, when, price: clipText(e.price, 60), venue: clipText(e.venue, 120), languages: languages.length ? languages : undefined, photo });
+    }
+  }
   const dir = join(DATA, 'media', edition);
   await stat(join(dir, `grid-${date}.png`)).catch(() => { throw bad('Build the grid first', 409); });
   const inputProps = { ...props, sheet: `http://127.0.0.1:${PORT}/grid/${edition}/${date}.png` };
   const composition = await selectComposition({ serveUrl: SERVE_URL, id: STYLES[style], inputProps, browserExecutable });
   const out = join(dir, `grid-${date}.mp4`), tmp = `${out}.part.mp4`;
-  await renderMedia({ composition, serveUrl: SERVE_URL, codec: 'h264', crf: 18, inputProps, outputLocation: tmp, overwrite: true, logLevel: 'error', browserExecutable });
+  const chromiumOptions = WEBGL.includes(composition.id) ? { gl: 'swangle' } : undefined;
+  await renderMedia({ composition, serveUrl: SERVE_URL, codec: 'h264', crf: 18, inputProps, chromiumOptions, outputLocation: tmp, overwrite: true, logLevel: 'error', browserExecutable });
   await rename(tmp, out);
   return { file: `grid-${date}.mp4`, style, seconds: composition.durationInFrames / composition.fps };
 }
@@ -110,7 +141,7 @@ async function clip({ footage, render: id, kind, frames, scale, range, props }) 
 
 // Files Chrome reads while rendering: the day's grid, a clip's working copy, its pictures, 3D models, sounds and depth frames.
 function localFile(url) {
-  const grid = url.match(/^\/grid\/([a-f0-9]{24})\/(\d{4}-\d{2}-\d{2})\.png$/);
+  const grid = url.match(/^\/grid\/([a-f0-9]{24})\/(\d{4}-\d{2}-\d{2}|weekend)\.png$/);
   if (grid) return { file: join(DATA, 'media', grid[1], `grid-${grid[2]}.png`), type: 'image/png' };
   const video = url.match(/^\/footage\/([a-f0-9]{24})\/work\.mp4$/);
   if (video) return { file: join(DATA, 'footage', video[1], 'work.mp4'), type: 'video/mp4' };
@@ -125,6 +156,26 @@ function localFile(url) {
   return null;
 }
 
+// A standalone clip: any composition in the bundle, rendered on its own. Unlike /render it needs no
+// edition and no grid PNG - nothing is composited in, so there is no precondition to check. Props not
+// given here fall back to the composition's defaultProps, which is what makes an empty body useful.
+async function animation({ id, composition, holdSeconds, props = {} }) {
+  if (!ANIM.test(id || '')) throw bad('Invalid animation id');
+  if (!COMPOSITION.test(composition || '')) throw bad('Invalid composition name');
+  const dir = join(DATA, 'media', 'animations');
+  await mkdir(dir, { recursive: true });
+  const inputProps = { ...props, holdSeconds: Math.min(30, Math.max(1, Number(holdSeconds) || 5)) };
+  let comp;
+  try { comp = await selectComposition({ serveUrl: SERVE_URL, id: composition, inputProps, browserExecutable }); }
+  catch { throw bad(`No composition named ${composition} in the bundle`); }
+  const out = join(dir, `${id}.mp4`), tmp = `${out}.part.mp4`;
+  // WebGL compositions (three.js) need a GL backend; the container has no GPU, so SwiftShader via ANGLE.
+  const chromiumOptions = WEBGL.includes(comp.id) ? { gl: 'swangle' } : undefined;
+  await renderMedia({ composition: comp, serveUrl: SERVE_URL, codec: 'h264', crf: 18, inputProps, chromiumOptions, outputLocation: tmp, overwrite: true, logLevel: 'error', browserExecutable });
+  await rename(tmp, out);
+  return { file: `${id}.mp4`, composition, seconds: comp.durationInFrames / comp.fps };
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const local = req.method === 'GET' && localFile(req.url);
@@ -134,7 +185,19 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': local.type, 'Content-Length': size, 'Access-Control-Allow-Origin': '*' });
       return createReadStream(local.file).pipe(res);
     }
+    const photo = req.method === 'GET' && req.url.match(/^\/photo\/([a-f0-9]{24})\/(\d{1,3})\.jpg$/);
+    if (photo) {
+      const file = await photoFile(photo[1], Number(photo[2]));
+      if (!file) return send(res, 404, { error: 'No photo' });
+      res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+      return createReadStream(file).pipe(res);
+    }
     if (req.method === 'GET' && req.url === '/healthz') return send(res, 200, { ok: true, busy });
+    if (req.method === 'POST' && req.url === '/animation') {
+      if (busy) return send(res, 409, { error: 'Another video is rendering; try again in a minute', busy: true });
+      busy = true;
+      try { return send(res, 200, await animation(await readJson(req))); } finally { busy = false; }
+    }
     if (req.method === 'POST' && (req.url === '/render' || req.url === '/clip')) {
       if (busy) return send(res, 409, { error: 'Another video is rendering; try again in a minute', busy: true });
       busy = true;

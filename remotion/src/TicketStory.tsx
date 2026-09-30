@@ -20,7 +20,7 @@ export type TicketStoryProps = { day: string; date: string; number: string; kick
 
 export const TICKET_FPS = 30;
 const T = {
-  settle: [0, 12],   // the ticket lands: already legible on frame 0
+  settle: [0, 18],   // the ticket lands with a wobble: already legible on frame 0
   tug: [16, 23],     // a small pull on the ticket before the paper gives
   tear: [20, 42],    // the rip travels across the paper, in full view
   fall: [42, 62],    // the freed stub drops to the strip the grid keeps clear
@@ -138,10 +138,10 @@ export const TicketStory = ({ day, date, number, kicker, category, count, sheet,
   const frame = useCurrentFrame();
   const src = /^https?:\/\//.test(sheet) ? sheet : staticFile(sheet);
 
-  const settle = range(frame, T.settle, Easing.bezier(0.2, 0.9, 0.3, 1));
+  const settle = range(frame, T.settle, Easing.elastic(0.8)); // the ticket wobbles as it lands
   const tug = range(frame, T.tug) * (1 - range(frame, T.lift));
   // The rip accelerates as it runs across the paper, the way a real tear gives way.
-  const tear = range(frame, T.tear, Easing.bezier(0.45, 0, 0.55, 1)); // hesitates, gives, hesitates again
+  const tear = range(frame, T.tear, Easing.bezier(0.76, 0, 0.24, 1)); // easeInOutQuart: resists, gives, settles
   const front = W * tear;
   const fall = range(frame, T.fall, Easing.bezier(0.3, 0, 0.2, 1));
   const lift = range(frame, T.lift, Easing.bezier(0.55, 0, 0.9, 0.45));

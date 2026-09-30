@@ -1,0 +1,31 @@
+# Story opener sound effects
+
+Cut by tools/sfx/make.mjs from these Freesound recordings, all CC0 (no credit required;
+listed so the source of every sound is on record).
+
+- paper bag movement.wav by hopflog: https://freesound.org/s/40953/ (CC0)
+- Wet Towel Floor Impact Punch Drop Bag Cloth by qubodup: https://freesound.org/s/74488/ (CC0)
+- Papebag Cumple.wav by esperri: https://freesound.org/s/119142/ (CC0)
+- Thumb Tack.wav by lmbubec: https://freesound.org/s/119798/ (CC0)
+- hand slaps.aif by jasonLON: https://freesound.org/s/125406/ (CC0)
+- Wind Gust by crashoverride6: https://freesound.org/s/146932/ (CC0)
+- Gunshot 3 (wet towel smacked on a tile floor) by ShawnyBoy: https://freesound.org/s/164932/ (CC0)
+- Single Water Drop by paespedro: https://freesound.org/s/174718/ (CC0)
+- tearing paper4.wav by keweldog: https://freesound.org/s/181773/ (CC0)
+- Paper Sketchbook Page Flips 1 by OwlStorm: https://freesound.org/s/320148/ (CC0)
+- Paper Flutter .wav by mickdow: https://freesound.org/s/320913/ (CC0)
+- Hand Slap on Sweater by oscaraudiogeek: https://freesound.org/s/333516/ (CC0)
+- Painting, many short brush strokes by krokoi63: https://freesound.org/s/415518/ (CC0)
+- Big Water Splash by qubodup: https://freesound.org/s/442773/ (CC0)
+- Barefoot steps on tile by vintage2005: https://freesound.org/s/444619/ (CC0)
+- Drawing with Pencil (Slow & Continuous) by AO-SoundPawz: https://freesound.org/s/444676/ (CC0)
+- ThumbTack by Nicolas4677: https://freesound.org/s/446634/ (CC0)
+- Autumn wind and dry leaves.wav by Stek59: https://freesound.org/s/457318/ (CC0)
+- sketchbook-drawing-pencil-sounds.aif by thisisjoewells: https://freesound.org/s/463848/ (CC0)
+- traditional stamp.wav by I.fekry: https://freesound.org/s/470710/ (CC0)
+- painting_1.aif by ssalo: https://freesound.org/s/482891/ (CC0)
+- Seismic Slam by magnuswaker: https://freesound.org/s/531862/ (CC0)
+- wet thwack by adviseme333: https://freesound.org/s/679391/ (CC0)
+- Woosh by florianreichelt: https://freesound.org/s/683096/ (CC0)
+- Paper Grab by danluxradium: https://freesound.org/s/767489/ (CC0)
+- Door thump - Binaural OKM-1 by Sadiquecat: https://freesound.org/s/869495/ (CC0)

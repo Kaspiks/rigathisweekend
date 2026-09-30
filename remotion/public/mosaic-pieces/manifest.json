@@ -1,0 +1,82 @@
+{
+  "format": "glTF 2.0 GLB",
+  "size": "1x1 units, centred, front facing +z",
+  "bones": [
+    "Root",
+    "Corner_TL",
+    "Edge_T",
+    "Corner_TR",
+    "Edge_L",
+    "Center",
+    "Edge_R",
+    "Corner_BL",
+    "Edge_B",
+    "Corner_BR"
+  ],
+  "pieces": {
+    "rust_herringbone_wool": {
+      "vertices": 2442,
+      "triangles": 4352,
+      "textures": {
+        "front": 1024,
+        "back": 512
+      }
+    },
+    "indigo_denim_twill": {
+      "vertices": 2442,
+      "triangles": 4352,
+      "textures": {
+        "front": 1024,
+        "back": 512
+      }
+    },
+    "mustard_knit": {
+      "vertices": 2442,
+      "triangles": 4352,
+      "textures": {
+        "front": 1024,
+        "back": 512
+      }
+    },
+    "oatmeal_linen": {
+      "vertices": 2442,
+      "triangles": 4352,
+      "textures": {
+        "front": 1024,
+        "back": 512
+      }
+    },
+    "forest_tartan": {
+      "vertices": 2442,
+      "triangles": 4352,
+      "textures": {
+        "front": 1024,
+        "back": 512
+      }
+    },
+    "burgundy_crushed_velvet": {
+      "vertices": 2442,
+      "triangles": 4352,
+      "textures": {
+        "front": 1024,
+        "back": 512
+      }
+    },
+    "latvian_auseklis_weave": {
+      "vertices": 2442,
+      "triangles": 4352,
+      "textures": {
+        "front": 1024,
+        "back": 512
+      }
+    },
+    "brown_houndstooth": {
+      "vertices": 2442,
+      "triangles": 4352,
+      "textures": {
+        "front": 1024,
+        "back": 512
+      }
+    }
+  }
+}
