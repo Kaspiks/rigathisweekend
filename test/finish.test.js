@@ -92,23 +92,69 @@ const luma = (v) => 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
 
 test('a clip matched against itself is left alone', () => {
   const m = { black: 0.1, white: 0.8, mid: 0.4, r: 0.4, g: 0.38, b: 0.42 };
-  const { knobs, limited } = matchKnobs(m, m);
+  const { knobs, limited, leftover } = matchKnobs(m, m);
   assert.deepEqual(limited, []);
   for (const [k, v] of Object.entries(knobs)) assert.equal(v, 0, `${k} should not move`);
   assert.ok(!('lift' in knobs), 'and no lift, which would tint the shadows for nothing');
+  assert.deepEqual(leftover, { black: 0, mid: 0, white: 0 });
 });
 
-test('the suggested knobs put one clip\'s black and white where the other\'s are', () => {
+test('the suggested knobs carry a flat clip towards the reference at every level', () => {
   const reference = { black: 0.02, white: 0.99, mid: 0.42, r: 0.45, g: 0.45, b: 0.45 };
   const flat = { black: 0.20, white: 0.70, mid: 0.44, r: 0.40, g: 0.42, b: 0.38 };
-  const { knobs } = matchKnobs(reference, flat);
+  const { knobs, leftover } = matchKnobs(reference, flat);
   assert.ok(knobs.contrast > 0.3, `a flat clip needs contrast, not ${knobs.contrast}`);
-  const black = luma(graded(knobs, [flat.black, flat.black, flat.black]));
-  assert.ok(Math.abs(black - reference.black) < 0.03, `black lands on ${black}, wanted ${reference.black}`);
+  for (const k of ['black', 'white'])
+    assert.ok(Math.abs(leftover[k]) < Math.abs(flat[k] - reference[k]) / 3, `${k} ended ${leftover[k]} out, having started ${(flat[k] - reference[k]).toFixed(3)} out`);
+  assert.ok(Math.abs(leftover.mid) < 0.05, `and the mid stays close: ${leftover.mid}`);
+  // The reported leftovers are what the knobs really leave behind, not what the fit hoped for.
+  const got = luma(graded(knobs, [flat.black, flat.black, flat.black]));
+  assert.ok(Math.abs(got - (reference.black + leftover.black)) < 0.02, `black lands on ${got}, and leftover says ${reference.black + leftover.black}`);
   // Colour is solved after the levels, so the cast comes out even though the contrast moved a long way.
   const [r, g, b] = graded(knobs, [flat.r, flat.g, flat.b]);
   assert.ok(Math.abs(r / b - reference.r / reference.b) < 0.03, `red against blue: ${r / b}`);
   assert.ok(Math.abs(g / Math.sqrt(r * b) - 1) < 0.03, `green against the other two: ${g / Math.sqrt(r * b)}`);
+});
+
+// An exposure and a contrast are a straight line, and a line cannot pass through three points. Forcing
+// black and white onto the reference exactly - which is what this did at first - matched the two ends
+// and pushed the MIDTONES 0.16 apart on the real drift footage. Overall brightness is the first thing
+// the eye reads on a cut, so that traded a small fault for a bigger one.
+//
+// What a least-squares fit promises is NOT that every level improves: it can move one that already
+// matched, if that is what buys the other two. Two clips whose whites happen to coincide and whose
+// blacks are far apart will see the white give way. What it does promise is that the WEIGHTED TOTAL
+// never gets worse, because leaving the clip alone (slope 1, offset 0) is itself a candidate the fit
+// could have chosen. That is the property worth holding it to.
+const WEIGHT = { black: 2, mid: 3, white: 1 };
+const sse = (a, b, leftover) => ['black', 'mid', 'white'].reduce((s, k) => s + WEIGHT[k] * (leftover ? leftover[k] : b[k] - a[k]) ** 2, 0);
+
+test('matching never leaves two clips further apart overall than it found them', () => {
+  const rnd = (s) => { const x = Math.sin(s) * 10000; return x - Math.floor(x); };
+  const make = (s) => {
+    const black = rnd(s) * 0.35, white = Math.min(1, black + 0.25 + rnd(s + 1) * 0.7);
+    return { black, white, mid: black + (white - black) * (0.2 + rnd(s + 2) * 0.6), r: 0.25 + rnd(s + 3) * 0.5, g: 0.25 + rnd(s + 4) * 0.5, b: 0.25 + rnd(s + 5) * 0.5 };
+  };
+  let improved = 0, tested = 0;
+  for (let i = 0; i < 2000; i++) {
+    const a = make(i * 7 + 1), b = make(i * 7 + 4), { leftover, limited } = matchKnobs(a, b);
+    if (limited.includes('exposure') || limited.includes('contrast')) continue; // a clamped knob cannot reach the fit
+    tested++;
+    const before = sse(a, b, null), after = sse(a, b, leftover);
+    assert.ok(after <= before + 1e-3, `pair ${i}: total ${before.toFixed(4)} -> ${after.toFixed(4)}`);
+    if (after < before * 0.5) improved++;
+  }
+  assert.ok(tested > 1500, `enough pairs to mean something, not ${tested}`);
+  assert.ok(improved > tested * 0.7, `and most of them improve a lot, not ${improved} of ${tested}`);
+});
+
+test('the real drift clips: the midtones are not sacrificed to the two ends', () => {
+  // Measured off the server: the vertical Latvia clip and the horizontally cropped stock it cuts to.
+  const latvia = { black: 0.1793, mid: 0.5435, white: 0.9222, r: 0.5278, g: 0.5677, b: 0.5483 };
+  const stock = { black: 0.0258, mid: 0.549, white: 0.7729, r: 0.4671, g: 0.5085, b: 0.5343 };
+  const { leftover } = matchKnobs(latvia, stock);
+  assert.ok(Math.abs(leftover.mid) < 0.09, `the mid has to stay close, not ${leftover.mid} out`);
+  assert.ok(Math.abs(leftover.black) < 0.05, `and the black point still lands near, not ${leftover.black} out`);
 });
 
 test('two clips further apart than the knobs reach say so instead of pretending', () => {

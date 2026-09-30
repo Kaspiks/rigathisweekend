@@ -173,17 +173,26 @@ export function gradeKnobs(layer) {
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 export function matchKnobs(reference, clip) {
-  const spread = Math.max(0.02, clip.white - clip.black);
-  const S = clamp((reference.white - reference.black) / spread, 0.2, 5);
-  const I = reference.black - S * clip.black;
+  // An exposure and a contrast together are a straight line, and a straight line cannot pass through
+  // three points. The first version of this forced black and white onto the reference exactly - and on
+  // real footage that pushed the MIDTONES 0.16 apart, which reads worse on a cut than the black point
+  // it had just fixed, because the eye reads overall brightness before it reads shadow depth. So the
+  // three are fitted by weighted least squares instead, with the mid weighted heaviest and the white
+  // lightest: the extreme highlight is usually one specular, and a roll-off deals with it anyway.
+  const pts = [[clip.black, reference.black, 2], [clip.mid, reference.mid, 3], [clip.white, reference.white, 1]];
+  let sw = 0, swx = 0, swy = 0, swxx = 0, swxy = 0;
+  for (const [x, y, w] of pts) { sw += w; swx += w * x; swy += w * y; swxx += w * x * x; swxy += w * x * y; }
+  const denom = sw * swxx - swx * swx;
+  const S = clamp(Math.abs(denom) < 1e-6 ? 1 : (sw * swxy - swx * swy) / denom, 0.2, 5);
+  const I = (swy - S * swx) / sw;
   // y = e·c·x + (0.5 − 0.5c): the intercept fixes c, and the slope then fixes the exposure.
   const c = clamp(1 - 2 * I, 0.15, 3);
   const contrast = clamp(c >= 1 ? (c - 1) / 1.2 : (c - 1) / 0.85, -1, 1);
   const exposure = clamp(Math.log2(Math.max(0.05, S / c)), -2, 2);
-  // What the clamped pair actually leaves the black point at, made up with a lift.
+  // Where a clamped pair actually leaves the line, made up with a lift - which is the one knob that is
+  // purely an offset. With nothing clamped, c is exactly 1 − 2I and there is nothing left to make up.
   const cUsed = 1 + (contrast >= 0 ? contrast * 1.2 : contrast * 0.85), eUsed = 2 ** exposure;
-  const landed = eUsed * cUsed * clip.black + (0.5 - 0.5 * cUsed);
-  const lift = clamp(reference.black - landed, -0.24, 0.24);
+  const lift = clamp(I - (0.5 - 0.5 * cUsed), -0.24, 0.24);
   // Colour is solved from RATIOS - red against blue is temperature, green against the two of them is
   // tint - so what the exposure did does not leak into it. It is solved against the channels as the
   // levels LEAVE them, not as they arrived: exposure and contrast carry an intercept, and an intercept
@@ -204,12 +213,16 @@ export function matchKnobs(reference, clip) {
   if (Math.abs(contrast) >= 1) limited.push('contrast');
   if (Math.abs(temperature) >= 1) limited.push('temperature');
   if (Math.abs(tint) >= 1) limited.push('tint');
+  // How far each of the three still is from the reference once these knobs have been applied. A fit is
+  // not a promise, and a caller that can see the leftovers can nudge the one that matters to it.
+  const leftover = { black: +(levelled(clip.black) - reference.black).toFixed(3), mid: +(levelled(clip.mid) - reference.mid).toFixed(3), white: +(levelled(clip.white) - reference.white).toFixed(3) };
   return {
     knobs: {
       exposure: +exposure.toFixed(3), contrast: +contrast.toFixed(3),
       temperature: +temperature.toFixed(3), tint: +tint.toFixed(3),
       ...(grey === 128 ? {} : { lift: rgbToHex([grey, grey, grey]) }),
     },
+    leftover,
     limited,
   };
 }

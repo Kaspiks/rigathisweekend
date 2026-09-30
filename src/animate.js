@@ -860,12 +860,15 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         return { id: f.id, frame, ...levelsFrom(data, info.channels) };
       };
       const [a, b] = await Promise.all([measure(reference, referenceFrame), measure(clip, clipFrame)]);
-      const { knobs, limited } = matchKnobs(a, b);
+      const { knobs, leftover, limited } = matchKnobs(a, b);
+      const was = { black: +(b.black - a.black).toFixed(3), mid: +(b.mid - a.mid).toFixed(3), white: +(b.white - a.white).toFixed(3) };
       return text({
         reference: a, clip: b, knobs,
         layer: { type: 'grade', from: 0, to: 0, ...(name ? { clip: name } : {}), ...knobs },
+        apart: { before: was, after: leftover },
         ...(limited.length ? { limited, limitedNote: `${limited.join(' and ')} ran out of range: these two clips are further apart than the knobs reach, so this is as close as grading alone gets. Consider a look on both, or a different clip.` } : {}),
         note: 'Put this on the edit as a grade layer with its own from/to and "clip" set to the name that clip has in "clips", so it covers only the parts that play it. Give the reference clip its own grade too (a look, or nothing) - these knobs move the second clip to where the first ALREADY is, not to where the look will put it.',
+        apartNote: 'How far apart the two clips were at each level and how far apart they are left. Exposure and contrast together are a straight line, and a line cannot pass through three points, so the three are fitted rather than forced: the midtones are weighted heaviest (the eye reads overall brightness first) and the extreme white lightest (it is usually one specular, and a roll-off deals with it). If one of them is left further out than you want, nudge that knob yourself: exposure moves everything, contrast opens the ends, lift raises the blacks alone.',
         caveat: 'One frame of each. If either clip changes a lot across its length, measure a frame from the part the edit actually uses.',
       });
     });

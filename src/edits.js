@@ -1158,8 +1158,11 @@ of guessing.
   same black above all.
 - match_grade measures two clips and works the knobs out: pick the best-looking clip as the reference,
   run it against each of the others, and paste what comes back as a grade layer with "clip" set to that
-  clip's name. It says when a knob ran out of range, which means the two are further apart than grading
-  alone can close.
+  clip's name. It answers with "apart": how far the two were at black, mid and white before, and how far
+  they are left. Exposure and contrast together are a straight line and a line cannot pass through three
+  points, so the three are fitted, not forced - if one is left further out than you want, nudge that knob
+  yourself. It also says when a knob ran out of range, which means the two clips are further apart than
+  grading alone can close.
 - Then put ONE look over the lot of it (a grade with no "clip"), so everything is pushed the same way
   from a common starting point. Match first, look second.
 

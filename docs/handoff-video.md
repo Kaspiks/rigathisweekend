@@ -203,11 +203,23 @@ things did, and all four are built, measured and pushed - but the deploy was ref
   0.25 -> 0.1.
 - **`match_grade` and levels on `get_colors`**: what an editor does by eye when cutting a phone clip
   against stock. `levelsFrom` measures the 1st/50th/99th luma percentiles and the channel means;
-  `matchKnobs` solves exposure and contrast exactly against the filter's own arithmetic
-  (y = e·c·x + (1−c)/2), puts the leftover black offset into a lift, and then solves temperature and
-  tint from channel RATIOS **after** the levels - solving both stages against the raw means was wrong
-  on any clip needing a real contrast correction. It reports which knobs hit their limit rather than
-  handing back a number at its stop and letting it look like a match.
+  `matchKnobs` turns two measurements into knobs, against the filter's own arithmetic
+  (y = e·c·x + (1−c)/2). Temperature and tint are solved from channel RATIOS **after** the levels -
+  solving both stages against the raw means was wrong on any clip needing a real contrast correction.
+  It reports which knobs hit their limit rather than handing back a number at its stop.
+  **The levels are FITTED, not forced, and that was the second thing to get wrong here.** The first
+  version solved exposure and contrast so that black and white landed on the reference exactly. On the
+  real drift footage that matched both ends and pushed the MIDTONES 0.16 apart - and overall brightness
+  is the first thing the eye reads on a cut, so it traded a small fault for a bigger one. Exposure and
+  contrast together are one straight line and a line cannot pass through three points. They are now a
+  weighted least-squares fit over black, mid and white (weights 2/3/1: the mid matters most, the extreme
+  white least, since it is usually one specular and the roll-off deals with it). `match_grade` answers
+  with `apart.before` and `apart.after` so the trade is visible rather than hidden.
+  What least squares promises is NOT that every level improves - it will move one that already matched
+  if that buys the other two - but that the weighted total never gets worse, because leaving the clip
+  alone is itself a candidate the fit could have picked. `test/finish.test.js` holds it to that over
+  2000 random pairs; an earlier, stronger claim ("no level ever gets worse") is simply false and the
+  fuzz found a counterexample in the first pair it tried.
 
 How it was verified without a deploy, which is worth repeating:
 - `npx remotion bundle` builds the whole project; `tsc --noEmit` is clean.
@@ -227,6 +239,13 @@ How it was verified without a deploy, which is worth repeating:
   the noise from sd 0.00 to 6.02 and a grade leaves it at 0.00.
 - Gotcha: `selectComposition` resolves the props, and `renderStill` handed DIFFERENT props renders the
   ones the composition was selected with. Nine renders came out identical before that was spotted.
+- Then, deployed, on the owner's own drift clips - the vertical Latvia one cut against the horizontally
+  cropped stock, which is the pair ChatGPT said looked mismatched. Measured off the rendered frames:
+  the two shots' black points went from 0.128 apart to 0.013 and their whites from 0.084 to 0.012.
+  That render is also what exposed the midtone fault above: with the first solve the mids went from
+  0.036 apart to 0.117. Everything new rendered together on real footage without complaint - 0.4x
+  smoothed slow motion under a punch-in with motion blur, cutting to a mirrored, reframed shot of the
+  other clip, all under a finish.
 
 ## Other notes
 - `remotion/src/PinboardStory.tsx` (owner's) imports `./autumnOpener`, which is not in the repo. Nothing
