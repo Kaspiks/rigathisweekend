@@ -21,7 +21,10 @@ export type ImageLayer = Span & { type: 'image'; asset: string; place: 'footage'
 export type ZoomLayer = Span & { type: 'zoom'; scale: number; focus: Place };
 export type ShakeLayer = Span & { type: 'shake'; strength: number };
 export type FlashLayer = Span & { type: 'flash'; color: string };
-export type GradeKnobs = { exposure: number; contrast: number; saturation: number; temperature: number; tint: number; lift: string; gain: string; fade: number; vignette: number; grain: number; halation?: number; aberration?: number };
+export type GradeKnobs = { exposure: number; contrast: number; saturation: number; temperature: number; tint: number; lift: string; gain: string; fade: number; vignette: number; grain: number; halation?: number; aberration?: number; rolloff?: number };
+// The finishing pass: grain, glow and a highlight shoulder over the WHOLE frame, titles included, once
+// everything else is drawn. It is what makes clips from different cameras look like one print.
+export type FinishLayer = Span & { type: 'finish'; rolloff: number; grain: number; bloom: number; halation: number; aberration: number; vignette: number };
 // A grade's look is already resolved to plain numbers by the time the renderer sees it (src/grade.js).
 export type GradeLayer = Span & { type: 'grade'; look?: string; clip?: string; strength: number; knobs: GradeKnobs; bars: 'none' | '2.39' | '2.00' | '1.85' | number };
 export type SequenceLayer = Span & { type: 'sequence'; asset: string; count: number; columns?: number; range?: { from: number; to: number }; playback?: 'loop' | 'once' | 'pingpong'; rotate?: number; spin?: number; blend?: Blend; glow?: number; tint?: string; fps: number; loop: boolean; at?: Place; offset?: Point; path?: PathKey[]; facing: Facing; size: number; opacity: number; enter: 'pop' | 'fade' | 'none'; exit: 'pop' | 'fade' | 'none'; motion: 'none' | 'bob' | 'sway' };
@@ -48,7 +51,7 @@ export type ModelLayer = Span & { type: 'model'; asset: string; node?: string; s
 export type BlurLayer = Span & { type: 'blur'; focus: number; range: number; amount: number; near: boolean };
 export type FogLayer = Span & { type: 'fog'; color: string; strength: number; start: number };
 export type ParallaxLayer = Span & { type: 'parallax'; move: 'pan' | 'tilt' | 'orbit'; amount: number };
-export type Layer = GradeLayer | TextLayer | StickerLayer | IllustrateLayer | ImageLayer | SequenceLayer | ParticlesLayer | GraphicLayer | ModelLayer | BlurLayer | FogLayer | ParallaxLayer | ZoomLayer | ShakeLayer | FlashLayer;
+export type Layer = GradeLayer | FinishLayer | TextLayer | StickerLayer | IllustrateLayer | ImageLayer | SequenceLayer | ParticlesLayer | GraphicLayer | ModelLayer | BlurLayer | FogLayer | ParallaxLayer | ZoomLayer | ShakeLayer | FlashLayer;
 export type Keyframe = { frame: number; x: number; y: number };
 export type DepthSpec = { video: boolean; stills?: { from: number; to: number; asset: string }[]; near: 'white' | 'black' };
 export type Level = { frame: number; value: number }[];
@@ -56,7 +59,10 @@ export type SoundCue = { sound: string; file?: string; at: number; length: numbe
 export type Spec = { format: string; fit: 'cover' | 'contain'; background: string; audio: 'source' | 'mute'; anchors: Record<string, Keyframe[]>; layers: Layer[]; depth?: DepthSpec;
   sounds?: SoundCue[]; sourceVolume?: number; sourceKeys?: Level };
 export type Enter = { kind: 'dissolve' | 'wipe' | 'slide' | 'push'; frames: number; from: 'left' | 'right' | 'up' | 'down' };
-export type Segment = { from: number; to: number; source: number; hold?: boolean; sourceTo?: number; speed?: number; clip?: string; enter?: Enter };
+// Framing for one shot, eased from its start values to the `...To` ones across the shot's whole output
+// span (`shot`), which is why a speed ramp's ten segments all carry the same span.
+export type Reframe = { scale: number; x: number; y: number; scaleTo?: number; xTo?: number; yTo?: number; blur: number };
+export type Segment = { from: number; to: number; source: number; hold?: boolean; sourceTo?: number; speed?: number; clip?: string; enter?: Enter; smooth?: boolean; mirror?: boolean; reframe?: Reframe; shot?: [number, number] };
 export type Plan = { width: number; height: number; fps: number; durationInFrames: number; segments: Segment[] };
 export type Asset = { src: string; width: number; height: number };
 export type DepthFrames = { base: string; frames: number };
@@ -160,6 +166,30 @@ export function clipRect(props: FootageEditProps, cam: Camera, size: { width: nu
   const w = size.width * base * cam.zoom, h = size.height * base * cam.zoom;
   return { left: plan.width / 2 - cam.cx * w + cam.dx, top: plan.height / 2 - cam.cy * h + cam.dy, width: w, height: h };
 }
+// One shot's own framing, on top of whatever rectangle the camera gives it: `scale` crops further in,
+// and the point (x, y) of the CLIP is brought to the centre of the frame. `t` is how far through the
+// SHOT we are (0–1), not through the segment, so a punch-in eases across a speed ramp's ten pieces as
+// one move. The clamp is the same one the camera uses: a crop can never slide far enough to show the
+// edge of the picture, so it quietly stops instead of tearing a black strip open.
+export function reframed(plan: { width: number; height: number }, r: { left: number; top: number; width: number; height: number }, ref: Reframe, t: number, dx: number, dy: number) {
+  const e = smooth(clamp(t));
+  const scale = lerp(ref.scale, ref.scaleTo ?? ref.scale, e);
+  const w = r.width * scale, h = r.height * scale;
+  const hw = plan.width / 2 / w, hh = plan.height / 2 / h;
+  const cx = hw < 0.5 ? clamp(lerp(ref.x, ref.xTo ?? ref.x, e), hw, 1 - hw) : 0.5;
+  const cy = hh < 0.5 ? clamp(lerp(ref.y, ref.yTo ?? ref.y, e), hh, 1 - hh) : 0.5;
+  return { left: plan.width / 2 - cx * w + dx, top: plan.height / 2 - cy * h + dy, width: w, height: h };
+}
+// How far the picture moves under a reframe between one frame and the next, in pixels at the edge of
+// the frame - which is what a motion blur should be proportional to. Measured rather than guessed: the
+// same arithmetic run a frame earlier, differenced.
+export function reframeSpeed(plan: { width: number; height: number }, r: { left: number; top: number; width: number; height: number }, ref: Reframe, t: number, dt: number) {
+  const a = reframed(plan, r, ref, t, 0, 0), b = reframed(plan, r, ref, t - dt, 0, 0);
+  const corner = (q: typeof a) => [q.left, q.top, q.left + q.width, q.top + q.height];
+  const [a0, a1, a2, a3] = corner(a), [b0, b1, b2, b3] = corner(b);
+  return Math.max(Math.hypot(a0 - b0, a1 - b1), Math.hypot(a2 - b2, a3 - b3));
+}
+
 export function toScreen(props: FootageEditProps, cam: Camera, base: number, p: Point): Point {
   const r = footageRect(props, cam, base);
   return { x: r.left + p.x * r.width, y: r.top + p.y * r.height };

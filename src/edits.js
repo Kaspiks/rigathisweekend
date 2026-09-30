@@ -333,6 +333,7 @@ const Grade = z.object({
   grain: Unit().optional().describe('Film grain'),
   halation: Unit().optional().describe('Warm bloom bleeding out of the bright parts, the way film glows around a highlight. 0.2-0.4 is plenty'),
   aberration: Unit().optional().describe('Colour fringing at the edges of things, as a cheap lens gives. Keep it small, 0.1-0.3'),
+  rolloff: Unit().optional().describe('Highlight roll-off: how far the brightest parts bend over instead of clipping to flat white, the way film does and a sensor does not. 0.3-0.5 on a blown sky or a headlight. Most looks bring their own'),
   bars: z.union([z.enum(['none', '2.39', '2.00', '1.85']), z.number().min(0).max(0.3)]).default('none')
     .describe('Letterbox bars over everything. A ratio ("2.39") crops to that shape, which suits a landscape or square edit; on a tall Reel it leaves a narrow strip, so give a fraction of the height instead (0.08 is a thin cinematic band top and bottom)'),
   // Worked out from the look when the edit is saved and kept with it, so the renderer needs no copy of
@@ -341,7 +342,27 @@ const Grade = z.object({
     exposure: z.number(), contrast: z.number(), saturation: z.number(), temperature: z.number(), tint: z.number(),
     lift: z.string(), gain: z.string(), fade: z.number(), vignette: z.number(), grain: z.number(),
     halation: z.number(), aberration: z.number(),
+    // Optional so that edits saved before roll-off existed still read back; gradeKnobs always sets it now.
+    rolloff: z.number().optional(),
   }).strict().optional().describe('Filled in when the edit is saved; do not write it yourself'),
+}).strict();
+
+// The finishing pass: one texture over the WHOLE frame - pictures, titles, drawings, everything - once
+// the edit is otherwise done. A grade matches the clips to each other; a finish makes all of them look
+// like they came off the same print, which is most of the difference between clips that have been
+// graded and something that reads as a film. It is the last thing that happens to the frame.
+const Finish = z.object({
+  type: z.literal('finish'), ...Span(),
+  // A grain that fades up over the first eight frames would be a fault, not an effect, so a finish is
+  // simply on unless it is asked to ramp.
+  in: z.number().int().min(0).max(90).default(0).describe('Frames it takes to come on; 0 means it is there from the first frame'),
+  out: z.number().int().min(0).max(90).default(0).describe('Frames it takes to go away at the end'),
+  rolloff: Unit().default(0.35).describe('Highlight roll-off over everything: the brightest parts bend over instead of clipping flat. The one knob that most stops mismatched sources looking mismatched'),
+  grain: Unit().default(0.15).describe('One grain over the whole frame, so a phone clip and stock footage carry the same texture. It lands on the titles too, as it would on a print'),
+  bloom: Unit().default(0.12).describe('A soft white glow out of the highlights, like a diffusion filter on the lens: everything sits in the same air'),
+  halation: Unit().default(0).describe('The same, but warm, the way film glows red around a highlight. Use this or bloom, rarely both'),
+  aberration: Unit().default(0).describe('Colour fringing at the edges, as a lens leaves. 0.1-0.2'),
+  vignette: Unit().default(0).describe('Darkening towards the corners, over the titles as well as the picture'),
 }).strict();
 
 const Zoom = z.object({
@@ -353,11 +374,28 @@ const Zoom = z.object({
 const Shake = z.object({ type: z.literal('shake'), ...Span(), strength: Unit().default(0.4) }).strict();
 const Flash = z.object({ type: z.literal('flash'), ...Span(), color: Color().default('white') }).strict();
 
-export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Particles, Graphic, Model, Blur, Fog, Parallax, Zoom, Shake, Flash, Grade]);
+export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Particles, Graphic, Model, Blur, Fog, Parallax, Zoom, Shake, Flash, Grade, Finish]);
+
+// Framing this one shot: how far into the picture it is cropped and which part of it is centred. It is
+// per SHOT, unlike the zoom layer, which is one move over the finished edit - so a twelve-shot trailer
+// can punch in on each cut without twelve zoom layers fighting over the same frames. It is also how two
+// shots are made to match across a cut: put the subject in the same place on the screen in both.
+const Reframe = () => z.object({
+  scale: z.number().min(1).max(4).default(1).describe('How far in at the START of the shot: 1 is the whole picture, 1.6 fills the frame with the middle of it'),
+  x: Unit().default(0.5).describe('The point of the CLIP that sits at the centre of the frame, 0-1 across'),
+  y: Unit().default(0.5).describe('The same, 0-1 down'),
+  scaleTo: z.number().min(1).max(4).optional().describe('Scale at the END of the shot, eased from `scale`: a punch-in, or an ease back out'),
+  xTo: Unit().optional().describe('Where the centred point has drifted to by the end: a slow pan across a still-ish shot'),
+  yTo: Unit().optional(),
+  blur: Unit().default(0).describe('Motion blur while the framing is moving, and none while it is still. 0.3 is the mild smear a fast punch-in leaves. It is an even blur, not a true radial one, so keep it small'),
+}).strict().describe('The framing of this one shot. Defaults are the whole picture, centred, which changes nothing');
 
 const Play = z.object({
   from: Frame().describe('First SOURCE frame'), to: Frame().describe('SOURCE frame to stop before'),
-  speed: z.number().min(0.25).max(4).default(1).describe('0.5 is half-speed slow motion; sound is muted when not 1'),
+  speed: z.number().min(0.1).max(4).default(1).describe('0.5 is half-speed slow motion, 0.2 is five times slower; sound is muted when not 1. Below 1, add "smooth": true or the shot judders'),
+  smooth: z.boolean().default(false).describe('Blends each pair of source frames during slow motion instead of showing each one several times over. Only does anything below speed 1, and costs about twice as much to render'),
+  reframe: Reframe().optional(),
+  mirror: z.boolean().default(false).describe('Flips this shot left-to-right, so a car driving out of frame one way matches one driving the same way in the next shot. Not for a clip with anchors or world spots on it - they are read unflipped'),
   clip: z.string().regex(ANCHOR).optional().describe('Which clip this bit comes from, named in `clips`. Left out, it is the edit\'s own clip'),
   dissolve: z.number().int().min(0).max(90).default(0)
     .describe('Frames this shot takes to fade up over the one before it, instead of cutting. The two overlap, so the edit is that much shorter. For a wipe or a push, use `transition` instead'),
@@ -373,6 +411,8 @@ const Play = z.object({
 const Hold = z.object({
   hold: Frame().describe('SOURCE frame to freeze on'),
   frames: z.number().int().min(1).max(30 * FPS).describe('How many OUTPUT frames the freeze lasts (silent)'),
+  reframe: Reframe().optional().describe('Framing of the freeze; scaleTo and xTo/yTo make a still picture drift, which is what keeps a held frame alive'),
+  mirror: z.boolean().default(false).describe('Flips the freeze left-to-right'),
   clip: z.string().regex(ANCHOR).optional().describe('Which clip to freeze a frame of, named in `clips`. Left out, it is the edit\'s own clip'),
   dissolve: z.number().int().min(0).max(90).default(0).describe('Frames this freeze takes to come up over the shot before it'),
   transition: z.object({
@@ -522,19 +562,30 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     return { frames: about?.frames ?? 0, what: `clip '${s.clip}'`, missing: !about };
   };
 
+  // Framing and mirroring belong to a SHOT, not to a segment: a speed ramp becomes ten segments, and a
+  // punch-in has to ease across all ten of them rather than start again on each. So every segment a shot
+  // becomes carries the same `shot` span, and the renderer reads its progress from that.
+  const anchored = Object.keys(spec.anchors).length || spec.world.length;
+  const shotStyle = (s) => (s.reframe || s.mirror ? { ...(s.reframe ? { reframe: s.reframe } : {}), ...(s.mirror ? { mirror: true } : {}) } : null);
+  const spanShot = (first, from, to) => { for (let j = first; j < segments.length; j++) if (segments[j].reframe) segments[j].shot = [from, to]; };
+
   const segments = [];
   let t = 0;
   for (const [i, s] of (spec.timeline ?? [{ from: 0, to: footage.frames, speed: 1 }]).entries()) {
     const of = lengthOf(s);
     if (of.unknown) { errors.push(`timeline.${i}: there is no clip called '${s.clip}'; name it under clips`); continue; }
     if (of.missing) { errors.push(`timeline.${i}: ${of.what} has no video to play`); continue; }
+    // Anchors and world spots are read in the unflipped picture, so a mirrored shot would leave every
+    // layer stuck to them on the wrong side of the frame.
+    if (s.mirror && !s.clip && anchored) warnings.push(`timeline.${i}: this shot plays the edit's own clip mirrored, but anchors and world spots are read unflipped, so layers stuck to them land on the wrong side`);
     const end = of.frames - 1;
     if ('hold' in s) {
       if (s.hold > end) errors.push(`timeline.${i}: frame ${s.hold} is past the end of ${of.what} (its last frame is ${end})`);
       const asked = s.transition ?? (s.dissolve ? { kind: 'dissolve', frames: s.dissolve, from: 'left' } : null);
       const held = Math.min(asked?.frames ?? 0, segments.length ? segments.at(-1).to - segments.at(-1).from : 0, t);
       t -= held;
-      segments.push({ from: t, to: t + s.frames, source: Math.min(s.hold, end), hold: true, ...(s.clip ? { clip: s.clip } : {}), ...(held ? { enter: { kind: asked.kind, frames: held, from: asked.from } } : {}) });
+      segments.push({ from: t, to: t + s.frames, source: Math.min(s.hold, end), hold: true, ...(s.clip ? { clip: s.clip } : {}), ...shotStyle(s), ...(held ? { enter: { kind: asked.kind, frames: held, from: asked.from } } : {}) });
+      spanShot(segments.length - 1, t, t + s.frames);
       t += s.frames;
       continue;
     }
@@ -544,6 +595,12 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
     if (to <= s.from) { errors.push(`timeline.${i}: 'to' must be after 'from'`); continue; }
     // A dissolve overlaps this shot with the one before it, so the edit gets shorter by that much. The
     // first shot has nothing to dissolve from.
+    // Blending pairs of frames only means anything when a source frame is being held over several
+    // output ones. At or above speed 1 it would cost a second video for nothing.
+    const slowest = s.ramp != null ? Math.min(s.speed, s.ramp) : s.speed;
+    const smoothed = s.smooth && slowest < 0.9;
+    if (s.smooth && !smoothed) warnings.push(`timeline.${i}: "smooth" only does something below speed 0.9, and this shot never goes that slow`);
+    else if (!s.smooth && slowest <= 0.5) warnings.push(`timeline.${i}: at speed ${slowest} each source frame is held for ${(1 / slowest).toFixed(1)} output frames, which judders; add "smooth": true`);
     const asked = s.transition ?? (s.dissolve ? { kind: 'dissolve', frames: s.dissolve, from: 'left' } : null);
     const overlap = Math.min(asked?.frames ?? 0, segments.length ? segments.at(-1).to - segments.at(-1).from : 0, t);
     const enter = overlap ? { kind: asked.kind, frames: overlap, from: asked.from } : null;
@@ -553,23 +610,31 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
       // Speed ramps are a staircase: one video element plays at one rate, so a smooth ramp is several
       // short pieces at stepped rates. Split by SOURCE frames, so the shot still ends exactly where it
       // was asked to, whatever the rounding does to each step's length.
-      const STEPS = 10, span = to - s.from;
+      const STEPS = 10, span = to - s.from, first = segments.length, started = t;
       for (let k = 0; k < STEPS; k++) {
         const a = s.from + Math.round((span * k) / STEPS), b = s.from + Math.round((span * (k + 1)) / STEPS);
         if (b <= a) continue;
         const rate = s.speed + (s.ramp - s.speed) * ease((k + 0.5) / STEPS);
         const piece = Math.max(1, Math.ceil((b - a) / rate));
-        segments.push({ from: t, to: t + piece, source: a, sourceTo: b, speed: rate, ...(s.clip ? { clip: s.clip } : {}), ...(k === 0 && enter ? { enter } : {}) });
+        segments.push({ from: t, to: t + piece, source: a, sourceTo: b, speed: rate, ...(s.clip ? { clip: s.clip } : {}), ...(smoothed && rate < 0.9 ? { smooth: true } : {}), ...shotStyle(s), ...(k === 0 && enter ? { enter } : {}) });
         t += piece;
       }
+      spanShot(first, started, t);
       continue;
     }
     const length = Math.ceil((to - s.from) / s.speed);
-    segments.push({ from: t, to: t + length, source: s.from, sourceTo: to, speed: s.speed, ...(s.clip ? { clip: s.clip } : {}), ...(enter ? { enter } : {}) });
+    segments.push({ from: t, to: t + length, source: s.from, sourceTo: to, speed: s.speed, ...(s.clip ? { clip: s.clip } : {}), ...(smoothed ? { smooth: true } : {}), ...shotStyle(s), ...(enter ? { enter } : {}) });
+    spanShot(segments.length - 1, t, t + length);
     t += length;
   }
   const duration = t;
   if (duration > MAX_OUTPUT_FRAMES) errors.push(`The edit runs ${(duration / FPS).toFixed(1)} s; keep it under ${MAX_OUTPUT_FRAMES / FPS} s`);
+  // A zoom layer moves the camera over the finished edit; a reframe sets the framing of one shot. Where
+  // they cover the same frames the reframe wins, which is not obvious from looking at either of them.
+  const reframes = segments.filter(s => s.reframe).map(s => s.shot ?? [s.from, s.to]);
+  for (const [i, l] of spec.layers.entries())
+    if (l.type === 'zoom' && reframes.some(([a, b]) => l.from < b && l.to > a))
+      warnings.push(`layers.${i} (zoom): some of these frames belong to a shot that sets its own framing with "reframe", and the reframe wins there; move the zoom off those frames or drop it`);
 
   for (const [name, keys] of Object.entries(spec.anchors)) {
     if (!ANCHOR.test(name)) { errors.push(`anchors.${name}: use lowercase letters, digits, - and _ (up to 24), starting with a letter`); continue; }
@@ -780,9 +845,12 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
   return {
     spec,
     plan: { width, height, fps: FPS, durationInFrames: duration, segments },
-    timeline: segments.map(s => s.hold
-      ? { output: [s.from, s.to], hold: s.source }
-      : { output: [s.from, s.to], source: [s.source, s.sourceTo], ...(s.speed !== 1 ? { speed: s.speed } : {}) }),
+    timeline: segments.map(s => ({
+      ...(s.hold
+        ? { output: [s.from, s.to], hold: s.source }
+        : { output: [s.from, s.to], source: [s.source, s.sourceTo], ...(s.speed !== 1 ? { speed: s.speed } : {}), ...(s.smooth ? { smooth: true } : {}) }),
+      ...(s.clip ? { clip: s.clip } : {}), ...(s.mirror ? { mirror: true } : {}), ...(s.reframe ? { reframe: s.reframe.scaleTo != null || s.reframe.xTo != null || s.reframe.yTo != null ? 'moving' : 'fixed' } : {}),
+    })),
     cues,
     warnings,
   };
@@ -1077,6 +1145,40 @@ alone, which is how an editor works: you grade the picture, not the titles.
 - "halation" is the warm bloom film gives around a highlight, "aberration" the colour fringing a cheap
   lens leaves at the edges of things. Both are small numbers: 0.2-0.4 and 0.1-0.3. Some looks bring
   their own (vintage-film, neon-night, golden-hour).
+- "rolloff" is the highlight shoulder: film bends its brightest parts over, a sensor clips them to a flat
+  wall of white, and that flat wall is most of what makes a clip look like video rather than film. 0.3-0.5
+  on a shot with a blown sky, a headlight or a window in it. Every look brings some.
+
+### Matching one clip to another
+Cutting a phone clip against stock footage, the giveaway is not the colours: it is that the blacks sit at
+different heights and the highlights clip at different points. Both are measurable, so match them instead
+of guessing.
+- get_colors answers with "levels" as well as colours: black and white (where the dark and bright ends of
+  the picture actually sit, 0-1), mid, and the mean of each channel. Two shots that cut together want the
+  same black above all.
+- match_grade measures two clips and works the knobs out: pick the best-looking clip as the reference,
+  run it against each of the others, and paste what comes back as a grade layer with "clip" set to that
+  clip's name. It says when a knob ran out of range, which means the two are further apart than grading
+  alone can close.
+- Then put ONE look over the lot of it (a grade with no "clip"), so everything is pushed the same way
+  from a common starting point. Match first, look second.
+
+### The finishing pass
+A grade colours the pictures. A finish is what goes over the WHOLE frame - titles, graphics, everything -
+once the edit is otherwise done, and it is what stops a cut between four sources looking like four
+sources. One layer, usually over the whole edit:
+  {"type": "finish", "from": 0, "to": 460}
+Its defaults are already a reasonable pass (rolloff 0.35, grain 0.15, bloom 0.12). The knobs:
+- "rolloff"    highlights bend over instead of clipping. The single most useful one.
+- "grain"      one grain over everything, so a phone clip and stock footage carry the same texture. It
+               lands on the titles too, the way it would on a print.
+- "bloom"      a soft white glow out of the highlights, like a diffusion filter: everything in one air.
+- "halation"   the same, but warm, the way film glows red around a highlight. Use this or bloom, rarely both.
+- "aberration" colour fringing at the edges, 0.1-0.2.
+- "vignette"   darkening towards the corners, over the titles as well (a grade's vignette is under them).
+"in" and "out" are 0 by default, so it is simply on; give them frames to bring it up or take it away.
+A grade's own grain and halation still work per clip - use those to match cameras, and the finish to put
+the matched result on one print. Grain in both means grain twice.
 
 ### How a shot arrives
 "dissolve": 12 fades a shot up over the one before it for twelve frames instead of cutting. For the
@@ -1092,11 +1194,35 @@ the shot before it is shortened to fit. A freeze can arrive the same ways. Give 
 transition, not both. For a dip to black, cut as usual and put a flash layer with "color": "black"
 over the join.
 
-### Speed ramps
+### Speed ramps and real slow motion
 "speed" is the rate a shot starts at; "ramp" is the rate it ENDS at, eased between the two: {"from": 0,
 "to": 120, "speed": 1, "ramp": 0.4} slows into the end of the shot. A ramp is built as ten stepped
 pieces rather than one smooth curve, because one video plays at one rate; ten steps over a shot reads as
 smooth. Sound is muted across a ramp, as it is at any speed but 1.
+- Below speed 1 add "smooth": true. Without it a source frame is simply shown two or three output frames
+  running, which reads as a stutter rather than as slowness - it is what gives away a clip that has just
+  been played slower. With it, each output frame is mixed from the two source frames it falls between.
+  It costs about twice as much to render, so it is only done where asked, and save_edit warns when a
+  shot is slow enough to need it and has not asked.
+- Speed goes down to 0.1. A trailer usually wants a few frames of real slow motion into a hit and then a
+  hard cut back to 1, not a whole timeline at one rate.
+
+### Framing each shot, and matching across a cut
+"reframe" is the framing of ONE shot - unlike the zoom layer, which is a single move over the finished
+edit. It is how a twelve-shot trailer punches in on every cut, and how two shots are made to match:
+  {"clip": "wheel", "from": 0, "to": 30, "reframe": {"scale": 1.4, "x": 0.35, "y": 0.6}}
+- "scale" is how far in (1 is the whole picture); "x" and "y" are the point of the CLIP that sits at the
+  centre of the frame. A crop can never slide far enough to show the edge of the picture: it stops.
+- "scaleTo", "xTo" and "yTo" are where it ends up by the end of the shot, eased: a punch-in, a slow drift
+  across a held frame. A freeze with a drifting reframe is what keeps a still alive.
+- "blur" is motion blur while the framing moves, and none while it is still - it is measured from how far
+  the picture actually moved, so an ease in and out is covered on its own. It is an even blur, not a true
+  radial one, so keep it at 0.2-0.4.
+- "mirror": true flips a shot left to right. That is the continuity tool: a car leaving frame right, then
+  a car entering frame right in the next shot, reads as a jump - mirror one of them and it reads as one
+  move. Do not mirror the edit's OWN clip when it carries anchors or world spots; they are read
+  unflipped, so every layer stuck to them lands on the wrong side. save_edit warns.
+- A reframe takes over the framing for its shot, so do not put a zoom layer over the same frames.
 
 ## Cutting several clips together, and animations with no clip at all
 An edit belongs to one clip, but it does not have to only show that clip.

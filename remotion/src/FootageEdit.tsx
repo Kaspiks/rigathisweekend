@@ -11,9 +11,9 @@ import '@fontsource/bebas-neue/400.css';
 import '@fontsource/jetbrains-mono/700.css';
 import type { CSSProperties } from 'react';
 import { AbsoluteFill, Audio, Easing, Freeze, Img, OffthreadVideo, Sequence, continueRender, delayRender, random, useCurrentFrame } from 'remotion';
-import { BoilFilter, GradeFilter, IllustrationFilter, SoftenFilter } from './edit/filters';
-import type { Asset, BlurLayer, Camera, Enter, FogLayer, FootageEditProps, GradeLayer, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, SequenceLayer } from './edit/model';
-import { PALETTE, baseScale, blendMode, glowFilter, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, screenPlace, sourceAt, travel, walked, worldAt, clipRect } from './edit/model';
+import { BoilFilter, FinishFilter, GradeFilter, IllustrationFilter, SoftenFilter, finishes } from './edit/filters';
+import type { Asset, BlurLayer, Camera, Enter, FinishLayer, FogLayer, FootageEditProps, GradeLayer, IllustrateLayer, ImageLayer, Layer, ParallaxLayer, Segment, SequenceLayer } from './edit/model';
+import { PALETTE, baseScale, blendMode, glowFilter, cameraAt, colour, cueVolume, depthSource, sourceVolumeAt, envelope, footageRect, heading, layerDepth, layerPoint, motionStyle, nearRow, phase, reframeSpeed, reframed, screenPlace, sourceAt, travel, walked, worldAt, clipRect } from './edit/model';
 import { ModelView } from './edit/Model3D';
 import { ParticlesView } from './edit/Particles';
 import { depthNear, useLocalImage } from './edit/depth';
@@ -32,6 +32,28 @@ Promise.all([
 ]).then(() => continueRender(fonts));
 
 type Rect = { left: number; top: number; width: number; height: number };
+
+// Slow motion without the judder. At speed 0.4 a source frame would otherwise be shown two or three
+// output frames running, which reads as a stutter rather than as slowness - the thing that gives away a
+// clip simply played slower. Instead every output frame is mixed from the two source frames it falls
+// between: the frame itself where it lands on one, and a cross-fade of the pair where it lands between
+// them. That is two frame grabs instead of one, so it is only done on shots that asked for it.
+//
+// Both copies are frozen: OffthreadVideo pulls one exact frame out of the file, and `trimBefore` chooses
+// which. The second is laid over the first at the fraction, so what comes out is a·(1−mix) + b·mix.
+const Blended = ({ src, seg, style }: { src: string; seg: Segment; style: CSSProperties }) => {
+  const local = useCurrentFrame(); // inside the Sequence, so 0 on the segment's first frame
+  const last = (seg.sourceTo ?? seg.source + 1) - 1;
+  const exact = Math.min(last, seg.source + local * (seg.speed ?? 1));
+  const a = Math.floor(exact), mix = exact - a, b = Math.min(last, a + 1);
+  const over = mix * ((style.opacity as number) ?? 1); // a dissolve on this shot still fades the pair
+  return (
+    <>
+      <Freeze frame={0}><OffthreadVideo src={src} trimBefore={a || undefined} muted style={style} /></Freeze>
+      {mix > 0.02 && b > a ? <Freeze frame={0}><OffthreadVideo src={src} trimBefore={b} muted style={{ ...style, opacity: over }} /></Freeze> : null}
+    </>
+  );
+};
 
 // The clip through its timeline. Rendered once as the picture and again, muted, under each drawing layer.
 const Footage = ({ props, rect, cam, muted, style, gradeFor }: { props: FootageEditProps; rect: Rect; cam: Camera; muted: boolean; style?: CSSProperties; gradeFor?: (clip?: string) => readonly [unknown, number] | null }) => {
@@ -63,23 +85,38 @@ const Footage = ({ props, rect, cam, muted, style, gradeFor }: { props: FootageE
   };
   const box = (s: (typeof segments)[number], i: number) => {
     const v = s.clip ? props.videos![s.clip] : null;
-    const r = v ? clipRect(props, cam, v) : rect;
+    const r0 = v ? clipRect(props, cam, v) : rect;
+    // The shot's own framing. `shot` is the OUTPUT span of the whole shot, which for a speed ramp covers
+    // all ten of the segments it became - so a punch-in eases across the shot rather than starting again
+    // on each step of the staircase.
+    const span = s.shot ? Math.max(1, s.shot[1] - s.shot[0] - 1) : 1;
+    const t = s.shot ? (now - s.shot[0]) / span : 0;
+    const r = s.reframe ? reframed(props.plan, r0, s.reframe, t, cam.dx, cam.dy) : r0;
+    // Motion blur from how far the picture actually moved since the frame before, rather than from how
+    // fast it was asked to move: it then covers an ease in and out on its own. Roughly half the
+    // displacement, which is about what a 180° shutter leaves. An even blur, not a radial one, so it is
+    // capped low enough to read as a smear rather than as a soft frame.
+    const px = s.reframe?.blur ? Math.min(20, s.reframe.blur * reframeSpeed(props.plan, r0, s.reframe, t, 1 / span) * 0.5) : 0;
     const g = gradeFor?.(s.clip);
+    const effects = [g ? `url(#grade-${g[1]})` : '', px > 0.25 ? `blur(${px.toFixed(2)}px)` : ''].filter(Boolean).join(' ');
+    // A mirrored shot flips about its own centre, so it stays exactly where it was, facing the other way.
+    const flip = s.mirror ? 'scaleX(-1)' : '';
+    const both = (move: string) => ({ transform: flip ? `${move} ${flip}` : move });
     const base = { position: 'absolute' as const, left: r.left, top: r.top, width: r.width, height: r.height, objectFit: 'fill' as const, maxWidth: 'none',
-      ...(g ? { filter: `url(#grade-${g[1]})` } : {}) };
+      ...(effects ? { filter: effects } : {}) };
     const out = leaving(i);
-    if (out) return { ...base, transform: shove(-out.t, out.from, props.plan.width, props.plan.height) };
-    if (!s.enter) return base;
-    const t = ease(arriving(s));
-    if (s.enter.kind === 'dissolve') return { ...base, opacity: t };
+    if (out) return { ...base, ...both(shove(-out.t, out.from, props.plan.width, props.plan.height)) };
+    if (!s.enter) return flip ? { ...base, transform: flip } : base;
+    const t2 = ease(arriving(s));
+    if (s.enter.kind === 'dissolve') return { ...base, opacity: t2, ...(flip ? { transform: flip } : {}) };
     if (s.enter.kind === 'wipe') {
       // An inset that opens from the side it comes in on, so the new shot is uncovered rather than moved.
-      const gone = `${((1 - t) * 100).toFixed(2)}%`;
+      const gone = `${((1 - t2) * 100).toFixed(2)}%`;
       const inset = s.enter.from === 'left' ? `0 ${gone} 0 0` : s.enter.from === 'right' ? `0 0 0 ${gone}`
         : s.enter.from === 'up' ? `0 0 ${gone} 0` : `${gone} 0 0 0`;
-      return { ...base, clipPath: `inset(${inset})` };
+      return { ...base, clipPath: `inset(${inset})`, ...(flip ? { transform: flip } : {}) };
     }
-    return { ...base, transform: shove(1 - t, s.enter.from, props.plan.width, props.plan.height) };
+    return { ...base, ...both(shove(1 - t2, s.enter.from, props.plan.width, props.plan.height)) };
   };
   return (
     <AbsoluteFill style={{ overflow: 'hidden', ...style }}>
@@ -91,8 +128,9 @@ const Footage = ({ props, rect, cam, muted, style, gradeFor }: { props: FootageE
               // Remotion keeps a video's frame inside its sequence, so a freeze stops at the sequence's first
               // frame and the trim picks the source frame to show.
               ? <Freeze frame={0}><OffthreadVideo src={src} trimBefore={s.source || undefined} muted style={box(s, i)} /></Freeze>
-              : <OffthreadVideo src={src} trimBefore={s.source || undefined} playbackRate={s.speed ?? 1} muted={muted || (s.speed ?? 1) !== 1} style={box(s, i)}
-                volume={muted ? undefined : (f) => sourceVolumeAt(props.spec, s.from + f)} />}
+              : s.smooth ? <Blended src={src} seg={s} style={box(s, i)} />
+                : <OffthreadVideo src={src} trimBefore={s.source || undefined} playbackRate={s.speed ?? 1} muted={muted || (s.speed ?? 1) !== 1} style={box(s, i)}
+                  volume={muted ? undefined : (f) => sourceVolumeAt(props.spec, s.from + f)} />}
           </Sequence>
         );
       })}
@@ -187,6 +225,12 @@ export const FootageEdit = (props: FootageEditProps) => {
   // the fallback for everything else.
   const grades = spec.layers.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'grade' && active(l)) as (readonly [GradeLayer, number])[];
   const gradeFor = (clip?: string) => grades.find(([g]) => g.clip && g.clip === clip) ?? grades.find(([g]) => !g.clip) ?? null;
+  // The finishing pass: one shoulder, one glow and one grain over the WHOLE frame, titles included,
+  // after everything else is drawn. Two clips graded separately still sit apart while each keeps its own
+  // highlight behaviour and its own texture; this is what puts them on the same print.
+  const finish = spec.layers.find((l): l is FinishLayer => l.type === 'finish' && active(l));
+  const finishAmount = finish ? envelope(finish, frame) : 0;
+  const finishing = !!finish && finishes(finish, finishAmount);
   const showing = plan.segments.find((sg) => frame >= sg.from && frame < sg.to) ?? plan.segments[0];
   // Vignette and letterbox belong to the frame, not to one shot, so they come from whatever is grading
   // the picture on screen now.
@@ -254,6 +298,7 @@ export const FootageEdit = (props: FootageEditProps) => {
             return <g key={`fog-${i}`}>{flat(`fogf-${i}`, `0 0 0 0 ${r}  0 0 0 0 ${g}  0 0 0 0 ${b}  ${nearRow(near, -s / st, s)}`)}</g>;
           })}
           {grades.map(([g, i]) => <GradeFilter key={`grade-${i}`} id={`grade-${i}`} knobs={g.knobs} frame={frame} />)}
+          {finishing ? <FinishFilter id="finish" layer={finish!} amount={finishAmount} frame={frame} /> : null}
           {shift ? (
             <filter id="parallax" x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
               <feImage href={depthSrc!} x={rect.left} y={rect.top} width={rect.width} height={rect.height} preserveAspectRatio="none" result="depth" />
@@ -264,6 +309,10 @@ export const FootageEdit = (props: FootageEditProps) => {
           ) : null}
         </defs>
       </svg>
+      {/* Everything the finish covers sits inside this one wrapper. It is always here, finish or not, so
+          that turning one on never moves a layer: only the filter on it changes. The letterbox bars stay
+          outside, because a matte added in post does not carry the print's grain. */}
+      <AbsoluteFill style={finishing ? { filter: 'url(#finish)' } : undefined}>
       <AbsoluteFill style={shift ? { filter: 'url(#parallax)', transform: `scale(${1 + shift.scale / plan.width})` } : undefined}>
         <Footage props={props} rect={rect} cam={cam} muted={spec.audio === 'mute'} gradeFor={gradeFor} />
         {/* Drawings replace the footage, so they sit right over it and under everything else, whatever their
@@ -306,6 +355,11 @@ export const FootageEdit = (props: FootageEditProps) => {
         const deep = spec.depth && ((l as { depth?: number }).depth != null || (l as { path?: { depth?: number }[] }).path?.some((k) => k.depth != null));
         return node && deep ? <AbsoluteFill key={i} style={nearness[i] != null ? { mask: `url(#occ-${i})` } : undefined}>{node}</AbsoluteFill> : node;
       })}
+      {/* The finish's own vignette darkens the titles too, unlike a grade's, which is under them. */}
+      {finish && finish.vignette * finishAmount > 0.002 ? (
+        <AbsoluteFill style={{ background: `radial-gradient(ellipse at 50% 50%, rgba(0,0,0,0) ${Math.round(46 - finish.vignette * finishAmount * 14)}%, rgba(0,0,0,${(finish.vignette * finishAmount * 0.72).toFixed(3)}) 100%)` }} />
+      ) : null}
+      </AbsoluteFill>
       {bars()}
     </AbsoluteFill>
   );
