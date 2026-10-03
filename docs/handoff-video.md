@@ -300,6 +300,23 @@ without knowing where it came from. What took the thought was everything around 
   line again was served from the cache at 0 credits with the same length. The voice fall-through
   announced itself correctly - nothing was pinned, so Roger read it and the answer said so.
   That same run is what exposed the lagging counter above.
+- **Choosing a model is not just a parameter**, which only became clear from the account's own model
+  list. There are three kinds and a board built on one knob would half-work on two of them:
+  `eleven_multilingual_v2` reports `can_use_style` true and takes the knob; `eleven_v3`/`v4` report it
+  FALSE and are directed by audio tags written into the text; the flash and turbo models take neither
+  and are only their stability and speed. So every delivery on the board now carries both a knob set and
+  a tag, `voiceSettings` DROPS a knob the model will not read rather than sending it to be ignored, and
+  `directedText` writes the tag in - unless the caller wrote their own tag, which is a more specific
+  request than the board can make and is left alone. Tags are restricted to ones ElevenLabs documents,
+  because their own guidance is that an invented tag misfires.
+- The cost multiplier is read from the model list (`character_cost_multiplier`) rather than guessed from
+  the name, so a half-price model is known to be half price.
+- **Per-call credit figures were wrong and are now estimates unless attributable.** Differencing the
+  account counter across one call only tells the truth when nothing was waiting to be counted: their
+  counter catches up in batches. Measured live, a 26-character generation was credited with 92 because
+  three earlier calls' arrears landed on it. `charge` now trusts the delta only when `pending` was zero
+  going in. The cap never depended on this - it works on totals - but a per-call number has to be
+  attributable to be worth printing.
 - The connector is now 35 tools. Worth watching - ChatGPT's tool lists get unwieldy somewhere past this.
 
 ## Other notes

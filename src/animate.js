@@ -391,19 +391,23 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     const ceiling = creditCap(sub), { used, unreflected } = accountUsed(sub);
     if (ceiling > 0 && used + estimate > ceiling)
       throw fail(`That would take the ElevenLabs account past the cap set for it: ${used} of ${ceiling} credits are gone${unreflected ? ` (${unreflected} of them generated here too recently for ElevenLabs to have counted yet)` : ''}, and ${what} needs about ${estimate} more${sub.resets ? ` (the quota resets on ${sub.resets.slice(0, 10)})` : ''}. Ask the owner to raise ELEVENLABS_CREDIT_CAP, or wait.`, 429);
-    return sub;
+    return { sub, pending: unreflected };
   }
-  // What it cost. ElevenLabs' counter is differenced across the call and used when it actually moved;
-  // when it has not moved yet - which is the usual case - the estimate goes in the ledger and is
-  // reported AS an estimate. A number that might be measured and might be a guess, presented as though
-  // it were always measured, is worse than one that says which it is.
-  async function charge(kind, before, estimate, detail) {
+  // What it cost. Differencing ElevenLabs' counter across one call only tells the truth when there was
+  // nothing waiting to be counted beforehand: their counter catches up in batches, so a jump during this
+  // call may be paying off three earlier ones. Measured live, a 26-character generation was credited
+  // with 92 because the arrears landed on it. So the delta is trusted only when the books were clear
+  // going in, and otherwise the estimate is recorded and reported AS an estimate. The cap never depended
+  // on this - it works on totals - but a per-call figure has to be attributable to be worth printing.
+  async function charge(kind, before, pending, estimate, detail) {
     let spent = estimate, measured = false;
-    try {
-      const after = await subscription(true);
-      const delta = after.used - before.used;
-      if (delta > 0) { spent = delta; measured = true; }
-    } catch { /* keep the estimate */ }
+    if (!pending) {
+      try {
+        const after = await subscription(true);
+        const delta = after.used - before.used;
+        if (delta > 0) { spent = delta; measured = true; }
+      } catch { /* keep the estimate */ }
+    }
     store.logVoiceSpend(kind, spent, detail);
     return { credits: spent, measured };
   }
@@ -417,13 +421,13 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       try { return { buffer: await readFile(join(voiceDir(), hit.file)), meta: hit.meta, credits: 0, cached: true }; }
       catch { store.forgetVoice(hash); } // the file went missing; fall through and make it again
     }
-    const before = await affordable(kind, estimate, what);
+    const { sub: before, pending } = await affordable(kind, estimate, what);
     const made = await make();
     await mkdir(voiceDir(), { recursive: true });
     const file = `${hash}.mp3`;
     await writeFile(join(voiceDir(), file), made.buffer);
     store.rememberVoice(hash, { kind, file, meta: made.meta ?? null });
-    const { credits, measured } = await charge(kind, before, estimate, what);
+    const { credits, measured } = await charge(kind, before, pending, estimate, what);
     return { ...made, credits, measured, cached: false };
   }
 
@@ -1156,7 +1160,10 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       let voices = [], list = [];
       try { [voices, list] = await Promise.all([eleven.voices(), models()]); } catch (err) { return text({ styles, voices: [], error: err.message }); }
       return text({ styles, voices,
-        models: list.map(m => ({ ...m, directedBy: m.canStyle ? 'the style knob' : 'tags written into the text', costPerCharacter: m.rate })),
+        // Three kinds, not two: multilingual_v2 takes the knob, v3 and v4 take tags, and the flash and
+        // turbo models take neither - they are fast, not directable, and a delivery on one of them is
+        // only its stability and speed.
+        models: list.map(m => ({ ...m, directedBy: m.canStyle ? 'the style knob' : takesTags(m.model) ? 'tags written into the text' : 'nothing but stability and speed', costPerCharacter: m.rate })),
         usingByDefault: eleven.model,
         note: 'A style carries the DELIVERY (how it is read) and a voice carries who reads it. Pin a voice to a style once with set_style_voice and every later `speak` in that style uses it. Without a pin, the account\'s first voice reads everything, which is rarely what anyone wants.',
         modelNote: 'speak takes a "model". costPerCharacter is ElevenLabs\' own multiplier, so one at 0.5 is half price. Models that report directedBy "tags" ignore the style knob: the board writes its tag into the text for those instead, and you can write your own ([whispers], [sighs], [sarcastic], [excited]) anywhere in the text. Changing model makes a new take rather than reusing the cached one.' });
@@ -1206,7 +1213,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       return text({ footage: f.id, ...saved, style, voice: id, voiceChosen: how, model: m.model,
         ...(spoken !== words ? { spoken, spokenNote: `${m.model} is directed by tags in the text rather than by the style knob, so '${style}' was given as ${STYLES[style].tag}. Write your own tags into the text to override it.` } : {}),
         ...(!m.canStyle && !STYLES[style]?.tag ? { styleNote: `${m.model} does not take the style knob, and '${style}' has no tag, so this delivery came only from its stability and speed. eleven_multilingual_v2 would give you the rest of it.` } : {}),
-        credits: made.credits, cached: made.cached, creditsAre: made.cached ? 'nothing: it came from the cache' : made.measured ? 'measured from the account' : 'an estimate - ElevenLabs had not counted this generation yet', ...(made.cached ? { cachedNote: 'Already generated with exactly these words and settings, so this cost nothing and sounds the same as before.' } : {}),
+        credits: made.credits, cached: made.cached, creditsAre: made.cached ? 'nothing: it came from the cache' : made.measured ? 'measured from the account' : 'an estimate - ElevenLabs counts in arrears, so a single call cannot be attributed yet', ...(made.cached ? { cachedNote: 'Already generated with exactly these words and settings, so this cost nothing and sounds the same as before.' } : {}),
         ...(timed ? { captions: timed, captionNote: `Text layers timed to the voice, in OUTPUT frames from ${at}. Paste them into the edit's layers; move them all by changing \`at\` here rather than by hand.` } : {}),
         then: `Place it on the edit: {"sound":"${name}","at":${at},"duck":0.3} under sounds. duck drops the clip's own sound while it talks.` });
     });
@@ -1228,7 +1235,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         `a ${seconds ? `${seconds} s` : ''} sound effect`.replace('  ', ' '),
         async () => ({ buffer: await eleven.effect(prompt, seconds, influence, loop) }));
       const saved = await saveSound(made.buffer, footageFiles(store.dir, f.id).sounds, name);
-      return text({ footage: f.id, ...saved, prompt, credits: made.credits, cached: made.cached, creditsAre: made.cached ? 'nothing: it came from the cache' : made.measured ? 'measured from the account' : 'an estimate - ElevenLabs had not counted this generation yet',
+      return text({ footage: f.id, ...saved, prompt, credits: made.credits, cached: made.cached, creditsAre: made.cached ? 'nothing: it came from the cache' : made.measured ? 'measured from the account' : 'an estimate - ElevenLabs counts in arrears, so a single call cannot be attributed yet',
         ...(loop ? { loopNote: 'It loops seamlessly: place it with "loop": true and a length, and it runs under the whole shot.' } : {}),
         then: `Place it on the edit: {"sound":"${name}","at":<output frame>}. An impact wants to land ON the frame the thing happens, not after it.` });
     });
@@ -1247,7 +1254,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const made = await generated('music', { prompt, seconds }, estimate, `${seconds} s of music`,
         async () => ({ buffer: await eleven.music(prompt, Math.round(seconds * 1000)) }));
       const saved = await saveSound(made.buffer, footageFiles(store.dir, f.id).sounds, name);
-      return text({ footage: f.id, ...saved, prompt, credits: made.credits, cached: made.cached, creditsAre: made.cached ? 'nothing: it came from the cache' : made.measured ? 'measured from the account' : 'an estimate - ElevenLabs had not counted this generation yet',
+      return text({ footage: f.id, ...saved, prompt, credits: made.credits, cached: made.cached, creditsAre: made.cached ? 'nothing: it came from the cache' : made.measured ? 'measured from the account' : 'an estimate - ElevenLabs counts in arrears, so a single call cannot be attributed yet',
         then: `Place it as {"sound":"${name}","at":0,"volume":0.35,"fadeOut":30}. Keep music under narration with volume, or duck it with "duck" on the narration cue.` });
     });
 
