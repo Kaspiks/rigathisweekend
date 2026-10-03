@@ -90,6 +90,22 @@ export function estimateCredits(kind, { text = '', seconds = 0, model = '' } = {
   return 0;
 }
 
+// ---- Reading the account against a counter that lags -----------------------------------------------
+// ElevenLabs' `character_count` is the authority on what an account has spent, and it LAGS: a generation
+// measured on the server moved it by nothing, and a minute later still nothing. A cap enforced on that
+// number alone would not stop a burst, which is the one case a cap is for.
+//
+// So: the counter, plus whatever this server spent since the counter last moved. While it lags the local
+// ledger carries the cap; when it catches up and jumps, the mark resets and the ledger starts from zero,
+// so nothing is counted twice. Spending somewhere else - the owner in the ElevenLabs app - arrives as a
+// jump in the counter and is caught the same way.
+//
+// `seen` is the last {used, at} this server wrote down; `spentSince` is its own ledger since `seen.at`.
+export function capReading({ accountUsed, seen, spentSince = 0 }) {
+  if (!seen || seen.used !== accountUsed) return { used: accountUsed, unreflected: 0, remember: true };
+  return { used: accountUsed + spentSince, unreflected: spentSince, remember: false };
+}
+
 // ---- Captions from the voice's own timings ---------------------------------------------------------
 // The with-timestamps endpoint answers with a start and end for every CHARACTER it spoke. Characters are
 // too fine to put on screen, so they are gathered back into words: a word runs from the start of its

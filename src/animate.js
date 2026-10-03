@@ -21,7 +21,7 @@ import { MAX_MODEL, deleteModel, modelList, saveModel } from './models.js';
 import { depthEstimateSeconds, depthLimits, depthModel, makeDepth } from './depth.js';
 import { MAX_SOUND, MAX_SOUND_SECONDS, deleteSound, loudness, processedSound, saveSound, soundList } from './sounds.js';
 import { createEleven } from './eleven.js';
-import { STYLES, STYLE_NAMES, captionLayers, estimateCredits, voiceSettings, wordsFromAlignment } from './voice.js';
+import { STYLES, STYLE_NAMES, capReading, captionLayers, estimateCredits, voiceSettings, wordsFromAlignment } from './voice.js';
 import { loadTrack, locate, normalizeTrack, project, saveTrack, sceneCentre, solveTrack, trackLimits, trackOverlay } from './tracking.js';
 import http from 'node:http';
 
@@ -367,20 +367,43 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
   };
   const monthStart = () => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString(); };
 
+  // How much the account has really spent. ElevenLabs' own `character_count` is the authority, but it
+  // LAGS: a generation measured on the server moved the counter by nothing at all, a minute later still
+  // nothing. A cap enforced on that number alone would not stop a burst - ChatGPT could generate for a
+  // while before any of it showed up, which is exactly the case a cap exists for.
+  //
+  // So the counter is read, and whatever this server has spent SINCE the counter last moved is added to
+  // it. While the account is lagging, the local ledger carries the cap; when the counter catches up and
+  // jumps, the mark resets and the ledger starts again from zero, so nothing is counted twice. Other
+  // spending - the owner in the ElevenLabs app - arrives as a jump in the counter and is caught the
+  // same way.
+  function accountUsed(sub) {
+    const seen = JSON.parse(store.voiceMeta('account') || 'null');
+    const read = capReading({ accountUsed: sub.used, seen, spentSince: seen ? store.voiceSpend(seen.at).credits : 0 });
+    if (read.remember) store.setVoiceMeta('account', JSON.stringify({ used: sub.used, at: new Date().toISOString() }));
+    return read;
+  }
+
   // Asked BEFORE the call, with the published rates, because the only way to not spend credits is to
-  // not make the request. The estimate decides whether to go; the ledger afterwards records the truth.
+  // not make the request.
   async function affordable(kind, estimate, what) {
     const sub = await subscription();
-    const ceiling = creditCap(sub);
-    if (ceiling > 0 && sub.used + estimate > ceiling)
-      throw fail(`That would take the ElevenLabs account past the cap set for it: ${sub.used} of ${ceiling} credits are gone, and ${what} needs about ${estimate} more${sub.resets ? ` (the quota resets on ${sub.resets.slice(0, 10)})` : ''}. Ask the owner to raise ELEVENLABS_CREDIT_CAP, or wait.`, 429);
+    const ceiling = creditCap(sub), { used, unreflected } = accountUsed(sub);
+    if (ceiling > 0 && used + estimate > ceiling)
+      throw fail(`That would take the ElevenLabs account past the cap set for it: ${used} of ${ceiling} credits are gone${unreflected ? ` (${unreflected} of them generated here too recently for ElevenLabs to have counted yet)` : ''}, and ${what} needs about ${estimate} more${sub.resets ? ` (the quota resets on ${sub.resets.slice(0, 10)})` : ''}. Ask the owner to raise ELEVENLABS_CREDIT_CAP, or wait.`, 429);
     return sub;
   }
-  // What it really cost: ElevenLabs' own counter, differenced across the call. If that read fails the
-  // estimate is written instead and said to be an estimate, rather than nothing being written at all.
+  // What it cost. ElevenLabs' counter is differenced across the call and used when it actually moved;
+  // when it has not moved yet - which is the usual case - the estimate goes in the ledger and is
+  // reported AS an estimate. A number that might be measured and might be a guess, presented as though
+  // it were always measured, is worse than one that says which it is.
   async function charge(kind, before, estimate, detail) {
     let spent = estimate, measured = false;
-    try { const after = await subscription(true); spent = Math.max(0, after.used - before.used) || estimate; measured = after.used >= before.used; } catch { /* keep the estimate */ }
+    try {
+      const after = await subscription(true);
+      const delta = after.used - before.used;
+      if (delta > 0) { spent = delta; measured = true; }
+    } catch { /* keep the estimate */ }
     store.logVoiceSpend(kind, spent, detail);
     return { credits: spent, measured };
   }
@@ -1153,7 +1176,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const saved = await saveSound(made.buffer, footageFiles(store.dir, f.id).sounds, name);
       const timed = made.meta?.words ? captionLayers(made.meta.words, { at, fps: FPS, perLine }) : null;
       return text({ footage: f.id, ...saved, style, voice: id, voiceChosen: how,
-        credits: made.credits, cached: made.cached, ...(made.cached ? { cachedNote: 'Already generated with exactly these words and settings, so this cost nothing and sounds the same as before.' } : {}),
+        credits: made.credits, cached: made.cached, creditsAre: made.cached ? 'nothing: it came from the cache' : made.measured ? 'measured from the account' : 'an estimate - ElevenLabs had not counted this generation yet', ...(made.cached ? { cachedNote: 'Already generated with exactly these words and settings, so this cost nothing and sounds the same as before.' } : {}),
         ...(timed ? { captions: timed, captionNote: `Text layers timed to the voice, in OUTPUT frames from ${at}. Paste them into the edit's layers; move them all by changing \`at\` here rather than by hand.` } : {}),
         then: `Place it on the edit: {"sound":"${name}","at":${at},"duck":0.3} under sounds. duck drops the clip's own sound while it talks.` });
     });
@@ -1175,7 +1198,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         `a ${seconds ? `${seconds} s` : ''} sound effect`.replace('  ', ' '),
         async () => ({ buffer: await eleven.effect(prompt, seconds, influence, loop) }));
       const saved = await saveSound(made.buffer, footageFiles(store.dir, f.id).sounds, name);
-      return text({ footage: f.id, ...saved, prompt, credits: made.credits, cached: made.cached,
+      return text({ footage: f.id, ...saved, prompt, credits: made.credits, cached: made.cached, creditsAre: made.cached ? 'nothing: it came from the cache' : made.measured ? 'measured from the account' : 'an estimate - ElevenLabs had not counted this generation yet',
         ...(loop ? { loopNote: 'It loops seamlessly: place it with "loop": true and a length, and it runs under the whole shot.' } : {}),
         then: `Place it on the edit: {"sound":"${name}","at":<output frame>}. An impact wants to land ON the frame the thing happens, not after it.` });
     });
@@ -1194,7 +1217,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       const made = await generated('music', { prompt, seconds }, estimate, `${seconds} s of music`,
         async () => ({ buffer: await eleven.music(prompt, Math.round(seconds * 1000)) }));
       const saved = await saveSound(made.buffer, footageFiles(store.dir, f.id).sounds, name);
-      return text({ footage: f.id, ...saved, prompt, credits: made.credits, cached: made.cached,
+      return text({ footage: f.id, ...saved, prompt, credits: made.credits, cached: made.cached, creditsAre: made.cached ? 'nothing: it came from the cache' : made.measured ? 'measured from the account' : 'an estimate - ElevenLabs had not counted this generation yet',
         then: `Place it as {"sound":"${name}","at":0,"volume":0.35,"fadeOut":30}. Keep music under narration with volume, or duck it with "duck" on the narration cue.` });
     });
 
@@ -1204,11 +1227,13 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }, async () => {
       if (!eleven.configured()) return text({ configured: false, note: 'ELEVENLABS_API_KEY is not set on this server, so nothing can be generated.' });
       const sub = await subscription(true), ceiling = creditCap(sub);
+      const { used, unreflected } = accountUsed(sub);
       const since = monthStart(), spend = store.voiceSpend(since);
-      return text({ configured: true, tier: sub.tier, used: sub.used, limit: sub.limit, cap: ceiling, left: Math.max(0, ceiling - sub.used), resets: sub.resets,
+      return text({ configured: true, tier: sub.tier, used, limit: sub.limit, cap: ceiling, left: Math.max(0, ceiling - used), resets: sub.resets,
+        accountSays: sub.used, ...(unreflected ? { notCountedYet: unreflected } : {}),
         thisMonth: { ...spend, byKind: store.voiceSpendByKind(since) },
-        note: 'used and limit are the whole account, including anything generated outside this server; cap is the ceiling THIS server will generate up to, so the owner always keeps some. thisMonth is only what was generated here.',
-        rates: 'Speech is about one credit a character; a sound effect with a length given is 40 credits a second. Anything already generated with the same words and settings comes from the cache and costs nothing.' });
+        note: 'used is what the cap is measured against: the account\'s own count plus anything generated here too recently for ElevenLabs to have counted. accountSays is their raw number, which lags. cap is the ceiling THIS server generates up to, so the owner always keeps some of the plan for their own use.',
+        rates: 'Speech is about one credit a character; a sound effect with a length given is 40 credits a second. Anything already generated with the same words and settings comes from the cache and costs nothing - the cheapest thing you can do is not ask twice.' });
     });
 
     server.registerTool('get_render', {

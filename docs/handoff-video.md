@@ -267,11 +267,19 @@ without knowing where it came from. What took the thought was everything around 
     delivery are generated once and kept; asking again is a file copy. That is not only money - a line
     regenerated after an edit would otherwise come back a subtly different take and stop matching the
     one beside it.
-  - The CAP is enforced against ElevenLabs' OWN `character_count`, not an estimate made here, because a
-    cap enforced on a guess is not a cap. An estimate is still made before the call (nothing else can
-    decide whether to make it), but what goes in the ledger afterwards is the measured difference in
-    the account's counter. `ELEVENLABS_CREDIT_CAP` defaults to 80% of the plan, so the owner always
-    keeps some for their own use in the ElevenLabs app.
+  - The CAP started out enforced against ElevenLabs' OWN `character_count`, on the reasoning that a cap
+    enforced on a guess is not a cap. **That reasoning was right and the implementation was wrong**, and
+    only the first real call showed it: a 19-character generation moved `character_count` by nothing at
+    all, and it had still not moved a minute later. Their counter lags. A cap trusting it alone would
+    not stop a burst, which is the one case a cap exists for.
+    It is now the counter PLUS whatever this server has spent since the counter last moved (`capReading`
+    in src/voice.js, the mark kept in `voice_meta`). While the account lags, the local ledger carries the
+    cap; when the counter jumps, the mark resets and the ledger starts from zero, so nothing is counted
+    twice. Spending elsewhere - the owner in the ElevenLabs app - arrives as a jump and is caught the
+    same way. A test runs twenty requests against a frozen counter and holds it to stopping at eight.
+    For the same reason, a credit figure now says whether it was measured or estimated (`creditsAre`)
+    instead of presenting a guess as a measurement. `ELEVENLABS_CREDIT_CAP` defaults to 80% of the plan,
+    so the owner always keeps some for their own use.
 - `speak` with `captions: true` uses the with-timestamps endpoint and turns character-level alignment
   into word-timed text layers in OUTPUT frames, offset by `at`. Nobody asked for it; it is the best part.
   A caption holds until the next one starts rather than fading on its own, because a gap between
@@ -285,10 +293,13 @@ without knowing where it came from. What took the thought was everything around 
   docs - a wrong one costs a deploy and a confusing 422 to find), plus every error status mapped to
   something the owner can act on. All six tools register with MCP-safe schemas; the no-key branch of
   `list_voices` explains itself instead of throwing.
-- **Still unproved:** no call has been made against a real key, so nothing has gone through `saveSound`
-  end to end. There is no local ffmpeg on the author's machine, so that step cannot be exercised here
-  either. First thing after the key is set: `speak` a short line, check the WAV lands and plays, then
-  `voice_budget` to see the ledger agree with the account.
+- **Proved on the server, against the real key**, by driving the actual MCP tools through an in-memory
+  client the way ChatGPT would: 24 voices on the account; `speak` of a 19-character line in
+  `cinematic-sad` produced a 1.811 s, 348 KB WAV for 19 credits (exactly 1 a character, as estimated);
+  the caption came back as one text layer at frames 32-86 against `at: 30`; asking for the identical
+  line again was served from the cache at 0 credits with the same length. The voice fall-through
+  announced itself correctly - nothing was pinned, so Roger read it and the answer said so.
+  That same run is what exposed the lagging counter above.
 - The connector is now 35 tools. Worth watching - ChatGPT's tool lists get unwieldy somewhere past this.
 
 ## Other notes

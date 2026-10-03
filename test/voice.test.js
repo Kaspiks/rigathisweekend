@@ -2,7 +2,7 @@
 // shape of every request that leaves for ElevenLabs. Nothing here touches the network or a key.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { NEUTRAL_VOICE, STYLES, STYLE_NAMES, captionLayers, estimateCredits, voiceSettings, wordsFromAlignment } from '../src/voice.js';
+import { NEUTRAL_VOICE, STYLES, STYLE_NAMES, capReading, captionLayers, estimateCredits, voiceSettings, wordsFromAlignment } from '../src/voice.js';
 import { createEleven } from '../src/eleven.js';
 
 // ---- the board -------------------------------------------------------------------------------------
@@ -191,4 +191,48 @@ test('an answer with no audio in it is a failure, not an empty sound', async () 
 test('a network failure says it could not reach ElevenLabs, not that the request was bad', async () => {
   const fetcher = async () => { throw new Error('getaddrinfo ENOTFOUND'); };
   await assert.rejects(() => createEleven(env, fetcher).speech('v', 'hi', NEUTRAL_VOICE), /Could not reach ElevenLabs/);
+});
+
+// ---- the cap, against a counter that lags -----------------------------------------------------------
+// Measured on the server: a 19-character generation moved ElevenLabs' own character_count by nothing,
+// and it had still not moved a minute later. A cap that trusts only that number does not stop a burst.
+
+test('with nothing spent yet, the cap sees exactly what the account says', () => {
+  assert.deepEqual(capReading({ accountUsed: 294, seen: null }), { used: 294, unreflected: 0, remember: true });
+});
+
+test('while the account counter has not moved, this server\'s own spend still counts', () => {
+  const seen = { used: 294, at: '2026-10-03T10:00:00.000Z' };
+  const r = capReading({ accountUsed: 294, seen, spentSince: 1200 });
+  assert.equal(r.used, 1494, 'the cap is measured against the counter plus what it has not caught up with');
+  assert.equal(r.unreflected, 1200);
+  assert.equal(r.remember, false, 'and the mark stays where it was');
+});
+
+test('when the counter catches up the mark resets, so nothing is counted twice', () => {
+  const seen = { used: 294, at: '2026-10-03T10:00:00.000Z' };
+  const r = capReading({ accountUsed: 1494, seen, spentSince: 1200 });
+  assert.equal(r.used, 1494, 'not 2694: the ledger is not added on top of a counter that has caught up');
+  assert.equal(r.unreflected, 0);
+  assert.equal(r.remember, true, 'and the mark moves to the new number');
+});
+
+test('spending somewhere else shows up as a jump and is caught the same way', () => {
+  const seen = { used: 294, at: '2026-10-03T10:00:00.000Z' };
+  const r = capReading({ accountUsed: 9000, seen, spentSince: 0 });
+  assert.equal(r.used, 9000, 'the owner generating in the ElevenLabs app counts against the cap too');
+  assert.equal(r.remember, true);
+});
+
+test('a burst cannot outrun the cap while the account is still lagging', () => {
+  const cap = 1000, seen = { used: 0, at: '2026-10-03T10:00:00.000Z' };
+  let ledger = 0, made = 0;
+  // Twenty requests of 120 credits each, with the account counter frozen the whole way through.
+  for (let i = 0; i < 20; i++) {
+    const { used } = capReading({ accountUsed: 0, seen, spentSince: ledger });
+    if (used + 120 > cap) break;
+    ledger += 120; made++;
+  }
+  assert.equal(made, 8, `the cap stops it at eight, not twenty: ${made}`);
+  assert.ok(ledger <= cap, `and never goes past the cap: ${ledger}`);
 });

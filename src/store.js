@@ -28,7 +28,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS animations(id TEXT PRIMARY KEY, name TEXT NOT NULL, composition TEXT NOT NULL, caption TEXT NOT NULL DEFAULT '', hold_seconds REAL NOT NULL DEFAULT 5, status TEXT NOT NULL DEFAULT 'new', error TEXT, postiz TEXT, updated TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS voice_cache(hash TEXT PRIMARY KEY, kind TEXT NOT NULL, file TEXT NOT NULL, seconds REAL, meta TEXT, created TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE IF NOT EXISTS voice_spend(id INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, credits INTEGER NOT NULL, detail TEXT);
-      CREATE TABLE IF NOT EXISTS voice_styles(style TEXT PRIMARY KEY, voice TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS voice_styles(style TEXT PRIMARY KEY, voice TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS voice_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
     // Instagram posts are per day, so the approval rule moved from one edition per weekend
     // to one per weekend day. Editions approved under the old rule keep their days.
     this.db.exec('DROP INDEX IF EXISTS one_approved_weekend');
@@ -358,6 +359,8 @@ export class Store {
   styleVoice(style) {return this.db.prepare('SELECT voice FROM voice_styles WHERE style=?').get(style)?.voice||null;}
   styleVoices() {return Object.fromEntries(this.db.prepare('SELECT style,voice FROM voice_styles').all().map(r=>[r.style,r.voice]));}
   setStyleVoice(style,voice) {this.db.prepare('INSERT INTO voice_styles(style,voice) VALUES(?,?) ON CONFLICT(style) DO UPDATE SET voice=excluded.voice').run(style,voice);}
+  voiceMeta(key) {return this.db.prepare('SELECT value FROM voice_meta WHERE key=?').get(key)?.value??null;}
+  setVoiceMeta(key,value) {this.db.prepare('INSERT INTO voice_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key,value);}
   animations() {return this.db.prepare('SELECT * FROM animations ORDER BY updated DESC').all().map(r=>this.#animation(r));}
   animation(id) {const a=this.#animation(this.db.prepare('SELECT * FROM animations WHERE id=?').get(id)); if(!a) throw new Error('Animation not found'); return a;}
   saveAnimation({id,name,composition,caption='',holdSeconds=5}) {
