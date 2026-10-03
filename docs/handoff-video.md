@@ -247,6 +247,50 @@ How it was verified without a deploy, which is worth repeating:
   smoothed slow motion under a punch-in with motion blur, cutting to a mirrored, reframed shot of the
   other clip, all under a finish.
 
+## Generated sound (built, NOT yet proved against a real key)
+Voiceover, sound effects and music from ElevenLabs, driven by ChatGPT. The integration itself is small,
+because `saveSound` already took any audio buffer and turned it into the 48 kHz WAV the renderer mixes -
+so a generated sound is an ordinary sound, and ducking, looping, fades, pitch and reverb all work on it
+without knowing where it came from. What took the thought was everything around the call.
+- `src/voice.js` is the board, and it exists for the same reason `src/grade.js` does: "read this sadly"
+  is not something a model can hand to an API, but `cinematic-sad` can be a row that says what it is for
+  and which knobs it sets. Ten deliveries, each setting stability / style / speed, mixed in by
+  `strength` the way a look is. `list_voices` hands ChatGPT the board.
+- A style carries the DELIVERY; the VOICE belongs to the account, so it is pinned per style in the
+  `voice_styles` table by `set_style_voice`. Without a pin the account's first voice reads everything,
+  and `speak` says so in its answer rather than letting that pass silently.
+- `src/eleven.js` is the only place the key is used and the only place a URL is built. ChatGPT can ask
+  for "a whoosh"; it cannot ask for a URL. A voice id goes through `encodeURIComponent`, which a test
+  holds it to.
+- **Cost is the whole design.** Two separate guards:
+  - The CACHE (`voice_cache`) keys on everything that went into the request. The same words in the same
+    delivery are generated once and kept; asking again is a file copy. That is not only money - a line
+    regenerated after an edit would otherwise come back a subtly different take and stop matching the
+    one beside it.
+  - The CAP is enforced against ElevenLabs' OWN `character_count`, not an estimate made here, because a
+    cap enforced on a guess is not a cap. An estimate is still made before the call (nothing else can
+    decide whether to make it), but what goes in the ledger afterwards is the measured difference in
+    the account's counter. `ELEVENLABS_CREDIT_CAP` defaults to 80% of the plan, so the owner always
+    keeps some for their own use in the ElevenLabs app.
+- `speak` with `captions: true` uses the with-timestamps endpoint and turns character-level alignment
+  into word-timed text layers in OUTPUT frames, offset by `at`. Nobody asked for it; it is the best part.
+  A caption holds until the next one starts rather than fading on its own, because a gap between
+  captions reads as a dropped word.
+- Published rates used for the estimate: speech 1 credit a character (half on flash/turbo models), a
+  sound effect with a length given 40 credits a second. **The music rate is not documented anywhere I
+  found**, so `RATES.musicPerSecond` is a deliberate over-guess; it only ever decides whether to make
+  the call, and the ledger corrects it afterwards.
+- Verified without a key or a network: 20 tests over the board, the estimates, the word gathering, the
+  caption timing and the exact body of every request that leaves (field names checked against the live
+  docs - a wrong one costs a deploy and a confusing 422 to find), plus every error status mapped to
+  something the owner can act on. All six tools register with MCP-safe schemas; the no-key branch of
+  `list_voices` explains itself instead of throwing.
+- **Still unproved:** no call has been made against a real key, so nothing has gone through `saveSound`
+  end to end. There is no local ffmpeg on the author's machine, so that step cannot be exercised here
+  either. First thing after the key is set: `speak` a short line, check the WAV lands and plays, then
+  `voice_budget` to see the ledger agree with the account.
+- The connector is now 35 tools. Worth watching - ChatGPT's tool lists get unwieldy somewhere past this.
+
 ## Other notes
 - `remotion/src/PinboardStory.tsx` (owner's) imports `./autumnOpener`, which is not in the repo. Nothing
   imports PinboardStory yet, so renders are unaffected, but `tsc` reports it.
