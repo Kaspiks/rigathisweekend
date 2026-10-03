@@ -25,7 +25,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS guide_notes(title TEXT PRIMARY KEY, text TEXT NOT NULL, updated TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS upload_links(token TEXT PRIMARY KEY, footage TEXT NOT NULL, name TEXT NOT NULL, expires TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open');
       CREATE TABLE IF NOT EXISTS footage_renders(id INTEGER PRIMARY KEY, footage TEXT NOT NULL, version INTEGER NOT NULL, kind TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', error TEXT, result TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS animations(id TEXT PRIMARY KEY, name TEXT NOT NULL, composition TEXT NOT NULL, caption TEXT NOT NULL DEFAULT '', hold_seconds REAL NOT NULL DEFAULT 5, status TEXT NOT NULL DEFAULT 'new', error TEXT, postiz TEXT, updated TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS animations(id TEXT PRIMARY KEY, name TEXT NOT NULL, composition TEXT NOT NULL, caption TEXT NOT NULL DEFAULT '', hold_seconds REAL NOT NULL DEFAULT 5, status TEXT NOT NULL DEFAULT 'new', error TEXT, postiz TEXT, updated TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS voice_cache(hash TEXT PRIMARY KEY, kind TEXT NOT NULL, file TEXT NOT NULL, seconds REAL, meta TEXT, created TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 1);
+      CREATE TABLE IF NOT EXISTS voice_spend(id INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, credits INTEGER NOT NULL, detail TEXT);
+      CREATE TABLE IF NOT EXISTS voice_styles(style TEXT PRIMARY KEY, voice TEXT NOT NULL);`);
     // Instagram posts are per day, so the approval rule moved from one edition per weekend
     // to one per weekend day. Editions approved under the old rule keep their days.
     this.db.exec('DROP INDEX IF EXISTS one_approved_weekend');
@@ -326,6 +329,35 @@ export class Store {
     return row?{id:row.id,name:row.name,composition:row.composition,caption:row.caption,holdSeconds:row.hold_seconds,
       status:row.status,error:row.error,postiz:row.postiz?JSON.parse(row.postiz):null,updated:row.updated}:null;
   }
+  // Generated sound (src/voice.js, src/eleven.js). Three small tables, and the reason for each:
+  //
+  // voice_cache  The same words in the same delivery cost credits every time they are asked for, and
+  //              come back subtly different each time, so a line regenerated after an edit no longer
+  //              matches the take beside it. Keyed on everything that went into the request, the audio
+  //              is made once and kept; asking again is a file copy. This is the whole cost story.
+  // voice_spend  What was spent on what, so a month can be accounted for rather than guessed at.
+  // voice_styles Which voice a named delivery uses. The board in src/voice.js carries the SETTINGS,
+  //              which are the same whoever is speaking; the voice itself belongs to the account.
+  cachedVoice(hash) {
+    const row=this.db.prepare('SELECT * FROM voice_cache WHERE hash=?').get(hash);
+    if(!row) return null;
+    this.db.prepare('UPDATE voice_cache SET used=used+1 WHERE hash=?').run(hash);
+    return {hash:row.hash,kind:row.kind,file:row.file,seconds:row.seconds,meta:row.meta?JSON.parse(row.meta):null,created:row.created,used:row.used+1};
+  }
+  rememberVoice(hash,{kind,file,seconds=null,meta=null}) {
+    this.db.prepare('INSERT INTO voice_cache(hash,kind,file,seconds,meta,created) VALUES(?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET file=excluded.file,seconds=excluded.seconds,meta=excluded.meta')
+      .run(hash,kind,file,seconds,meta?JSON.stringify(meta):null,new Date().toISOString());
+  }
+  forgetVoice(hash) {return this.db.prepare('DELETE FROM voice_cache WHERE hash=?').run(hash).changes>0;}
+  logVoiceSpend(kind,credits,detail=null) {this.db.prepare('INSERT INTO voice_spend(at,kind,credits,detail) VALUES(?,?,?,?)').run(new Date().toISOString(),kind,Math.round(credits),detail);}
+  voiceSpend(since) {
+    const r=this.db.prepare('SELECT coalesce(sum(credits),0) credits, count(*) calls FROM voice_spend WHERE at>=?').get(since);
+    return {credits:r.credits,calls:r.calls};
+  }
+  voiceSpendByKind(since) {return this.db.prepare('SELECT kind, sum(credits) credits, count(*) calls FROM voice_spend WHERE at>=? GROUP BY kind ORDER BY credits DESC').all(since).map(r=>({...r}));}
+  styleVoice(style) {return this.db.prepare('SELECT voice FROM voice_styles WHERE style=?').get(style)?.voice||null;}
+  styleVoices() {return Object.fromEntries(this.db.prepare('SELECT style,voice FROM voice_styles').all().map(r=>[r.style,r.voice]));}
+  setStyleVoice(style,voice) {this.db.prepare('INSERT INTO voice_styles(style,voice) VALUES(?,?) ON CONFLICT(style) DO UPDATE SET voice=excluded.voice').run(style,voice);}
   animations() {return this.db.prepare('SELECT * FROM animations ORDER BY updated DESC').all().map(r=>this.#animation(r));}
   animation(id) {const a=this.#animation(this.db.prepare('SELECT * FROM animations WHERE id=?').get(id)); if(!a) throw new Error('Animation not found'); return a;}
   saveAnimation({id,name,composition,caption='',holdSeconds=5}) {
