@@ -5,7 +5,7 @@
 import express from 'express';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import sharp from 'sharp';
 import { z } from 'zod';
@@ -19,7 +19,9 @@ import {
 import { fetchPublic } from './photos.js';
 import { MAX_MODEL, deleteModel, modelList, saveModel } from './models.js';
 import { depthEstimateSeconds, depthLimits, depthModel, makeDepth } from './depth.js';
-import { MAX_SOUND, deleteSound, loudness, processedSound, saveSound, soundList } from './sounds.js';
+import { MAX_SOUND, MAX_SOUND_SECONDS, deleteSound, loudness, processedSound, saveSound, soundList } from './sounds.js';
+import { createEleven } from './eleven.js';
+import { STYLES, STYLE_NAMES, captionLayers, estimateCredits, voiceSettings, wordsFromAlignment } from './voice.js';
 import { loadTrack, locate, normalizeTrack, project, saveTrack, sceneCentre, solveTrack, trackLimits, trackOverlay } from './tracking.js';
 import http from 'node:http';
 
@@ -340,6 +342,81 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     }
     return { points, warnings };
   }
+  // ---- Generated sound ----------------------------------------------------------------------------
+  // Speech, sound effects and music from ElevenLabs, landing in the same place an uploaded sound does:
+  // saveSound turns whatever comes back into the 48 kHz WAV the renderer mixes, so everything the
+  // timeline already does - ducking under narration, fades, pitch, reverb, volume keys - works on a
+  // generated sound without knowing it was generated.
+  //
+  // Two things guard the account, and they are different jobs. The CACHE stops the same request being
+  // paid for twice, which also keeps a line sounding the same after an edit instead of quietly becoming
+  // a different take. The CAP stops a long session emptying the month; it is enforced against
+  // ElevenLabs' own count of what the account has spent, not against an estimate made here, because a
+  // cap enforced on a guess is not a cap.
+  const eleven = createEleven(env, fetcher);
+  const voiceDir = () => join(store.dir, 'voice-cache');
+  let subAt = 0, subWas = null;
+  async function subscription(fresh = false) {
+    if (!fresh && subWas && Date.now() - subAt < 60000) return subWas;
+    subWas = await eleven.subscription(); subAt = Date.now();
+    return subWas;
+  }
+  const creditCap = sub => {
+    const asked = Number(env.ELEVENLABS_CREDIT_CAP);
+    return Number.isFinite(asked) && asked > 0 ? Math.round(asked) : Math.floor((sub.limit || 0) * 0.8);
+  };
+  const monthStart = () => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString(); };
+
+  // Asked BEFORE the call, with the published rates, because the only way to not spend credits is to
+  // not make the request. The estimate decides whether to go; the ledger afterwards records the truth.
+  async function affordable(kind, estimate, what) {
+    const sub = await subscription();
+    const ceiling = creditCap(sub);
+    if (ceiling > 0 && sub.used + estimate > ceiling)
+      throw fail(`That would take the ElevenLabs account past the cap set for it: ${sub.used} of ${ceiling} credits are gone, and ${what} needs about ${estimate} more${sub.resets ? ` (the quota resets on ${sub.resets.slice(0, 10)})` : ''}. Ask the owner to raise ELEVENLABS_CREDIT_CAP, or wait.`, 429);
+    return sub;
+  }
+  // What it really cost: ElevenLabs' own counter, differenced across the call. If that read fails the
+  // estimate is written instead and said to be an estimate, rather than nothing being written at all.
+  async function charge(kind, before, estimate, detail) {
+    let spent = estimate, measured = false;
+    try { const after = await subscription(true); spent = Math.max(0, after.used - before.used) || estimate; measured = after.used >= before.used; } catch { /* keep the estimate */ }
+    store.logVoiceSpend(kind, spent, detail);
+    return { credits: spent, measured };
+  }
+
+  // Generate once, keep forever. The key is everything that went into the request, so changing a word,
+  // a voice or a setting makes a new take and asking for the same thing twice does not.
+  async function generated(kind, key, estimate, what, make) {
+    const hash = createHash('sha256').update(JSON.stringify([kind, key])).digest('hex').slice(0, 32);
+    const hit = store.cachedVoice(hash);
+    if (hit) {
+      try { return { buffer: await readFile(join(voiceDir(), hit.file)), meta: hit.meta, credits: 0, cached: true }; }
+      catch { store.forgetVoice(hash); } // the file went missing; fall through and make it again
+    }
+    const before = await affordable(kind, estimate, what);
+    const made = await make();
+    await mkdir(voiceDir(), { recursive: true });
+    const file = `${hash}.mp3`;
+    await writeFile(join(voiceDir(), file), made.buffer);
+    store.rememberVoice(hash, { kind, file, meta: made.meta ?? null });
+    const { credits, measured } = await charge(kind, before, estimate, what);
+    return { ...made, credits, measured, cached: false };
+  }
+
+  // Which voice reads a style: what the caller asked for, else what the owner pinned to that style,
+  // else a default for the whole server, else the first voice on the account - and then say so, because
+  // a voice chosen by falling through a list is not a voice anyone chose.
+  async function voiceFor(style, asked) {
+    if (asked) return { voice: asked, how: 'asked for' };
+    const pinned = store.styleVoice(style);
+    if (pinned) return { voice: pinned, how: `pinned to '${style}'` };
+    if (env.ELEVENLABS_VOICE) return { voice: env.ELEVENLABS_VOICE, how: 'the server default' };
+    const list = await eleven.voices();
+    if (!list.length) throw fail('That ElevenLabs account has no voices on it. Add one in ElevenLabs, then use set_style_voice.');
+    return { voice: list[0].voice, how: `the account's first voice (${list[0].name}) - nothing is pinned to '${style}'; set_style_voice fixes that` };
+  }
+
   async function runRender(job) {
     try {
       const f = store.footage(job.footage);
@@ -792,6 +869,7 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
           upload: `curl --fail -sS -T /path/to/clip.mp4 "${url}"`,
           then: 'The server makes a 30 fps working copy in the background. Watch list_footage until this clip is ready; it then has a frame count and can be animated, or named in another edit\'s clips to cut between videos.' });
       }
+
       if (kind === 'track') return text({ url, expires: expires.toISOString(), footage: f.id, kind, maxMB: MAX_TRACK / 1048576, frames: f.info.work.frames, fps: FPS,
         upload: `curl --fail -sS -H 'content-type: application/json' -T /path/to/track.json "${url}"`,
         format: '{"frames":[{"t":<seconds>,"matrix":[16 numbers]}...],"intrinsics":{"fx","fy","width","height"}}, or "position"+"quaternion" [x,y,z,w] per frame and "fovY" in degrees. Optional: "convention" opengl|opencv (default opengl, which is ARKit and three.js), "space" camera-to-world|world-to-camera, "roll" 0|90|-90|180 if the video was rotated on export, "up" [x,y,z], "points" for placing a spot seen on one frame only.',
@@ -1021,6 +1099,116 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
       let got;
       try { got = await fetchPublic(source, 'audio/*, application/octet-stream, */*', MAX_SOUND, fetcher, 60000); } catch (err) { throw fail(`Could not fetch the sound (${err.message}). Ask the owner to add it on the dashboard under Sounds`); }
       return text({ footage: f.id, ...await saveSound(got.buffer, footageFiles(store.dir, f.id).sounds, name) });
+    });
+
+    // ---- Generated sound ---------------------------------------------------------------------------
+    server.registerTool('list_voices', {
+      description: 'The narration board: every named delivery, when it is right, and which voice reads it, plus the voices on the owner\'s ElevenLabs account. Read it before `speak`, the way list_looks is read before a grade.',
+      inputSchema: {}, annotations: read,
+    }, async () => {
+      const pinned = store.styleVoices();
+      const styles = STYLE_NAMES.map(name => ({ style: name, about: STYLES[name].about, sets: STYLES[name].set, voice: pinned[name] ?? null }));
+      if (!eleven.configured()) return text({ styles, voices: [], note: 'Generated sound is not set up on this server (ELEVENLABS_API_KEY is not set), so speak, make_sound_effect and make_music will refuse. The board is still what the styles mean.' });
+      let voices = [];
+      try { voices = await eleven.voices(); } catch (err) { return text({ styles, voices: [], error: err.message }); }
+      return text({ styles, voices,
+        note: 'A style carries the DELIVERY (how it is read) and a voice carries who reads it. Pin a voice to a style once with set_style_voice and every later `speak` in that style uses it. Without a pin, the account\'s first voice reads everything, which is rarely what anyone wants.' });
+    });
+
+    server.registerTool('set_style_voice', {
+      description: 'Pins one of the account\'s voices to a narration style, so every later `speak` in that style is read by it. Changing it does not touch sounds already made.',
+      inputSchema: { style: z.enum(STYLE_NAMES), voice: z.string().min(1).max(64).describe('voice id from list_voices') },
+      annotations: write,
+    }, async ({ style, voice }) => {
+      const known = await eleven.voices();
+      const found = known.find(v => v.voice === voice);
+      if (!found) throw fail(`That ElevenLabs account has no voice ${voice}. list_voices shows the ones it has.`);
+      store.setStyleVoice(style, voice);
+      return text({ style, voice, name: found.name, note: `'${style}' is now read by ${found.name}.` });
+    });
+
+    server.registerTool('speak', {
+      description: 'Reads text aloud in a named delivery (list_voices) and adds it to a clip as a sound, ready to place on the edit\'s timeline. For poems, narration and voiceover. The same words in the same delivery are only ever generated once, so asking again is free and sounds identical.',
+      inputSchema: {
+        footage: Id, name: AssetName,
+        text: z.string().trim().min(1).max(5000).describe('What to say. Punctuation is the direction: a full stop is a beat, a line break a longer one, an em dash a catch'),
+        style: z.enum(STYLE_NAMES).default('poem-narrative').describe('How it is read; list_voices says what each one is for'),
+        strength: z.number().min(0).max(1).default(1).describe('How far towards that delivery, 0 plain, 1 all of it'),
+        voice: z.string().min(1).max(64).optional().describe('A particular voice id, instead of the one pinned to the style'),
+        captions: z.boolean().default(false).describe('Also answer with text layers timed to the words, from the voice\'s own timings, to paste into the edit'),
+        at: z.number().int().min(0).max(100000).default(0).describe('The OUTPUT frame the narration starts on, so the captions line up with where you put the cue'),
+        perLine: z.number().int().min(1).max(8).default(4).describe('Words per caption line'),
+      },
+      annotations: { ...write, openWorldHint: true },
+    }, async ({ footage, name, text: words, style, strength, voice, captions, at, perLine }) => {
+      const f = store.footage(footage);
+      const { voice: id, how } = await voiceFor(style, voice);
+      const settings = voiceSettings(style, strength);
+      const estimate = estimateCredits('speech', { text: words, model: eleven.model });
+      const made = await generated('speech', { text: words, voice: id, settings, model: eleven.model, captions }, estimate,
+        `${words.length} characters of speech`,
+        async () => (captions
+          ? await (async () => { const got = await eleven.speechWithTimings(id, words, settings); return { buffer: got.buffer, meta: { words: wordsFromAlignment(got.alignment) } }; })()
+          : { buffer: await eleven.speech(id, words, settings), meta: null }));
+      const saved = await saveSound(made.buffer, footageFiles(store.dir, f.id).sounds, name);
+      const timed = made.meta?.words ? captionLayers(made.meta.words, { at, fps: FPS, perLine }) : null;
+      return text({ footage: f.id, ...saved, style, voice: id, voiceChosen: how,
+        credits: made.credits, cached: made.cached, ...(made.cached ? { cachedNote: 'Already generated with exactly these words and settings, so this cost nothing and sounds the same as before.' } : {}),
+        ...(timed ? { captions: timed, captionNote: `Text layers timed to the voice, in OUTPUT frames from ${at}. Paste them into the edit's layers; move them all by changing \`at\` here rather than by hand.` } : {}),
+        then: `Place it on the edit: {"sound":"${name}","at":${at},"duck":0.3} under sounds. duck drops the clip's own sound while it talks.` });
+    });
+
+    server.registerTool('make_sound_effect', {
+      description: 'Generates a sound effect from a description and adds it to a clip: a whoosh, an impact, a door, tyres on gravel, a room tone. Up to 30 seconds. Ask for one sound, described plainly - "heavy wooden door closing in a stone hall", not a sentence about a scene.',
+      inputSchema: {
+        footage: Id, name: AssetName,
+        prompt: z.string().trim().min(2).max(450).describe('The sound itself, plainly described'),
+        seconds: z.number().min(0.5).max(30).optional().describe('How long. Left out, ElevenLabs picks a length from the description'),
+        influence: z.number().min(0).max(1).default(0.3).describe('How literally to take the words; higher follows them more exactly and invents less'),
+        loop: z.boolean().default(false).describe('Make it loop seamlessly, for a bed that runs under a whole shot (rain, engine idle, crowd)'),
+      },
+      annotations: { ...write, openWorldHint: true },
+    }, async ({ footage, name, prompt, seconds, influence, loop }) => {
+      const f = store.footage(footage);
+      const estimate = estimateCredits('effect', { seconds: seconds ?? 5 });
+      const made = await generated('effect', { prompt, seconds: seconds ?? null, influence, loop }, estimate,
+        `a ${seconds ? `${seconds} s` : ''} sound effect`.replace('  ', ' '),
+        async () => ({ buffer: await eleven.effect(prompt, seconds, influence, loop) }));
+      const saved = await saveSound(made.buffer, footageFiles(store.dir, f.id).sounds, name);
+      return text({ footage: f.id, ...saved, prompt, credits: made.credits, cached: made.cached,
+        ...(loop ? { loopNote: 'It loops seamlessly: place it with "loop": true and a length, and it runs under the whole shot.' } : {}),
+        then: `Place it on the edit: {"sound":"${name}","at":<output frame>}. An impact wants to land ON the frame the thing happens, not after it.` });
+    });
+
+    server.registerTool('make_music', {
+      description: 'Generates a music bed from a description and adds it to a clip. Say the mood, the instruments and the pace - "slow piano and low strings, sparse, unresolved" - not the name of a band. The most expensive of these, so decide the length first.',
+      inputSchema: {
+        footage: Id, name: AssetName,
+        prompt: z.string().trim().min(2).max(2000).describe('The music: mood, instruments, pace'),
+        seconds: z.number().min(3).max(MAX_SOUND_SECONDS).describe('How long it runs'),
+      },
+      annotations: { ...write, openWorldHint: true },
+    }, async ({ footage, name, prompt, seconds }) => {
+      const f = store.footage(footage);
+      const estimate = estimateCredits('music', { seconds });
+      const made = await generated('music', { prompt, seconds }, estimate, `${seconds} s of music`,
+        async () => ({ buffer: await eleven.music(prompt, Math.round(seconds * 1000)) }));
+      const saved = await saveSound(made.buffer, footageFiles(store.dir, f.id).sounds, name);
+      return text({ footage: f.id, ...saved, prompt, credits: made.credits, cached: made.cached,
+        then: `Place it as {"sound":"${name}","at":0,"volume":0.35,"fadeOut":30}. Keep music under narration with volume, or duck it with "duck" on the narration cue.` });
+    });
+
+    server.registerTool('voice_budget', {
+      description: 'What is left of the ElevenLabs account this period, what the cap for generated sound is, and what has been spent on what this month. Check it before a long session of generating.',
+      inputSchema: {}, annotations: read,
+    }, async () => {
+      if (!eleven.configured()) return text({ configured: false, note: 'ELEVENLABS_API_KEY is not set on this server, so nothing can be generated.' });
+      const sub = await subscription(true), ceiling = creditCap(sub);
+      const since = monthStart(), spend = store.voiceSpend(since);
+      return text({ configured: true, tier: sub.tier, used: sub.used, limit: sub.limit, cap: ceiling, left: Math.max(0, ceiling - sub.used), resets: sub.resets,
+        thisMonth: { ...spend, byKind: store.voiceSpendByKind(since) },
+        note: 'used and limit are the whole account, including anything generated outside this server; cap is the ceiling THIS server will generate up to, so the owner always keeps some. thisMonth is only what was generated here.',
+        rates: 'Speech is about one credit a character; a sound effect with a length given is 40 credits a second. Anything already generated with the same words and settings comes from the cache and costs nothing.' });
     });
 
     server.registerTool('get_render', {

@@ -1035,6 +1035,36 @@ Use get_depth to read values at points (the rim might be 0.72, the window 0.15).
 - {"type":"fog","strength":0.6,"start":0.5}: haze that thickens with distance.
 - {"type":"parallax","move":"pan","amount":0.04}: a 2.5D camera move; best on a freeze.
 
+## Making the sound instead of uploading it
+If this server has ElevenLabs set up (voice_budget says), three tools make a sound and attach it to the
+clip for you. What comes back is an ordinary sound: everything below about placing, ducking, looping and
+treating sounds works on it unchanged.
+- speak: text read aloud. list_voices is the board - ten named deliveries, each saying what it is for
+  (poem-narrative, cinematic-sad, elegy, intimate-whisper, documentary-warm, storybook, wry,
+  trailer-hard, epic-declaim, news-brisk). Read it before choosing, the way list_looks is read before a
+  grade. "strength" mixes a delivery in from plain at 0 to all of it at 1.
+    speak {"footage":"<id>","name":"verse","text":"...","style":"cinematic-sad"}
+  Punctuation is the direction: a full stop is a beat, a line break a longer one, an em dash a catch.
+  Write the pauses into the text rather than asking for them.
+- speak with "captions": true also answers with text layers timed to the words, from the voice's OWN
+  timings. Paste them into "layers". Give "at" the OUTPUT frame the narration starts on and the captions
+  arrive already lined up; move the narration later and change "at" rather than editing them by hand.
+- make_sound_effect: a whoosh, an impact, tyres on gravel, a room tone, up to 30 seconds. Describe ONE
+  sound plainly - "heavy wooden door closing in a stone hall" - not a sentence about the scene.
+  "loop": true makes it seamless, which is what a bed under a whole shot wants.
+- make_music: a bed from a description of mood, instruments and pace. The dearest of the three, so settle
+  the length before asking.
+Two things are worth knowing before a long session:
+- The same words in the same delivery are only ever generated ONCE. Asking again costs nothing and
+  returns the identical take, which also means a line re-made after an edit still matches the one beside
+  it. Changing a word, a voice or a setting makes a new take, so do not re-ask idly.
+- There is a credit cap, and it is the owner's money. voice_budget says what is left. When it refuses,
+  it has run out; do not retry, say so.
+A voice reading over footage usually wants the clip's own sound under it:
+  "sounds": [{"sound":"verse","at":30,"duck":0.3}]
+duck drops the clip's sound to 30% while the voice talks and eases it back afterwards. For music under
+narration, give the music a low "volume" (0.3-0.4) and duck it with the narration cue.
+
 ## Sound effects and music
 Upload sounds for the clip (create_upload_link kind "sound", add_sound with a file or a public link to the
 audio file, or the owner adds them on the dashboard under Sounds): MP3, WAV, OGG, FLAC or M4A, up to 3 minutes.
