@@ -21,7 +21,7 @@ import { MAX_MODEL, deleteModel, modelList, saveModel } from './models.js';
 import { depthEstimateSeconds, depthLimits, depthModel, makeDepth } from './depth.js';
 import { MAX_SOUND, MAX_SOUND_SECONDS, deleteSound, loudness, processedSound, saveSound, soundList } from './sounds.js';
 import { createEleven } from './eleven.js';
-import { STYLES, STYLE_NAMES, capReading, captionLayers, estimateCredits, voiceSettings, wordsFromAlignment } from './voice.js';
+import { STYLES, STYLE_NAMES, capReading, captionLayers, directedText, estimateCredits, takesTags, voiceSettings, wordsFromAlignment } from './voice.js';
 import { loadTrack, locate, normalizeTrack, project, saveTrack, sceneCentre, solveTrack, trackLimits, trackOverlay } from './tracking.js';
 import http from 'node:http';
 
@@ -425,6 +425,27 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
     store.rememberVoice(hash, { kind, file, meta: made.meta ?? null });
     const { credits, measured } = await charge(kind, before, estimate, what);
     return { ...made, credits, measured, cached: false };
+  }
+
+  // The account's speech models, kept for five minutes: the list barely changes, and every `speak` needs
+  // it to know what the chosen model costs and whether it listens to the style knob.
+  let modelsAt = 0, modelsWere = null;
+  async function models() {
+    if (modelsWere && Date.now() - modelsAt < 300000) return modelsWere;
+    modelsWere = await eleven.models(); modelsAt = Date.now();
+    return modelsWere;
+  }
+  // The model to use, and what it will listen to. An unknown name is refused with the list rather than
+  // passed through, because ElevenLabs answers a wrong model_id with a 422 that says nothing useful.
+  async function modelFor(asked) {
+    const list = await models();
+    const want = asked || eleven.model;
+    const found = list.find(m => m.model === want);
+    if (!found) {
+      if (asked) throw fail(`That account has no speech model '${asked}'. It has: ${list.map(m => m.model).join(', ')}.`);
+      return { model: want, rate: 1, canStyle: true, canSpeakerBoost: true, name: want, unknown: true };
+    }
+    return found;
   }
 
   // Which voice reads a style: what the caller asked for, else what the owner pinned to that style,
@@ -1126,16 +1147,19 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
 
     // ---- Generated sound ---------------------------------------------------------------------------
     server.registerTool('list_voices', {
-      description: 'The narration board: every named delivery, when it is right, and which voice reads it, plus the voices on the owner\'s ElevenLabs account. Read it before `speak`, the way list_looks is read before a grade.',
+      description: 'The narration board: every named delivery, when it is right, and which voice reads it, plus the voices and the speech models on the owner\'s ElevenLabs account. Read it before `speak`, the way list_looks is read before a grade.',
       inputSchema: {}, annotations: read,
     }, async () => {
       const pinned = store.styleVoices();
       const styles = STYLE_NAMES.map(name => ({ style: name, about: STYLES[name].about, sets: STYLES[name].set, voice: pinned[name] ?? null }));
       if (!eleven.configured()) return text({ styles, voices: [], note: 'Generated sound is not set up on this server (ELEVENLABS_API_KEY is not set), so speak, make_sound_effect and make_music will refuse. The board is still what the styles mean.' });
-      let voices = [];
-      try { voices = await eleven.voices(); } catch (err) { return text({ styles, voices: [], error: err.message }); }
+      let voices = [], list = [];
+      try { [voices, list] = await Promise.all([eleven.voices(), models()]); } catch (err) { return text({ styles, voices: [], error: err.message }); }
       return text({ styles, voices,
-        note: 'A style carries the DELIVERY (how it is read) and a voice carries who reads it. Pin a voice to a style once with set_style_voice and every later `speak` in that style uses it. Without a pin, the account\'s first voice reads everything, which is rarely what anyone wants.' });
+        models: list.map(m => ({ ...m, directedBy: m.canStyle ? 'the style knob' : 'tags written into the text', costPerCharacter: m.rate })),
+        usingByDefault: eleven.model,
+        note: 'A style carries the DELIVERY (how it is read) and a voice carries who reads it. Pin a voice to a style once with set_style_voice and every later `speak` in that style uses it. Without a pin, the account\'s first voice reads everything, which is rarely what anyone wants.',
+        modelNote: 'speak takes a "model". costPerCharacter is ElevenLabs\' own multiplier, so one at 0.5 is half price. Models that report directedBy "tags" ignore the style knob: the board writes its tag into the text for those instead, and you can write your own ([whispers], [sighs], [sarcastic], [excited]) anywhere in the text. Changing model makes a new take rather than reusing the cached one.' });
     });
 
     server.registerTool('set_style_voice', {
@@ -1161,21 +1185,27 @@ export function createAnimator(app, store, env = process.env, { fetcher = fetch,
         captions: z.boolean().default(false).describe('Also answer with text layers timed to the words, from the voice\'s own timings, to paste into the edit'),
         at: z.number().int().min(0).max(100000).default(0).describe('The OUTPUT frame the narration starts on, so the captions line up with where you put the cue'),
         perLine: z.number().int().min(1).max(8).default(4).describe('Words per caption line'),
+        model: z.string().min(1).max(60).optional().describe('Which speech model reads it; list_voices shows the account\'s models with what each costs. Leave it out for the server\'s default'),
       },
       annotations: { ...write, openWorldHint: true },
-    }, async ({ footage, name, text: words, style, strength, voice, captions, at, perLine }) => {
+    }, async ({ footage, name, text: words, style, strength, voice, captions, at, perLine, model }) => {
       const f = store.footage(footage);
-      const { voice: id, how } = await voiceFor(style, voice);
-      const settings = voiceSettings(style, strength);
-      const estimate = estimateCredits('speech', { text: words, model: eleven.model });
-      const made = await generated('speech', { text: words, voice: id, settings, model: eleven.model, captions }, estimate,
-        `${words.length} characters of speech`,
+      const [{ voice: id, how }, m] = await Promise.all([voiceFor(style, voice), modelFor(model)]);
+      // What the model will listen to decides how the delivery is given: a knob for a model that takes
+      // knobs, a tag written into the text for one that does not.
+      const settings = voiceSettings(style, strength, { style: m.canStyle, speakerBoost: m.canSpeakerBoost });
+      const spoken = directedText(words, style, m.model);
+      const estimate = estimateCredits('speech', { text: spoken, rate: m.rate });
+      const made = await generated('speech', { text: spoken, voice: id, settings, model: m.model, captions }, estimate,
+        `${spoken.length} characters of speech on ${m.model}`,
         async () => (captions
-          ? await (async () => { const got = await eleven.speechWithTimings(id, words, settings); return { buffer: got.buffer, meta: { words: wordsFromAlignment(got.alignment) } }; })()
-          : { buffer: await eleven.speech(id, words, settings), meta: null }));
+          ? await (async () => { const got = await eleven.speechWithTimings(id, spoken, settings, m.model); return { buffer: got.buffer, meta: { words: wordsFromAlignment(got.alignment) } }; })()
+          : { buffer: await eleven.speech(id, spoken, settings, m.model), meta: null }));
       const saved = await saveSound(made.buffer, footageFiles(store.dir, f.id).sounds, name);
       const timed = made.meta?.words ? captionLayers(made.meta.words, { at, fps: FPS, perLine }) : null;
-      return text({ footage: f.id, ...saved, style, voice: id, voiceChosen: how,
+      return text({ footage: f.id, ...saved, style, voice: id, voiceChosen: how, model: m.model,
+        ...(spoken !== words ? { spoken, spokenNote: `${m.model} is directed by tags in the text rather than by the style knob, so '${style}' was given as ${STYLES[style].tag}. Write your own tags into the text to override it.` } : {}),
+        ...(!m.canStyle && !STYLES[style]?.tag ? { styleNote: `${m.model} does not take the style knob, and '${style}' has no tag, so this delivery came only from its stability and speed. eleven_multilingual_v2 would give you the rest of it.` } : {}),
         credits: made.credits, cached: made.cached, creditsAre: made.cached ? 'nothing: it came from the cache' : made.measured ? 'measured from the account' : 'an estimate - ElevenLabs had not counted this generation yet', ...(made.cached ? { cachedNote: 'Already generated with exactly these words and settings, so this cost nothing and sounds the same as before.' } : {}),
         ...(timed ? { captions: timed, captionNote: `Text layers timed to the voice, in OUTPUT frames from ${at}. Paste them into the edit's layers; move them all by changing \`at\` here rather than by hand.` } : {}),
         then: `Place it on the edit: {"sound":"${name}","at":${at},"duck":0.3} under sounds. duck drops the clip's own sound while it talks.` });

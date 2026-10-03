@@ -2,7 +2,7 @@
 // shape of every request that leaves for ElevenLabs. Nothing here touches the network or a key.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { NEUTRAL_VOICE, STYLES, STYLE_NAMES, capReading, captionLayers, estimateCredits, voiceSettings, wordsFromAlignment } from '../src/voice.js';
+import { NEUTRAL_VOICE, STYLES, STYLE_NAMES, capReading, captionLayers, directedText, estimateCredits, takesTags, voiceSettings, wordsFromAlignment } from '../src/voice.js';
 import { createEleven } from '../src/eleven.js';
 
 // ---- the board -------------------------------------------------------------------------------------
@@ -235,4 +235,87 @@ test('a burst cannot outrun the cap while the account is still lagging', () => {
   }
   assert.equal(made, 8, `the cap stops it at eight, not twenty: ${made}`);
   assert.ok(ledger <= cap, `and never goes past the cap: ${ledger}`);
+});
+
+// ---- choosing a model -------------------------------------------------------------------------------
+// The account's models do not all take the same direction. multilingual_v2 reports can_use_style true;
+// v3 and v4 report it FALSE and are directed by tags written into the text instead. A board that only
+// knew about the knob would quietly do half of nothing on the newer models.
+
+test('a knob the model will not listen to is dropped rather than sent and ignored', () => {
+  const knobs = voiceSettings('cinematic-sad', 1, { style: true, speakerBoost: true });
+  assert.ok('style' in knobs && 'use_speaker_boost' in knobs);
+  const tagModel = voiceSettings('cinematic-sad', 1, { style: false, speakerBoost: false });
+  assert.ok(!('style' in tagModel), 'style goes, because the model would ignore it');
+  assert.ok(!('use_speaker_boost' in tagModel));
+  assert.equal(tagModel.stability, knobs.stability, 'but stability and speed still work everywhere');
+  assert.equal(tagModel.speed, knobs.speed);
+});
+
+test('on a tag model the delivery is written into the text instead', () => {
+  assert.equal(takesTags('eleven_v4'), true);
+  assert.equal(takesTags('eleven_v3_conversational'), true);
+  assert.equal(takesTags('eleven_multilingual_v2'), false);
+  assert.equal(takesTags('eleven_flash_v2_5'), false);
+  assert.equal(directedText('The lights go out.', 'cinematic-sad', 'eleven_multilingual_v2'), 'The lights go out.');
+  assert.equal(directedText('The lights go out.', 'cinematic-sad', 'eleven_v4'), '[sighs] The lights go out.');
+  assert.equal(directedText('Quietly now.', 'intimate-whisper', 'eleven_v4'), '[whispers] Quietly now.');
+});
+
+test('a delivery with no tag of its own leaves the text alone', () => {
+  assert.equal(directedText('Just read it.', 'poem-narrative', 'eleven_v4'), 'Just read it.');
+  assert.equal(directedText('Doors at eight.', 'news-brisk', 'eleven_v4'), 'Doors at eight.');
+});
+
+test('a tag the caller wrote themselves is not argued with', () => {
+  const asked = '[whispers] Closer than that.';
+  assert.equal(directedText(asked, 'cinematic-sad', 'eleven_v4'), asked, 'they asked for something more specific than the board offers');
+  assert.equal(directedText('He left. [sighs] That was all.', 'storybook', 'eleven_v4'), 'He left. [sighs] That was all.');
+});
+
+test('every tag on the board is one ElevenLabs documents', () => {
+  const documented = new Set(['[sighs]', '[whispers]', '[sarcastic]', '[excited]', '[laughs]', '[crying]', '[curious]']);
+  for (const name of STYLE_NAMES) {
+    const tag = STYLES[name].tag;
+    if (tag) assert.ok(documented.has(tag), `${name} uses ${tag}, which is not on the documented list - their own guidance is that an invented tag misfires`);
+  }
+});
+
+test('the cost comes from the model\'s own multiplier, not from the look of its name', () => {
+  assert.equal(estimateCredits('speech', { text: 'a'.repeat(900), rate: 0.5 }), 450);
+  assert.equal(estimateCredits('speech', { text: 'a'.repeat(900), rate: 1 }), 900);
+  // A name that looks fast is still taken as half price when no rate is to hand, per the published rates.
+  assert.equal(estimateCredits('speech', { text: 'a'.repeat(900), model: 'eleven_v4_turbo' }), 450);
+  // But a real rate always wins over the guess from the name.
+  assert.equal(estimateCredits('speech', { text: 'a'.repeat(900), model: 'eleven_v4_turbo', rate: 1 }), 900);
+});
+
+test('a tag costs characters, so the estimate counts the text that is really spoken', () => {
+  const plain = 'The lights go out.';
+  const spoken = directedText(plain, 'cinematic-sad', 'eleven_v4');
+  assert.ok(estimateCredits('speech', { text: spoken, rate: 1 }) > estimateCredits('speech', { text: plain, rate: 1 }));
+  assert.equal(estimateCredits('speech', { text: spoken, rate: 1 }), spoken.length);
+});
+
+test('the model asked for is the model that goes in the request', async () => {
+  const { calls, fetcher } = spy(audio);
+  await createEleven(env, fetcher).speech('v', 'hi', NEUTRAL_VOICE, 'eleven_v4');
+  assert.equal(calls[0].body.model_id, 'eleven_v4');
+  const second = spy(audio);
+  await createEleven(env, second.fetcher).speech('v', 'hi', NEUTRAL_VOICE);
+  assert.equal(second.calls[0].body.model_id, 'eleven_multilingual_v2', 'and without one, the server default');
+});
+
+test('the model list reports what each one costs and what it listens to', async () => {
+  const { fetcher } = spy(async () => ({ ok: true, status: 200, json: async () => [
+    { model_id: 'eleven_v4', name: 'Eleven v4', can_do_text_to_speech: true, can_use_style: false, can_use_speaker_boost: false, model_rates: { character_cost_multiplier: 1 }, languages: new Array(85) },
+    { model_id: 'eleven_flash_v2_5', name: 'Flash', can_do_text_to_speech: true, can_use_style: false, model_rates: { character_cost_multiplier: 0.5 }, languages: [] },
+    { model_id: 'scribe_v1', name: 'Scribe', can_do_text_to_speech: false },
+  ] }));
+  const list = await createEleven(env, fetcher).models();
+  assert.equal(list.length, 2, 'a model that cannot speak is not a speech model');
+  assert.equal(list[0].rate, 1);
+  assert.equal(list[0].canStyle, false);
+  assert.equal(list[1].rate, 0.5);
+  assert.equal(list[0].languages, 85);
 });

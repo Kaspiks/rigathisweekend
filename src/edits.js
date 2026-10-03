@@ -1054,6 +1054,16 @@ treating sounds works on it unchanged.
   "loop": true makes it seamless, which is what a bed under a whole shot wants.
 - make_music: a bed from a description of mood, instruments and pace. The dearest of the three, so settle
   the length before asking.
+- speak takes a "model". list_voices shows the account's, with what each costs per character (0.5 is half
+  price) and how each takes direction. There are two kinds and the difference matters:
+  - eleven_multilingual_v2 listens to the "style" knob, so a delivery arrives fully as the board sets it.
+  - the v3 and v4 models IGNORE that knob and are directed by tags written into the text instead. The
+    board writes its own tag in for you ([sighs] for cinematic-sad, [whispers] for intimate-whisper,
+    [sarcastic] for wry, [excited] for storybook), and speak answers with the text it really spoke. Write
+    your own tags anywhere in the text and the board leaves them alone - that is the finer control.
+    Ellipses and CAPITALS carry pacing and emphasis on these models; SSML break tags do nothing.
+  Stability and speed work everywhere, so a delivery is never lost, only less of it arrives. Changing
+  model makes a NEW take rather than reusing the cached one, so it costs again - pick the model first.
 Two things are worth knowing before a long session:
 - The same words in the same delivery are only ever generated ONCE. Asking again costs nothing and
   returns the identical take, which also means a line re-made after an edit still matches the one beside

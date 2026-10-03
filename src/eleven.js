@@ -65,21 +65,36 @@ export function createEleven(env = process.env, fetcher = fetch) {
       };
     },
 
+    // The speech models this account may use, with what each costs per character as ElevenLabs itself
+    // reports it, and whether it listens to the `style` knob. Both matter: the cost decides the estimate
+    // the cap is checked against, and can_use_style decides whether a delivery is sent as a knob or
+    // written into the text as a tag.
+    async models() {
+      const got = await call('/models');
+      return (got || []).filter(m => m.can_do_text_to_speech).map(m => ({
+        model: m.model_id, name: m.name, about: m.description || null,
+        rate: m.model_rates?.character_cost_multiplier ?? 1,
+        canStyle: m.can_use_style !== false, canSpeakerBoost: m.can_use_speaker_boost !== false,
+        maxCharacters: m.max_characters_request_subscribed_user ?? null,
+        languages: (m.languages || []).length,
+      }));
+    },
+
     async voices() {
       const got = await call('/voices');
       return (got.voices || []).map(v => ({ voice: v.voice_id, name: v.name, about: v.description || v.labels?.description || null,
         labels: v.labels ?? {}, preview: v.preview_url || null }));
     },
 
-    speech: (voice, text, settings, extra = {}) =>
+    speech: (voice, text, settings, use = model, extra = {}) =>
       call(`/text-to-speech/${encodeURIComponent(voice)}`, { method: 'POST', json: false,
-        body: { text, model_id: model, voice_settings: settings, output_format: 'mp3_44100_128', ...extra } }),
+        body: { text, model_id: use, voice_settings: settings, output_format: 'mp3_44100_128', ...extra } }),
 
     // The same read, with the start and end of every character it spoke, so captions can land on the
     // voice rather than being timed by hand. The audio comes back inside the JSON, base64.
-    async speechWithTimings(voice, text, settings, extra = {}) {
+    async speechWithTimings(voice, text, settings, use = model, extra = {}) {
       const got = await call(`/text-to-speech/${encodeURIComponent(voice)}/with-timestamps`, { method: 'POST',
-        body: { text, model_id: model, voice_settings: settings, output_format: 'mp3_44100_128', ...extra } });
+        body: { text, model_id: use, voice_settings: settings, output_format: 'mp3_44100_128', ...extra } });
       if (!got.audio_base64) throw fail('ElevenLabs answered without any audio', 502);
       return { buffer: Buffer.from(got.audio_base64, 'base64'), alignment: got.normalized_alignment || got.alignment || null };
     },

@@ -11,6 +11,16 @@
 //   style       how far the voice leans into its own character. Above about 0.6 it starts acting.
 //   speed       1 as recorded. Verse wants under 1; news wants over.
 //
+// Models differ in what they will listen to, which is why the board carries two kinds of direction.
+// `eleven_multilingual_v2` takes the `style` knob; v3 and v4 report can_use_style FALSE and are directed
+// by AUDIO TAGS written into the text instead - [whispers], [sighs], [sarcastic]. So every delivery has
+// both: the knobs for a model that takes knobs, and a tag for a model that takes tags. Stability and
+// speed work on all of them, so most of a delivery survives whichever model is chosen.
+//
+// Tags are kept to ones ElevenLabs documents, and only where one genuinely fits. Their own guidance is
+// that a tag lands when the delivery is already in the voice's training data and misfires otherwise, so
+// an invented tag on a style that nearly works is a bad trade.
+//
 // Nothing here calls anything. src/eleven.js makes the requests; this is only arithmetic and taste.
 
 export const NEUTRAL_VOICE = { stability: 0.5, similarity_boost: 0.75, style: 0, speed: 1, use_speaker_boost: true };
@@ -22,15 +32,15 @@ export const STYLES = {
   },
   'cinematic-sad': {
     about: 'Low, close and slow, with the pauses left long. For an elegy, a last shot, a poem about something ending.',
-    set: { stability: 0.7, style: 0.35, speed: 0.84 },
+    set: { stability: 0.7, style: 0.35, speed: 0.84 }, tag: '[sighs]',
   },
   elegy: {
     about: 'Slower and stiller than cinematic-sad, almost without inflection. For grief rather than sadness; it will drag over anything lighter.',
-    set: { stability: 0.78, style: 0.3, speed: 0.78 },
+    set: { stability: 0.78, style: 0.3, speed: 0.78 }, tag: '[sighs]',
   },
   'intimate-whisper': {
     about: 'Quiet and near, as if beside you. Flatters a short, personal line; falls apart over long paragraphs.',
-    set: { stability: 0.68, style: 0.25, speed: 0.88 },
+    set: { stability: 0.68, style: 0.25, speed: 0.88 }, tag: '[whispers]',
   },
   'documentary-warm': {
     about: 'Warm, even and explanatory, the voice of someone who knows the place. For an event listing or anything telling you what you are looking at.',
@@ -38,11 +48,11 @@ export const STYLES = {
   },
   storybook: {
     about: 'Animated and a little playful, leaning into the characters. For drawn animation and anything with a story in it.',
-    set: { stability: 0.4, style: 0.5, speed: 0.96 },
+    set: { stability: 0.4, style: 0.5, speed: 0.96 }, tag: '[excited]',
   },
   wry: {
     about: 'Light, dry, a half-smile behind it. For a listing with personality, or a line that would be unbearable read straight.',
-    set: { stability: 0.45, style: 0.4, speed: 1 },
+    set: { stability: 0.45, style: 0.4, speed: 1 }, tag: '[sarcastic]',
   },
   'trailer-hard': {
     about: 'Clipped and driving, pushing forward. For a drift or action trailer, over cuts, under music.',
@@ -57,21 +67,44 @@ export const STYLES = {
     set: { stability: 0.72, style: 0.05, speed: 1.12 },
   },
 };
+
+// Which models are directed by tags in the text rather than by the `style` knob. Checked against the
+// account's own model list at call time too (can_use_style), but the id is what decides whether a tag
+// is worth writing into the text at all.
+export const takesTags = model => /^eleven_v[34]/.test(model || '');
 export const STYLE_NAMES = Object.keys(STYLES);
 
 // A style's settings. `strength` mixes it in from the neutral voice, the way a look's strength does, so
 // a delivery can be asked for at half pressure.
-export function voiceSettings(style, strength = 1) {
+//
+// `can` says what the chosen model will actually listen to, from the account's own model list. A knob a
+// model does not support is DROPPED rather than sent and ignored: sending style to a model that reports
+// can_use_style false is at best noise in the request and at worst a 422, and either way it would make
+// the cache key differ from the audio that comes back.
+export function voiceSettings(style, strength = 1, can = { style: true, speakerBoost: true }) {
   const chosen = STYLES[style];
   const out = { ...NEUTRAL_VOICE };
-  if (!chosen) return out;
-  const t = Math.max(0, Math.min(1, strength));
-  for (const [k, v] of Object.entries(chosen.set)) {
-    // Only the numeric knobs mix; a switch like use_speaker_boost would come out as 0.5 of a boolean.
-    if (typeof v !== 'number' || typeof NEUTRAL_VOICE[k] !== 'number') { out[k] = v; continue; }
-    out[k] = +(NEUTRAL_VOICE[k] + (v - NEUTRAL_VOICE[k]) * t).toFixed(4);
+  if (chosen) {
+    const t = Math.max(0, Math.min(1, strength));
+    for (const [k, v] of Object.entries(chosen.set)) {
+      // Only the numeric knobs mix; a switch like use_speaker_boost would come out as 0.5 of a boolean.
+      if (typeof v !== 'number' || typeof NEUTRAL_VOICE[k] !== 'number') { out[k] = v; continue; }
+      out[k] = +(NEUTRAL_VOICE[k] + (v - NEUTRAL_VOICE[k]) * t).toFixed(4);
+    }
   }
+  if (can.style === false) delete out.style;
+  if (can.speakerBoost === false) delete out.use_speaker_boost;
   return out;
+}
+
+// The text as it will actually be spoken. On a tag model the delivery is written INTO the text, so a
+// style that would have set the `style` knob prefixes its tag instead. Anything the caller already wrote
+// in brackets is left alone - they have asked for something more specific than the board offers, and the
+// board should not argue with it.
+export function directedText(text, style, model) {
+  const tag = STYLES[style]?.tag;
+  if (!tag || !takesTags(model) || /\[[a-z][a-z .'-]{1,30}\]/i.test(text)) return text;
+  return `${tag} ${text}`;
 }
 
 // ---- What it costs ---------------------------------------------------------------------------------
@@ -83,8 +116,11 @@ export function voiceSettings(style, strength = 1) {
 export const RATES = { speech: 1, speechFlash: 0.5, effectPerSecond: 40, musicPerSecond: 100 };
 export const FLASH = /flash|turbo/i;
 
-export function estimateCredits(kind, { text = '', seconds = 0, model = '' } = {}) {
-  if (kind === 'speech') return Math.ceil(text.length * (FLASH.test(model) ? RATES.speechFlash : RATES.speech));
+// `rate` is the model's own character_cost_multiplier, which the account's model list reports - so the
+// cheap models are known to be cheap rather than guessed at from their names. Without one, a name that
+// looks like a fast model is still taken as half price, which is what the published rates say.
+export function estimateCredits(kind, { text = '', seconds = 0, model = '', rate = null } = {}) {
+  if (kind === 'speech') return Math.ceil(text.length * (rate ?? (FLASH.test(model) ? RATES.speechFlash : RATES.speech)));
   if (kind === 'effect') return Math.ceil(Math.max(0.5, seconds) * RATES.effectPerSecond);
   if (kind === 'music') return Math.ceil(Math.max(1, seconds) * RATES.musicPerSecond);
   return 0;
