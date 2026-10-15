@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp,rm,readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DateTime } from 'luxon';
@@ -664,6 +665,23 @@ test('A bad key or an ej.uz outage stops early and every caption still gets a wo
   assert.equal(downCalls,3,'three failures in a row and it stops');
   const link=captionLinker(other,env);
   for(const u of urls) assert.match(link(u),/^riga\.example\.com\//);
+});
+test('Slides are renumbered for what you ticked before the hand-over to Postiz can start',async t=>{
+  const store=await setup(t),token='n'.repeat(32);const app=createApp(store,{ADMIN_TOKEN:token});
+  const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));
+  const base=`http://127.0.0.1:${server.address().port}`, ev=fixture().events[0];
+  const e=store.submit({weekend:'2099-10-23',events:[1,2,3,4,5].map(n=>({...ev,title:`Event ${n}`,startsAt:`2099-10-24T1${n}:00:00+03:00`,sourceUrl:`https://example.com/${n}`}))});
+  await renderEdition(e,store.dir,async()=>{throw new Error('offline');}); // as submitted: every event, numbered 1–5
+  const slide=i=>readFile(join(store.dir,'media',e.id,`feed-${i}.jpg`)), drawnForAll=await slide(3);
+  // The worker hands a carousel over as soon as its job exists: look at the slides the moment approval queues it.
+  const approve=store.approve.bind(store); let seen=null;
+  store.approve=(...args)=>{const jobs=approve(...args);seen=readFileSync(join(store.dir,'media',e.id,'feed-3.jpg'));return jobs;};
+  const res=await fetch(`${base}/api/editions/${e.id}/approve`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({events:[0,1,3,4]})});
+  assert.equal(res.status,200);
+  const drawnForPicks=await slide(3);
+  assert.notDeepEqual(drawnForPicks,drawnForAll,'leaving out the third event renumbers the fourth from 4 of 5 to 3 of 4');
+  assert.deepEqual(seen,drawnForPicks,'and that slide was already on disk when the hand-over became due');
+  assert.doesNotMatch(await readFile(join(store.dir,'media',e.id,'instagram-2099-10-24-1.txt'),'utf8'),/Event 3/);
 });
 test('Approving creates ej.uz links only for the events being published',async t=>{
   const store=await setup(t),token='h'.repeat(32), posted=[];

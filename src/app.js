@@ -204,7 +204,7 @@ export function createApp(store,env=process.env,{fetcher=fetch,animator:animator
     res.json(store.setAnimationPostiz(a.id,await deliverAnimation(store.dir,a,kind,env,fetcher)));
   });
 
-  // Approving with a list of event indexes publishes only those; the covers, captions and
+  // Approving with a list of event indexes publishes only those; the covers, slides, captions and
   // WhatsApp digest are redrawn to match before any job can run.
   app.post('/api/editions/:id/approve',async(req,res)=>{
     const picks=req.body?.events==null?null:z.array(z.number().int().min(0)).min(1).parse(req.body.events);
@@ -212,10 +212,14 @@ export function createApp(store,env=process.env,{fetcher=fetch,animator:animator
     // Check the selection first, make ej.uz links only for the events that will publish, and only then
     // approve: approval queues the hand-over to Postiz, so the captions must already have their links.
     const plan=store.planApproval(req.params.id,undefined,picks,stories);
-    if(!plan.e.approved) await prepareLinks(store,plan.urls,env,fetcher,env.EJUZ_TEST_NO_WAIT?{sleep:async()=>{}}:{});
-    const jobs=store.approve(req.params.id,undefined,picks,stories);
-    await renderEdition(store.get(req.params.id),store.dir,fetch,{link});
-    res.json(jobs);
+    if(!plan.e.approved) {
+      await prepareLinks(store,plan.urls,env,fetcher,env.EJUZ_TEST_NO_WAIT?{sleep:async()=>{}}:{});
+      // Draw the selection before approving, not after. The hand-over is due the moment approval commits,
+      // and the worker uploads whatever slides are on disk: drawn afterwards, a worker that got there first
+      // sent the slides numbered for every event, so leaving out the third went 1, 2, 4.
+      await renderEdition({...plan.e,selected:plan.picks},store.dir,fetch,{link});
+    }
+    res.json(store.approve(req.params.id,undefined,picks,stories));
   });
   // Mark the other weekend days an event is on; the cover and caption are redrawn to match.
   app.post('/api/editions/:id/events/:index/also-on',async(req,res)=>{
