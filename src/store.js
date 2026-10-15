@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { randomInt } from 'node:crypto';
+import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { digest, validateSubmission, plannedJobs, eventsByDay, validatePublication } from './domain.js';
@@ -29,7 +29,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS voice_cache(hash TEXT PRIMARY KEY, kind TEXT NOT NULL, file TEXT NOT NULL, seconds REAL, meta TEXT, created TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE IF NOT EXISTS voice_spend(id INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, credits INTEGER NOT NULL, detail TEXT);
       CREATE TABLE IF NOT EXISTS voice_styles(style TEXT PRIMARY KEY, voice TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS voice_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS voice_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS users(name TEXT PRIMARY KEY, hash TEXT NOT NULL, created TEXT NOT NULL);`);
     // Instagram posts are per day, so the approval rule moved from one edition per weekend
     // to one per weekend day. Editions approved under the old rule keep their days.
     this.db.exec('DROP INDEX IF EXISTS one_approved_weekend');
@@ -305,6 +306,31 @@ export class Store {
   saveGuideNote(title,text) {this.db.prepare('INSERT INTO guide_notes(title,text,updated) VALUES(?,?,?) ON CONFLICT(title) DO UPDATE SET text=excluded.text,updated=excluded.updated').run(title,text,new Date().toISOString());}
   guideNotes() {return this.db.prepare('SELECT title,text,updated FROM guide_notes ORDER BY rowid').all().map(r=>({...r}));}
   deleteGuideNote(title) {return this.db.prepare('DELETE FROM guide_notes WHERE title=?').run(title).changes>0;}
+  // People who sign in under their own name. They share the one workspace with the owner (admin, who signs in
+  // with ADMIN_TOKEN); a login of their own means it can be taken away without disturbing anyone else.
+  // Passwords are generated here, never chosen, so there is nothing to guess and a plain SHA-256 is enough.
+  addUser(name) {
+    name=String(name||'').trim().toLowerCase();
+    if(!/^[a-z0-9][a-z0-9._-]{1,31}$/.test(name)) throw new Error('A user name is 2–32 characters: a–z, 0–9, dot, dash or underscore');
+    if(name==='admin') throw new Error('admin is the owner, who signs in with ADMIN_TOKEN');
+    if(this.db.prepare('SELECT 1 FROM users WHERE name=?').get(name)) throw new Error(`There is already a user called '${name}'; remove it first to give it a new password`);
+    const password=randomBytes(24).toString('base64url');
+    this.db.prepare('INSERT INTO users(name,hash,created) VALUES(?,?,?)').run(name,createHash('sha256').update(password).digest('hex'),new Date().toISOString());
+    return {name,password};
+  }
+  checkUser(name,password) {
+    const row=this.db.prepare('SELECT hash FROM users WHERE name=?').get(String(name||'').trim().toLowerCase());
+    return !!row&&timingSafeEqual(Buffer.from(row.hash,'hex'),createHash('sha256').update(String(password||'')).digest());
+  }
+  users() {return this.db.prepare('SELECT name,created FROM users ORDER BY name').all().map(r=>({...r}));}
+  removeUser(name) {
+    name=String(name||'').trim().toLowerCase();
+    const removed=this.db.prepare('DELETE FROM users WHERE name=?').run(name).changes>0;
+    // Their ChatGPT connection goes with the login. oauth.js makes these tables when the app first starts;
+    // before that there is nothing in them to remove.
+    for(const table of ['oauth_tokens','oauth_codes']) try {this.db.prepare(`DELETE FROM ${table} WHERE user=?`).run(name);} catch {}
+    return removed;
+  }
   // One-time upload links, so ChatGPT can send a file it made straight from its sandbox. Only a hash of
   // the token is kept; a link works once, for one named picture of one clip, until it expires.
   addUploadLink(hash,footage,name,expires,kind='picture') {

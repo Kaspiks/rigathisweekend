@@ -109,7 +109,7 @@ WAHA's image is pinned to an immutable digest and is configurable with `WAHA_IMA
 
 ## Research: choose one owner
 
-**Existing ChatGPT task:** follow [the MCP instructions](docs/chatgpt-task.md). The custom server exposes `submit_weekend_events`, `list_weekend_editions`, and `approve_weekend_edition` over Streamable HTTP, plus the footage tools described in [docs/chatgpt-video.md](docs/chatgpt-video.md). It is also a single-user OAuth 2.1 authorization server (dynamic registration, PKCE, login with `ADMIN_TOKEN`), which is what ChatGPT's custom apps require; direct bearer use of `ADMIN_TOKEN` also works. Whether ChatGPT scheduled tasks can call custom apps unattended still needs testing in your account.
+**Existing ChatGPT task:** follow [the MCP instructions](docs/chatgpt-task.md). The custom server exposes `submit_weekend_events`, `list_weekend_editions`, and `approve_weekend_edition` over Streamable HTTP, plus the footage tools described in [docs/chatgpt-video.md](docs/chatgpt-video.md). It is also an OAuth 2.1 authorization server (dynamic registration, PKCE, login with `ADMIN_TOKEN` or a user's own name and password), which is what ChatGPT's custom apps require; direct bearer use of `ADMIN_TOKEN` also works. Whether ChatGPT scheduled tasks can call custom apps unattended still needs testing in your account.
 
 **VPS scheduler:** set `OPENAI_API_KEY`, an available web-search-capable `OPENAI_MODEL`, and `RESEARCH_SCHEDULE_ENABLED=true`. Research runs Thursday at 18:00 Riga time, with Friday-before-09:00 catch-up. This incurs separate OpenAI API charges. It stores consulted source URLs and the response ID. Returned event sources must occur in the web-search evidence; this is a provenance check, not a guarantee of factual correctness. Review actual listings before publication.
 
@@ -124,6 +124,18 @@ docker compose run --rm app node src/cli.js research 2026-09-18
 ```
 
 Research failures are visible in the dashboard and worker logs. Failed scheduled runs do not retry automatically, avoiding an unexpected loop of paid calls. Use the dashboard's research button or CLI to rerun. Choose either ChatGPT or the API scheduler to avoid duplicate research. Incoming submissions are deduplicated by content. Approval claims each of the edition's weekend days, so two editions can never publish the same day twice, while a later edition can still cover a day nothing has claimed yet.
+
+## Other people
+
+Everyone works in the same workspace: the same editions, footage, edits and house rules. Give someone their own login instead of your `ADMIN_TOKEN`:
+
+```sh
+scripts/remote.sh user add anna     # prints her password once; only a hash is kept
+scripts/remote.sh user list
+scripts/remote.sh user remove anna  # ends her dashboard login and her ChatGPT connection
+```
+
+Locally the same commands are `docker compose run --rm --no-deps app node src/cli.js user …`. The name and password open the dashboard (in place of `admin` and the token) and the sign-in page ChatGPT shows when she adds the plugin with the same MCP URL. Passwords are generated, never chosen; to replace one, remove the user and add them again. A user can do everything you can in the dashboard and through ChatGPT, including approving an edition, so add only people you would hand the token to. What a login adds is that it can be taken away from one person without changing anything for the others. The server's `.env` and the user list stay with whoever has SSH access.
 
 ## Review and enable delivery
 

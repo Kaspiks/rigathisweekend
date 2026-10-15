@@ -180,6 +180,46 @@ test('OAuth: dynamic registration, admin-token login, PKCE exchange, MCP-only ac
   assert.equal((await fetch(base+'/revoke',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:reg.client_id,token:refreshed.access_token})})).status,200);
   assert.equal((await fetch(base+'/mcp',{method:'POST',headers:{Authorization:`Bearer ${refreshed.access_token}`}})).status,401,'revoked token is rejected');
 });
+test('Another person signs in under their own name, to the dashboard and to ChatGPT, and removing them cuts both off',async t=>{
+  const {createHash,randomBytes}=await import('node:crypto');
+  const store=await setup(t),token='u'.repeat(32);const app=createApp(store,{ADMIN_TOKEN:token});
+  const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));
+  const base=`http://127.0.0.1:${server.address().port}`;
+  assert.throws(()=>store.addUser('admin'),/owner/);assert.throws(()=>store.addUser('a b'),/2–32/);
+  const anna=store.addUser('Anna');assert.equal(anna.name,'anna');assert.throws(()=>store.addUser('anna'),/already/);
+  assert.ok(!JSON.stringify(store.db.prepare('SELECT * FROM users').all()).includes(anna.password),'only a hash of the password is stored');
+  const dashboard=(name,password)=>fetch(base+'/api/editions',{headers:{Authorization:`Basic ${Buffer.from(`${name}:${password}`).toString('base64')}`}}).then(r=>r.status);
+  assert.equal(await dashboard('anna',anna.password),200);assert.equal(await dashboard('Anna',anna.password),200,'names are not case-sensitive');
+  assert.equal(await dashboard('admin',token),200,'the owner still signs in with the admin token');
+  assert.equal(await dashboard('anna','wrong'),401);assert.equal(await dashboard('anna',token),401,'the admin token is not a user password');
+  assert.equal(await dashboard('admin',anna.password),401);assert.equal(await dashboard('nobody',anna.password),401);
+  // The sign-in ChatGPT shows when the plugin is connected, as either person.
+  const connect=async(name,password)=>{
+    const reg=await (await fetch(base+'/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_name:'ChatGPT',redirect_uris:['https://chatgpt.com/connector_platform_oauth_redirect']})})).json();
+    const verifier=randomBytes(32).toString('base64url'),challenge=createHash('sha256').update(verifier).digest('base64url');
+    const authz=new URL(base+'/authorize');for(const [k,v] of Object.entries({response_type:'code',client_id:reg.client_id,redirect_uri:reg.redirect_uris[0],code_challenge:challenge,code_challenge_method:'S256'})) authz.searchParams.set(k,v);
+    const html=await (await fetch(authz)).text();assert.match(html,/name="name"/);const txn=html.match(/name="txn" value="([^"]+)"/)[1];
+    const login=await fetch(base+'/oauth/login',{method:'POST',redirect:'manual',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({txn,name,token:password})});
+    if(login.status!==302) return {status:login.status,html:await login.text()};
+    const code=new URL(login.headers.get('location')).searchParams.get('code');
+    const tokens=await (await fetch(base+'/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:reg.client_id,code,code_verifier:verifier,redirect_uri:reg.redirect_uris[0]})})).json();
+    return {status:302,client:reg.client_id,...tokens};
+  };
+  const refused=await connect('anna',token);assert.equal(refused.status,401);assert.match(refused.html,/value="anna"/,'the name stays filled in');
+  assert.equal((await connect('',anna.password)).status,401,'an empty name means the owner');
+  const hers=await connect(' Anna ',anna.password),mine=await connect('',token);assert.ok(hers.access_token&&mine.access_token);
+  const mcp=bearer=>fetch(base+'/mcp',{method:'POST',headers:{Authorization:`Bearer ${bearer}`,'Content-Type':'application/json',Accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})}).then(r=>r.status);
+  assert.equal(await mcp(hers.access_token),200);
+  assert.equal((await fetch(base+'/api/editions',{headers:{Authorization:`Bearer ${hers.access_token}`}})).status,401,'her ChatGPT token is MCP-only, like the owner\'s');
+  const refresh=token=>fetch(base+'/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'refresh_token',client_id:hers.client,refresh_token:token})});
+  const renewed=await (await refresh(hers.refresh_token)).json();assert.ok(renewed.access_token);
+  assert.deepEqual(store.db.prepare('SELECT DISTINCT user FROM oauth_tokens ORDER BY user').all().map(r=>r.user),['admin','anna'],'a renewed token stays hers');
+  assert.equal(store.removeUser('anna'),true);assert.equal(store.removeUser('anna'),false);
+  assert.equal(await dashboard('anna',anna.password),401);
+  assert.equal(await mcp(renewed.access_token),401,'her ChatGPT connection goes with her login');assert.equal((await refresh(renewed.refresh_token)).status,400);
+  assert.equal(await mcp(mine.access_token),200,'the owner\'s connection is untouched');
+  assert.notEqual(store.addUser('anna').password,anna.password);assert.equal(await dashboard('anna',anna.password),401,'adding her again gives a new password, not the old one back');
+});
 test('Captions carry organiser links and degrade instead of rejecting a long edition',async()=>{
   const {caption}=await import('../src/domain.js');
   const short=caption(fixture());

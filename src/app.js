@@ -74,13 +74,15 @@ export function createApp(store,env=process.env,{fetcher=fetch,animator:animator
     const auth=req.headers.authorization||'';
     const bearer=auth.startsWith('Bearer ')?auth.slice(7):'';
     const basic=auth.startsWith('Basic ')?Buffer.from(auth.slice(6),'base64').toString():'';
-    const password=basic.slice(basic.indexOf(':')+1);
-    let admin=basic.startsWith('admin:')&&equal(password,env.ADMIN_TOKEN);
+    const name=basic.slice(0,Math.max(basic.indexOf(':'),0)),password=basic.slice(basic.indexOf(':')+1);
+    // The owner signs in as admin with ADMIN_TOKEN, anyone added with `cli.js user add` under their own name.
+    // They share the one workspace, so either login opens the same dashboard and API.
+    let signedIn=name==='admin'?equal(password,env.ADMIN_TOKEN):!!name&&store.checkUser(name,password);
     if(bearer) {
-      try {const info=await oauth.provider.verifyAccessToken(bearer); if(info.expiresAt>Date.now()/1000) {req.auth=info; admin=info.clientId==='admin';}} catch {}
+      try {const info=await oauth.provider.verifyAccessToken(bearer); if(info.expiresAt>Date.now()/1000) {req.auth=info; signedIn=info.clientId==='admin';}} catch {}
     }
-    // OAuth clients (ChatGPT) may only use the MCP endpoint; the dashboard and API stay admin-only.
-    if(!admin&&!(req.auth&&req.path==='/mcp')) {
+    // OAuth clients (ChatGPT) may only use the MCP endpoint; the dashboard and API need a login.
+    if(!signedIn&&!(req.auth&&req.path==='/mcp')) {
       if(req.path==='/mcp') {res.set('WWW-Authenticate',`Bearer resource_metadata="${oauth.resourceMetadataUrl}"`);return res.status(401).json({error:'invalid_token',error_description:'Authorize this MCP server via OAuth or use the admin token'});}
       res.set('WWW-Authenticate','Basic realm="Riga Weekend"');return res.status(401).send('Authentication required');
     }

@@ -3,10 +3,11 @@
 Paste into a new chat: "Read docs/handoff.md, then help me with …"
 
 ## What the system does
-ChatGPT (MCP plugin, single-user OAuth 2.1) researches Riga weekend events → submits an edition to a
+ChatGPT (MCP plugin, OAuth 2.1) researches Riga weekend events → submits an edition to a
 Node app on a Hetzner VPS → app renders Instagram carousels and stories → review dashboard (choose
 events, stories, upload own photos) → approval hands posts to Postiz (Instagram @rigathisweekend) and
-a separate button sends a WhatsApp digest through WAHA.
+a separate button sends a WhatsApp digest through WAHA. Other people get their own login to the same
+workspace, dashboard and ChatGPT plugin alike, with `scripts/remote.sh user add NAME`.
 
 ## Infrastructure
 - VPS: SSH alias `riga-travel` (62.238.108.18), deploy dir `/opt/riga-weekend`, deploy with `scripts/remote.sh deploy`.

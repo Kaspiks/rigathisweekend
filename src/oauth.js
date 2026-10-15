@@ -1,7 +1,8 @@
-// Single-user OAuth 2.1 authorization server for the MCP endpoint.
+// OAuth 2.1 authorization server for the MCP endpoint.
 // ChatGPT (and other MCP clients) register dynamically, send the user to /authorize,
-// the user proves ownership with ADMIN_TOKEN once, and the client receives its own
-// short-lived access token plus a rotating refresh token. PKCE is verified by the SDK.
+// the user signs in once (the owner with ADMIN_TOKEN, anyone else with the login made by
+// `cli.js user add`), and the client receives its own short-lived access token plus a
+// rotating refresh token. PKCE is verified by the SDK.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
@@ -20,15 +21,17 @@ export function createOAuthProvider(store,env) {
   const db=store.db;
   db.exec(`CREATE TABLE IF NOT EXISTS oauth_clients(id TEXT PRIMARY KEY, data TEXT NOT NULL, created INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS oauth_txns(id TEXT PRIMARY KEY, client TEXT NOT NULL, params TEXT NOT NULL, expires INTEGER NOT NULL, code TEXT);
-    CREATE TABLE IF NOT EXISTS oauth_codes(code TEXT PRIMARY KEY, client TEXT NOT NULL, params TEXT NOT NULL, expires INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS oauth_tokens(hash TEXT PRIMARY KEY, kind TEXT NOT NULL, client TEXT NOT NULL, scopes TEXT NOT NULL, resource TEXT, expires INTEGER NOT NULL);`);
+    CREATE TABLE IF NOT EXISTS oauth_codes(code TEXT PRIMARY KEY, client TEXT NOT NULL, params TEXT NOT NULL, expires INTEGER NOT NULL, user TEXT NOT NULL DEFAULT 'admin');
+    CREATE TABLE IF NOT EXISTS oauth_tokens(hash TEXT PRIMARY KEY, kind TEXT NOT NULL, client TEXT NOT NULL, scopes TEXT NOT NULL, resource TEXT, expires INTEGER NOT NULL, user TEXT NOT NULL DEFAULT 'admin');`);
   try {db.exec('ALTER TABLE oauth_txns ADD COLUMN code TEXT');} catch {} // deployments created before the column existed
+  // Who signed in, so removing a user removes their connection. Everything issued before users existed was the owner's.
+  for(const table of ['oauth_codes','oauth_tokens']) try {db.exec(`ALTER TABLE ${table} ADD COLUMN user TEXT NOT NULL DEFAULT 'admin'`);} catch {}
   const sweep=()=>{const t=now();for(const table of ['oauth_txns','oauth_codes','oauth_tokens']) db.prepare(`DELETE FROM ${table} WHERE expires<?`).run(t);};
-  const issue=(client,scopes,resource)=>{
+  const issue=(client,scopes,resource,user)=>{
     const access=secret(),refresh=secret(),t=now();
-    const ins=db.prepare('INSERT INTO oauth_tokens(hash,kind,client,scopes,resource,expires) VALUES(?,?,?,?,?,?)');
-    ins.run(hash(access),'access',client,JSON.stringify(scopes),resource||null,t+ACCESS_TTL);
-    ins.run(hash(refresh),'refresh',client,JSON.stringify(scopes),resource||null,t+REFRESH_TTL);
+    const ins=db.prepare('INSERT INTO oauth_tokens(hash,kind,client,scopes,resource,expires,user) VALUES(?,?,?,?,?,?,?)');
+    ins.run(hash(access),'access',client,JSON.stringify(scopes),resource||null,t+ACCESS_TTL,user);
+    ins.run(hash(refresh),'refresh',client,JSON.stringify(scopes),resource||null,t+REFRESH_TTL,user);
     return {access_token:access,token_type:'bearer',expires_in:ACCESS_TTL,refresh_token:refresh,scope:scopes.join(' ')||undefined};
   };
   const clientsStore={
@@ -63,20 +66,20 @@ export function createOAuthProvider(store,env) {
       return JSON.parse(row.params).codeChallenge;
     },
     async exchangeAuthorizationCode(client,code,_verifier,redirectUri,resource) {
-      const row=db.prepare('DELETE FROM oauth_codes WHERE code=? RETURNING params,client,expires').get(hash(code));
+      const row=db.prepare('DELETE FROM oauth_codes WHERE code=? RETURNING params,client,expires,user').get(hash(code));
       if(!row||row.client!==client.client_id||row.expires<now()) throw new InvalidGrantError('Invalid or expired authorization code');
       const p=JSON.parse(row.params);
       if(redirectUri&&redirectUri!==p.redirectUri) throw new InvalidGrantError('redirect_uri mismatch');
       if(resource&&p.resource&&resource.href!==p.resource) throw new InvalidGrantError('resource mismatch');
-      return issue(client.client_id,p.scopes||[],p.resource);
+      return issue(client.client_id,p.scopes||[],p.resource,row.user);
     },
     async exchangeRefreshToken(client,refreshToken,scopes,resource) {
-      const row=db.prepare("DELETE FROM oauth_tokens WHERE hash=? AND kind='refresh' RETURNING client,scopes,resource,expires").get(hash(refreshToken));
+      const row=db.prepare("DELETE FROM oauth_tokens WHERE hash=? AND kind='refresh' RETURNING client,scopes,resource,expires,user").get(hash(refreshToken));
       if(!row||row.client!==client.client_id||row.expires<now()) throw new InvalidGrantError('Invalid or expired refresh token');
       const granted=JSON.parse(row.scopes);
       if(scopes?.some(s=>!granted.includes(s))) throw new InvalidGrantError('Requested scope exceeds grant');
       if(resource&&row.resource&&resource.href!==row.resource) throw new InvalidGrantError('resource mismatch');
-      return issue(client.client_id,scopes||granted,row.resource);
+      return issue(client.client_id,scopes||granted,row.resource,row.user);
     },
     async verifyAccessToken(token) {
       if(equal(token,env.ADMIN_TOKEN)) return {token,clientId:'admin',scopes:[],expiresAt:now()+ACCESS_TTL};
@@ -86,7 +89,8 @@ export function createOAuthProvider(store,env) {
     },
     async revokeToken(client,{token}) {db.prepare('DELETE FROM oauth_tokens WHERE hash=? AND client=?').run(hash(token),client.client_id);},
   };
-  // The login step: the user proves they own this deployment with ADMIN_TOKEN, once per client.
+  // The login step, once per client. The owner leaves the name empty (or types admin) and gives ADMIN_TOKEN;
+  // anyone else gives the name and password made for them with `cli.js user add`.
   const attempts=new Map();
   const login=express.Router();
   login.use(express.urlencoded({extended:false,limit:'4kb'}));
@@ -98,10 +102,11 @@ export function createOAuthProvider(store,env) {
     const txn=db.prepare('SELECT client,params,expires,code FROM oauth_txns WHERE id=?').get(String(req.body.txn||''));
     if(!txn||txn.expires<now()) {res.set('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'");return res.status(400).type('html').send(loginPage({client:'',txn:'',error:'',expired:true}));}
     const client=clientsStore.getClient(txn.client);
-    if(!equal(String(req.body.token||''),env.ADMIN_TOKEN)) {
+    const user=String(req.body.name||'').trim().toLowerCase()||'admin', given=String(req.body.token||'');
+    if(!(user==='admin'?equal(given,env.ADMIN_TOKEN):store.checkUser(user,given))) {
       a.n++; if(a.n>=5){a.until=Date.now()+15*60*1000;a.n=0;} attempts.set(ip,a);
       const nonce=secret(); res.set('Content-Security-Policy',`default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; form-action ${formAction(client)}; frame-ancestors 'none'; base-uri 'none'`);
-      return res.status(401).type('html').send(loginPage({client:client?.client_name||txn.client,txn:req.body.txn,error:'That token is not correct.',nonce}));
+      return res.status(401).type('html').send(loginPage({client:client?.client_name||txn.client,txn:req.body.txn,name:req.body.name,error:user==='admin'?'That token is not correct.':'That name and password do not match.',nonce}));
     }
     attempts.delete(ip);
     const p=JSON.parse(txn.params);
@@ -110,7 +115,7 @@ export function createOAuthProvider(store,env) {
     let code=txn.code;
     if(!code) {
       code=secret();
-      db.prepare('INSERT INTO oauth_codes(code,client,params,expires) VALUES(?,?,?,?)').run(hash(code),txn.client,JSON.stringify(p),now()+CODE_TTL);
+      db.prepare('INSERT INTO oauth_codes(code,client,params,expires,user) VALUES(?,?,?,?,?)').run(hash(code),txn.client,JSON.stringify(p),now()+CODE_TTL,user);
       db.prepare('UPDATE oauth_txns SET code=?,expires=? WHERE id=?').run(code,now()+60,req.body.txn);
     }
     const url=new URL(p.redirectUri); url.searchParams.set('code',code); if(p.state) url.searchParams.set('state',p.state);
@@ -140,11 +145,11 @@ export function createOAuthProvider(store,env) {
   return {provider,router,resourceMetadataUrl:new URL('/.well-known/oauth-protected-resource/mcp',issuer).href};
 }
 
-function loginPage({client,txn,error,nonce='',expired=false}) {
+function loginPage({client,txn,error,nonce='',expired=false,name=''}) {
   const style=`<style>body{margin:0;background:#f6f4ed;color:#17352d;font-family:Arial,Helvetica,sans-serif;display:grid;place-items:center;min-height:100vh}form,.box{background:#fff;border:1px solid #d9ded4;border-radius:12px;padding:36px;width:min(92vw,420px)}h1{font-family:Georgia,serif;font-weight:400;font-size:30px;margin:0 0 8px}p{color:#69736b;line-height:1.5;font-size:14px}label{display:block;font-size:12px;letter-spacing:2px;font-weight:bold;margin:22px 0 8px}input{width:100%;box-sizing:border-box;padding:14px;border:1px solid #d9ded4;border-radius:6px;font-size:15px}button{margin-top:20px;width:100%;border:0;background:#17352d;color:#fff;padding:14px;border-radius:6px;font-weight:600;font-size:15px;cursor:pointer}button:disabled{opacity:.6;cursor:wait}.err{color:#a13c2e;font-weight:600}.who{font-family:monospace;background:#f6f4ed;padding:2px 6px;border-radius:4px}</style>`;
   const head=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Riga Weekend · Authorize</title>${style}</head><body>`;
   if(expired) return `${head}<div class="box"><h1>Link expired</h1><p>This authorization link is no longer valid. Close this window and click <b>Sign in with Riga Weekend</b> in ChatGPT again.</p></div></body></html>`;
-  return `${head}<form method="post" action="/oauth/login"><h1>Authorize access</h1><p><span class="who">${escapeHtml(client)}</span> wants to submit and review Riga weekend editions on your behalf. Enter the admin token from the server's private configuration to allow it.</p>
-${error?`<p class="err">${escapeHtml(error)}</p>`:''}<input type="hidden" name="txn" value="${escapeHtml(txn)}"><label for="token">ADMIN TOKEN</label><input id="token" name="token" type="password" autocomplete="current-password" required autofocus><button type="submit">Allow</button></form>
+  return `${head}<form method="post" action="/oauth/login"><h1>Authorize access</h1><p><span class="who">${escapeHtml(client)}</span> wants to submit and review Riga weekend editions on your behalf. Sign in to allow it. The owner leaves the name empty and enters the admin token from the server's private configuration.</p>
+${error?`<p class="err">${escapeHtml(error)}</p>`:''}<input type="hidden" name="txn" value="${escapeHtml(txn)}"><label for="name">NAME</label><input id="name" name="name" type="text" autocomplete="username" autocapitalize="none" maxlength="32" value="${escapeHtml(name||'')}" autofocus><label for="token">PASSWORD OR ADMIN TOKEN</label><input id="token" name="token" type="password" autocomplete="current-password" required><button type="submit">Allow</button></form>
 <script nonce="${escapeHtml(nonce)}">document.querySelector('form').addEventListener('submit',function(){var b=this.querySelector('button');b.disabled=true;b.textContent='Redirecting to ChatGPT…';});</script></body></html>`;
 }
