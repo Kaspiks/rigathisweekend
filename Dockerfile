@@ -23,6 +23,8 @@ EXPOSE 3100
 
 FROM base AS test
 COPY test ./test
+# finish.test.js checks the renderer's roll-off curve against the app's: the one remotion file .dockerignore lets in.
+COPY remotion/src/edit/filters.tsx ./remotion/src/edit/
 CMD ["node","--test"]
 
 FROM base AS runtime

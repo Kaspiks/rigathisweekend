@@ -5,4 +5,5 @@ data
 backups
 vendor
 remotion
+!remotion/src/edit/filters.tsx
 tools
