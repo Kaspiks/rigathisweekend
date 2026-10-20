@@ -122,3 +122,15 @@ button.small{padding:7px 11px;font-size:12px}
 .grid-pick.used{opacity:.45;filter:grayscale(.7);cursor:not-allowed}
 .grid-pick.used img{filter:contrast(.8)}
 .grid-pick .why{display:block;margin-top:4px;color:#8a3a1c;font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.relay-thread summary{line-height:2}
+.relay-thread summary .tag{margin:0 6px}
+.relay-msgs{list-style:none;padding:0;margin:14px 0}
+.relay-msg{border-left:3px solid var(--line);padding:4px 0 4px 16px;margin:16px 0}
+.relay-msg.from-chatgpt{border-left-color:#10a37f}
+.relay-msg.from-claude{border-left-color:#d97757}
+.relay-msg.from-gemini{border-left-color:#4f7df0}
+.relay-msg.from-owner{border-left-color:var(--ink)}
+.relay-meta{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;font-size:13px}
+.relay-text{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink);margin:8px 0;max-width:none}
+.relay-changes{font-family:monospace;font-size:12px;color:var(--muted);margin:6px 0;padding-left:18px;overflow-wrap:anywhere}
+.relay-answer{border-top:1px solid var(--line);padding-top:12px}

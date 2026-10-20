@@ -6,17 +6,42 @@ import { z } from 'zod';
 import { FPS } from './footage.js';
 import { LOOK_NAMES, gradeKnobs } from './grade.js';
 
-export const FORMATS = { vertical: [1080, 1920], portrait: [1080, 1350], square: [1080, 1080], landscape: [1920, 1080] };
+export const FORMATS = {
+  vertical: [1080, 1920],
+  portrait: [1080, 1350],
+  square: [1080, 1080],
+  landscape: [1920, 1080],
+};
+
 export const MAX_OUTPUT_FRAMES = 180 * FPS; // Instagram Reels run to three minutes
-export const PALETTE = { ink: '#17352d', lime: '#d4ed86', paper: '#f4f0e6', white: '#ffffff', black: '#111111', coral: '#ff6b5b', gold: '#f5c542', sky: '#7cc6fe' };
+
+export const PALETTE = {
+  ink: '#17352d',
+  lime: '#d4ed86',
+  paper: '#f4f0e6',
+  white: '#ffffff',
+  black: '#111111',
+  coral: '#ff6b5b',
+  gold: '#f5c542',
+  sky: '#7cc6fe',
+};
+
 const ANCHOR = /^[a-z][a-z0-9_-]{0,23}$/;
 const FOOTAGE = /^[a-f0-9]{24}$/;
 
 // Factories rather than shared schemas: a schema object used twice becomes a JSON-pointer $ref in the tool
 // definition ChatGPT reads, and plain inline JSON Schema is the safest thing to hand a model.
-const Frame = () => z.number().int().min(0).max(100000);
-const Unit = () => z.number().min(0).max(1);
-const Color = () => z.union([z.enum(Object.keys(PALETTE)), z.string().regex(/^#[0-9a-fA-F]{6}$/)]).describe(`A palette name (${Object.keys(PALETTE).join(', ')}) or #rrggbb`);
+const Frame = () => {
+  return z.number().int().min(0).max(100000);
+};
+
+const Unit = () => {
+  return z.number().min(0).max(1);
+};
+
+const Color = () => z.union([z.enum(Object.keys(PALETTE)), z.string().regex(/^#[0-9a-fA-F]{6}$/)])
+  .describe(`A palette name (${Object.keys(PALETTE).join(', ')}) or #rrggbb`);
+
 const Place = () => z.union([z.string().regex(ANCHOR), z.object({ x: Unit(), y: Unit() }).strict()])
   .describe('An anchor name (sticks to it in the footage) or {x,y} in 0–1 of the finished frame');
 const Offset = () => z.object({ x: z.number().min(-1).max(1), y: z.number().min(-1).max(1) }).strict()
@@ -30,14 +55,26 @@ const Path = () => z.array(z.object({
   depth: Unit().optional().describe('Depth at this key; overrides the layer depth'),
 }).strict()).min(2).max(600).optional()
   .describe('Keyframes {frame,x,y} in 0–1 (or {frame,at}), smoothed into curves; used instead of `at`');
+
 const Facing = () => z.enum(['as-drawn', 'flip', 'path']).default('as-drawn')
-  .describe('path: turns to face the way it moves along `path` and leans into turns (draw it facing right); flip: mirrored');
+  .describe('path: turns to face the way it moves along `path` and leans into turns (draw it '
+    + 'facing right); flip: mirrored');
+
 const Follow = () => z.string().regex(ANCHOR).optional()
-  .describe('An anchor on something fixed in the scene: `at` and `path` move with it, so a handheld shot does not leave the layer sliding. See get_edit_guide');
-const Depth = () => Unit().optional().describe('How near, 0 far – 1 near (get_depth): hidden where the scene is nearer. Needs depth on the edit');
-const Blend = () => z.enum(['normal', 'screen', 'add', 'multiply', 'overlay', 'soft-light', 'lighten']).default('normal')
-  .describe('How it mixes with what is under it: screen or add for light (glints, flares, dust in a sunbeam), multiply for shadows and ink');
-const Glow = () => z.number().min(0).max(80).default(0).describe('Soft glow around it, in pixels (0 none); pairs with blend screen for light effects');
+  .describe('An anchor on something fixed in the scene: `at` and `path` move with it, so a handheld shot does not '
+    + 'leave the layer sliding. See get_edit_guide');
+
+const Depth = () => Unit().optional()
+  .describe('How near, 0 far – 1 near (get_depth): hidden where the scene is nearer. Needs depth on the edit');
+
+const Blend = () => z.enum(['normal', 'screen', 'add', 'multiply', 'overlay', 'soft-light', 'lighten'])
+  .default('normal')
+  .describe('How it mixes with what is under it: screen or add for light (glints, flares, dust in a sunbeam), '
+    + 'multiply for shadows and ink');
+
+const Glow = () => z.number().min(0).max(80).default(0)
+  .describe('Soft glow around it, in pixels (0 none); pairs with blend screen for light effects');
+
 const Span = () => ({
   from: Frame().describe('First OUTPUT frame'),
   to: Frame().describe('OUTPUT frame it ends, exclusive'),
@@ -48,40 +85,54 @@ const Span = () => ({
 const TextMotion = () => z.object({
   by: z.enum(['letter', 'word', 'line']).default('letter'),
   style: z.enum(['fade', 'rise', 'drop', 'pop', 'blur', 'slide', 'scramble', 'typewriter', 'flip']).default('rise')
-    .describe('rise/drop move each piece up into place or down from above, pop springs it, blur focuses it, scramble shows random letters that settle, flip turns it over'),
+    .describe('rise/drop move each piece up into place or down from above, pop springs it, blur focuses it, scramble '
+      + 'shows random letters that settle, flip turns it over'),
   stagger: z.number().int().min(0).max(30).default(2).describe('Frames between one piece and the next'),
   duration: z.number().int().min(1).max(60).default(10).describe('Frames each piece takes'),
 }).strict();
 
 const Text = z.object({
   type: z.literal('text'), ...Span(),
-  text: z.string().trim().min(1).max(140).refine(t => t.split('\n').length <= 3, 'Up to three lines').describe('Up to three lines; use \\n to break'),
+  text: z.string().trim().min(1).max(140).refine(t => t.split('\n').length <= 3, 'Up to three lines')
+    .describe('Up to three lines; use \\n to break'),
   style: z.enum(['title', 'callout', 'caption', 'label', 'script', 'band']).default('caption')
-    .describe('title: big serif headline; callout: paper card, pairs with pointer; caption: bold subtitle; label: small tag; script: handwritten accent; band: full-width bar'),
-  at: Place().optional().describe('Where the text sits. Defaults: title near the top, caption and band near the bottom, others at the centre'),
+    .describe('title: big serif headline; callout: paper card, pairs with pointer; caption: bold subtitle; label: '
+      + 'small tag; script: handwritten accent; band: full-width bar'),
+  at: Place().optional()
+    .describe('Where the text sits. Defaults: title near the top, caption and band near the '
+      + 'bottom, others at the centre'),
   offset: Offset().optional(), path: Path(), follow: Follow(), depth: Depth(),
-  pointer: z.boolean().default(false).describe('Draw a line from the text back to `at`; use with an anchor and an offset for a callout'),
+  pointer: z.boolean().default(false)
+    .describe('Draw a line from the text back to `at`; use with an anchor and an offset for a callout'),
   size: z.number().int().min(20).max(220).optional().describe('Type size in pixels on a 1080-wide frame'),
   color: Color().optional(), background: z.union([Color(), z.literal('none')]).optional(),
   align: z.enum(['left', 'center', 'right']).default('center'),
   enter: z.enum(['pop', 'fade', 'rise', 'type', 'slide', 'none']).default('pop'),
   exit: z.enum(['fade', 'pop', 'sink', 'none']).default('fade'),
   font: z.enum(['serif', 'script', 'sans', 'display', 'mono']).optional()
-    .describe('serif (Cormorant, the brand), script (handwritten), sans (Inter, heavy), display (Bebas Neue, tall capitals for cinema titles), mono (typewriter). Default by style'),
-  reveal: TextMotion().optional().describe('Animates the text in piece by piece (letters, words or lines) instead of all at once'),
+    .describe('serif (Cormorant, the brand), script (handwritten), sans (Inter, heavy), display (Bebas Neue, tall '
+      + 'capitals for cinema titles), mono (typewriter). Default by style'),
+  reveal: TextMotion().optional()
+    .describe('Animates the text in piece by piece (letters, words or lines) instead of all at once'),
   hide: TextMotion().optional().describe('Animates it out piece by piece at the end of the layer'),
   loop: z.enum(['none', 'wave', 'bounce', 'pulse', 'shake', 'flicker', 'glow']).default('none')
-    .describe('Keeps moving while on: wave (letters ripple), bounce, pulse (breathes), shake (jitters, for impact), flicker (neon sign), glow (pulsing glow)'),
+    .describe('Keeps moving while on: wave (letters ripple), bounce, pulse (breathes), shake (jitters, for impact), '
+      + 'flicker (neon sign), glow (pulsing glow)'),
   highlight: z.object({
     words: z.array(z.string().min(1).max(40)).min(1).max(10).describe('Words to mark, as written in the text'),
     color: Color().default('lime'), style: z.enum(['marker', 'underline', 'box']).default('marker'),
-    delay: z.number().int().min(0).max(300).default(8).describe('Frames after the layer starts that the marker sweeps in'),
+    delay: z.number().int().min(0).max(300).default(8)
+      .describe('Frames after the layer starts that the marker sweeps in'),
   }).strict().optional(),
   count: z.object({
     from: z.number().min(-1e9).max(1e9), to: z.number().min(-1e9).max(1e9),
-    decimals: z.number().int().min(0).max(3).default(0), frames: z.number().int().min(1).max(600).default(30).describe('How long the count takes'),
-  }).strict().optional().describe('Counts a number up or down: put {n} in the text where it goes (or the text is just the number), e.g. "{n} coffees a day"'),
-  stroke: z.object({ color: Color(), width: z.number().min(0.5).max(20) }).strict().optional().describe('Outline around the letters'),
+    decimals: z.number().int().min(0).max(3).default(0),
+    frames: z.number().int().min(1).max(600).default(30).describe('How long the count takes'),
+  }).strict().optional().describe('Counts a number up or down: put {n} in the text where it goes (or the text is just '
+    + 'the number), e.g. "{n} coffees a day"'),
+  stroke: z.object({
+    color: Color(), width: z.number().min(0.5).max(20),
+  }).strict().optional().describe('Outline around the letters'),
   glow: Color().optional().describe('Glowing light around the letters'),
   gradient: z.array(Color()).length(2).optional().describe('Top and bottom colour of the letters'),
   tracking: z.number().min(-0.1).max(1).optional().describe('Letter spacing in em, e.g. 0.3 for wide cinema titles'),
@@ -92,7 +143,8 @@ const Text = z.object({
 const Sticker = z.object({
   type: z.literal('sticker'), ...Span(),
   shape: z.enum(['sparkles', 'steam', 'hearts', 'stars', 'circle', 'arrow', 'burst', 'pulse', 'underline', 'squiggle'])
-    .describe('Animated drawing. steam rises and sparkles twinkle for as long as they are on; circle, arrow, underline and squiggle draw themselves on; burst and pulse radiate'),
+    .describe('Animated drawing. steam rises and sparkles twinkle for as long as they are on; circle, arrow, underline '
+      + 'and squiggle draw themselves on; burst and pulse radiate'),
   at: Place().optional(), offset: Offset().optional(), path: Path(), follow: Follow(), depth: Depth(),
   size: z.number().int().min(40).max(1200).default(240).describe('Width in pixels on a 1080-wide frame'),
   color: Color().default('lime'),
@@ -104,8 +156,11 @@ const Sticker = z.object({
 const Illustrate = z.object({
   type: z.literal('illustrate'), ...Span(),
   style: z.enum(['cel', 'ink', 'sketch', 'watercolor', 'duotone', 'posterize'])
-    .default('cel').describe('How the footage is redrawn: cel (flat cartoon colours with outlines), ink (comic line art over colour), sketch (pencil on paper), watercolor, duotone (two colours), posterize (flat colours only)'),
-  transition: z.enum(['fade', 'wipe', 'iris']).default('wipe').describe('How the drawing takes over and hands back; iris opens from `at`'),
+    .default('cel').describe('How the footage is redrawn: cel (flat cartoon colours with outlines), ink (comic line '
+      + 'art over colour), sketch (pencil on paper), watercolor, duotone (two colours), posterize (flat colours only)'),
+  transition: z.enum([
+    'fade', 'wipe', 'iris',
+  ]).default('wipe').describe('How the drawing takes over and hands back; iris opens from `at`'),
   at: Place().optional().describe('Centre of an iris transition'),
   boil: z.boolean().default(true).describe('Hand-drawn wobble that changes every third frame, like drawn animation'),
   colors: z.array(Color()).length(2).optional().describe('Two colours for duotone: dark, then light'),
@@ -113,28 +168,41 @@ const Illustrate = z.object({
 
 const Image = z.object({
   type: z.literal('image'), ...Span(),
-  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of an image uploaded for this footage (see list_footage)'),
+  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)
+    .describe('Name of an image uploaded for this footage (see list_footage)'),
   place: z.enum(['footage', 'screen']).default('screen')
-    .describe('footage: cover the video exactly and move with it (an illustration drawn over a frame of this clip); screen: a picture placed at `at`'),
+    .describe('footage: cover the video exactly and move with it (an illustration drawn over a frame of this clip); '
+      + 'screen: a picture placed at `at`'),
   at: Place().optional(), offset: Offset().optional(), path: Path(), follow: Follow(), facing: Facing(), depth: Depth(),
-  size: z.number().min(0.05).max(2).default(0.4).describe('Width as a fraction of the finished frame (screen placement)'),
+  size: z.number().min(0.05).max(2).default(0.4)
+    .describe('Width as a fraction of the finished frame (screen placement)'),
   opacity: Unit().default(1),
   enter: z.enum(['pop', 'fade', 'wipe', 'none']).default('fade'),
   exit: z.enum(['pop', 'fade', 'none']).default('fade'),
   motion: z.enum(['none', 'float', 'boil', 'sway', 'pulse', 'spin']).default('none'),
-  blend: Blend(), glow: Glow(), tint: Color().optional().describe('Recolours the whole picture in one colour, keeping its shape and transparency'),
+  blend: Blend(), glow: Glow(),
+  tint: Color().optional().describe('Recolours the whole picture in one colour, keeping its shape and transparency'),
 }).strict();
 
 // Frame-by-frame animation from a sprite sheet: every frame side by side in one row, equal widths,
 // on a transparent background. A flapping bird, a hand-drawn flicker, a turntable of a 3D object.
 const Sequence = z.object({
   type: z.literal('sequence'), ...Span(),
-  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of an uploaded sprite sheet: equal-sized frames in one row, or in a grid with columns'),
+  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)
+    .describe('Name of an uploaded sprite sheet: equal-sized frames in one row, or in a grid with columns'),
   count: z.number().int().min(2).max(256).describe('How many frames the sheet holds'),
-  columns: z.number().int().min(1).max(64).optional().describe('Frames per row for a grid sheet, read left to right, top to bottom (default: all in one row); build_sprite makes grids'),
-  range: z.object({ from: z.number().int().min(0).max(255), to: z.number().int().min(0).max(255) }).strict().optional().describe('Play only sheet frames from..to (inclusive), e.g. just the flash of an impact'),
-  playback: z.enum(['loop', 'once', 'pingpong']).optional().describe('loop repeats, once stops on the last frame, pingpong plays forwards then backwards (default from loop)'),
-  fps: z.number().int().min(1).max(30).default(12).describe('How fast the frames play; 8–12 feels hand-drawn, 24–30 smooth'),
+  columns: z.number().int().min(1).max(64).optional()
+    .describe('Frames per row for a grid sheet, read left to right, top to bottom (default: all in one '
+      + 'row); build_sprite makes grids'),
+  range: z.object({
+    from: z.number().int().min(0).max(255), to: z.number().int().min(0).max(255),
+  }).strict().optional().describe('Play only sheet frames from..to (inclusive), e.g. just the flash of an impact'),
+  playback: z.enum([
+    'loop', 'once', 'pingpong',
+  ]).optional().describe('loop repeats, once stops on the last frame, pingpong plays forwards then '
+    + 'backwards (default from loop)'),
+  fps: z.number().int().min(1).max(30).default(12)
+    .describe('How fast the frames play; 8–12 feels hand-drawn, 24–30 smooth'),
   loop: z.boolean().default(true).describe('Repeat the frames, or stop on the last one'),
   at: Place().optional(), offset: Offset().optional(), path: Path(), follow: Follow(), facing: Facing(), depth: Depth(),
   size: z.number().min(0.03).max(2).default(0.2).describe('Width of one frame as a fraction of the finished frame'),
@@ -142,8 +210,10 @@ const Sequence = z.object({
   enter: z.enum(['pop', 'fade', 'none']).default('fade'),
   exit: z.enum(['pop', 'fade', 'none']).default('fade'),
   motion: z.enum(['none', 'bob', 'sway']).default('none').describe('bob: gentle up and down, like hovering'),
-  rotate: z.number().min(-360).max(360).default(0), spin: z.number().min(-1440).max(1440).default(0).describe('Degrees per second'),
-  blend: Blend(), glow: Glow(), tint: Color().optional().describe('Recolours every frame in one colour, keeping shape and transparency'),
+  rotate: z.number().min(-360).max(360).default(0),
+  spin: z.number().min(-1440).max(1440).default(0).describe('Degrees per second'),
+  blend: Blend(), glow: Glow(),
+  tint: Color().optional().describe('Recolours every frame in one colour, keeping shape and transparency'),
 }).strict();
 
 // Particles: many small copies of a shape or sprite, emitted from a point or area over time, each with its
@@ -152,25 +222,34 @@ const Sequence = z.object({
 const Particles = z.object({
   type: z.literal('particles'), ...Span(),
   shape: z.enum(['dot', 'soft', 'spark', 'star', 'ring', 'streak', 'heart', 'confetti', 'square']).optional()
-    .describe('Built-in particle: dot (hard), soft (blurred dust mote), spark (4-point glint), star, ring, streak (a line along its motion), heart, confetti (tumbling paper), square'),
-  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).optional().describe('Or an uploaded picture or sprite sheet as the particle'),
+    .describe('Built-in particle: dot (hard), soft (blurred dust mote), spark (4-point glint), star, ring, streak (a '
+      + 'line along its motion), heart, confetti (tumbling paper), square'),
+  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).optional()
+    .describe('Or an uploaded picture or sprite sheet as the particle'),
   count: z.number().int().min(1).max(256).default(1).describe('Frames in the sheet, for an animated particle'),
   columns: z.number().int().min(1).max(64).optional(), fps: z.number().int().min(1).max(30).default(12),
-  at: Place().optional().describe('Where they come from'), offset: Offset().optional(), path: Path(), follow: Follow(), depth: Depth(),
-  area: z.object({ width: Unit(), height: Unit() }).strict().optional().describe('Spawn box around the emitter, in fractions of the frame (default a single point)'),
+  at: Place().optional().describe('Where they come from'), offset: Offset().optional(), path: Path(), follow: Follow(),
+  depth: Depth(),
+  area: z.object({
+    width: Unit(), height: Unit(),
+  }).strict().optional().describe('Spawn box around the emitter, in fractions of the frame (default a single point)'),
   rate: z.number().min(0).max(300).default(20).describe('New particles per second'),
   burst: z.number().int().min(0).max(400).default(0).describe('Particles all at once at the start (an impact, a pop)'),
   life: z.number().int().min(2).max(600).default(45).describe('Frames each particle lives'),
   speed: z.number().min(0).max(3).default(0.15).describe('Frame widths per second'),
   direction: z.number().min(-180).max(180).default(-90).describe('Degrees: 0 right, -90 up, 90 down, 180 left'),
-  spread: z.number().min(0).max(360).default(60).describe('Degrees either side of direction, in total; 360 in every direction'),
-  gravity: z.number().min(-3).max(3).default(0).describe('Frame widths per second², positive pulls down (confetti 0.4, rising embers -0.1)'),
+  spread: z.number().min(0).max(360).default(60)
+    .describe('Degrees either side of direction, in total; 360 in every direction'),
+  gravity: z.number().min(-3).max(3).default(0)
+    .describe('Frame widths per second², positive pulls down (confetti 0.4, rising embers -0.1)'),
   drag: z.number().min(0).max(10).default(0).describe('Slows them down over time (a burst that settles: 3)'),
   size: z.number().min(0.001).max(0.5).default(0.015).describe('Width of a particle as a fraction of the frame width'),
   sizeRandom: Unit().default(0.5).describe('How much sizes vary (0 all the same)'),
-  grow: z.number().min(0).max(8).default(1).describe('Size at the end of its life relative to the start (0.2 shrinks away, 3 billows)'),
+  grow: z.number().min(0).max(8).default(1)
+    .describe('Size at the end of its life relative to the start (0.2 shrinks away, 3 billows)'),
   spin: z.number().min(0).max(1440).default(0).describe('Most degrees per second a particle turns'),
-  colors: z.array(Color()).min(1).max(8).optional().describe('Colours picked at random per particle, for shapes (default paper)'),
+  colors: z.array(Color()).min(1).max(8).optional()
+    .describe('Colours picked at random per particle, for shapes (default paper)'),
   fade: z.enum(['in-out', 'out', 'none']).default('in-out'),
   opacity: Unit().default(1), blend: Blend(), glow: Glow(),
   seed: z.number().int().min(0).max(100000).default(1).describe('Change it for a different random pattern'),
@@ -180,8 +259,15 @@ const Particles = z.object({
 // rectangle, line or line of text in the graphic's own coordinates (its viewBox), and any of its
 // position, rotation, scale, opacity and stroke draw-on can be keyframed. Saved graphics are reused by name.
 const PATH_D = /^[MmLlHhVvCcSsQqTtAaZz0-9eE.,\s+-]+$/;
-const Num = () => z.number().min(-100000).max(100000);
-const Track = () => z.array(z.object({ frame: z.number().int().min(0).max(100000).describe('Frames from the layer start'), value: Num() }).strict()).min(1).max(200);
+
+const Num = () => {
+  return z.number().min(-100000).max(100000);
+};
+
+const Track = () => z.array(z.object({
+  frame: z.number().int().min(0).max(100000).describe('Frames from the layer start'), value: Num(),
+}).strict()).min(1).max(200);
+
 const Keys = () => z.object({
   x: Track().optional(), y: Track().optional(),
   rotate: Track().optional().describe('Degrees, around `origin`'),
@@ -189,32 +275,49 @@ const Keys = () => z.object({
   opacity: Track().optional().describe('0–1'),
   draw: Track().optional().describe('0–1: how much of the outline is drawn, for strokes that draw themselves on'),
 }).strict();
+
 const Element = () => z.object({
   shape: z.enum(['path', 'circle', 'ellipse', 'rect', 'line', 'text']),
   d: z.string().max(4000).regex(PATH_D).optional().describe('SVG path data, for shape path'),
   cx: Num().optional(), cy: Num().optional(), r: Num().optional(), rx: Num().optional(), ry: Num().optional(),
-  x: Num().optional(), y: Num().optional(), width: Num().optional(), height: Num().optional(), x2: Num().optional(), y2: Num().optional(),
-  text: z.string().max(80).optional(), font: z.enum(['serif', 'script']).optional(), fontSize: z.number().min(1).max(2000).optional(),
+  x: Num().optional(), y: Num().optional(), width: Num().optional(), height: Num().optional(), x2: Num().optional(),
+  y2: Num().optional(),
+  text: z.string().max(80).optional(), font: z.enum(['serif', 'script']).optional(),
+  fontSize: z.number().min(1).max(2000).optional(),
   anchor: z.enum(['start', 'middle', 'end']).optional(),
-  fill: z.union([Color(), z.literal('none')]).optional(), stroke: Color().optional(), strokeWidth: z.number().min(0).max(500).optional(),
+  fill: z.union([Color(), z.literal('none')]).optional(), stroke: Color().optional(),
+  strokeWidth: z.number().min(0).max(500).optional(),
   opacity: z.number().min(0).max(1).optional(),
-  origin: z.object({ x: Num(), y: Num() }).strict().optional().describe('Pivot for rotate and scale, e.g. where a wing joins the body'),
+  origin: z.object({
+    x: Num(), y: Num(),
+  }).strict().optional().describe('Pivot for rotate and scale, e.g. where a wing joins the body'),
   keys: Keys().optional(),
-  ease: z.enum(['linear', 'smooth', 'in', 'out', 'back', 'bounce']).default('smooth').describe('Easing between keyframes'),
+  ease: z.enum([
+    'linear', 'smooth', 'in', 'out', 'back', 'bounce',
+  ]).default('smooth').describe('Easing between keyframes'),
   repeat: z.object({
-    count: z.number().int().min(2).max(60), delay: z.number().int().min(0).max(300).default(0).describe('Frames each copy starts after the previous one'),
+    count: z.number().int().min(2).max(60),
+    delay: z.number().int().min(0).max(300).default(0).describe('Frames each copy starts after the previous one'),
     dx: Num().default(0), dy: Num().default(0), rotate: Num().default(0), scale: z.number().min(0.1).max(10).default(1),
-  }).strict().optional().describe('Copies of this element, each shifted and delayed: particles, confetti, a row of dots'),
+  }).strict().optional().describe('Copies of this element, each shifted and delayed: '
+    + 'particles, confetti, a row of dots'),
 }).strict();
+
 const GraphicFields = () => ({
-  viewBox: z.object({ width: z.number().min(1).max(10000), height: z.number().min(1).max(10000) }).strict().optional().describe('The graphic\'s own coordinate space (default 100×100)'),
-  loop: z.number().int().min(0).max(900).optional().describe('Repeat every element\'s keyframes every N frames (0 or absent: play once)'),
+  viewBox: z.object({
+    width: z.number().min(1).max(10000), height: z.number().min(1).max(10000),
+  }).strict().optional().describe('The graphic\'s own coordinate space (default 100×100)'),
+  loop: z.number().int().min(0).max(900).optional()
+    .describe('Repeat every element\'s keyframes every N frames (0 or absent: play once)'),
   elements: z.array(Element()).min(1).max(120).optional(),
 });
+
 export const GraphicDef = z.object({ ...GraphicFields(), elements: z.array(Element()).min(1).max(120) }).strict();
+
 const Graphic = z.object({
   type: z.literal('graphic'), ...Span(),
-  use: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).optional().describe('Name of a saved graphic (list_graphics), instead of elements'),
+  use: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).optional()
+    .describe('Name of a saved graphic (list_graphics), instead of elements'),
   ...GraphicFields(),
   at: Place().optional(), offset: Offset().optional(), path: Path(), follow: Follow(), facing: Facing(), depth: Depth(),
   size: z.number().int().min(10).max(4000).default(300).describe('Width in pixels on a 1080-wide frame'),
@@ -225,52 +328,92 @@ const Graphic = z.object({
 
 // A 3D model (.glb uploaded for the clip) with its own animations, placed like any other layer. Angles
 // are degrees; keys count frames from the layer's start, like a graphic's.
-const Degrees = () => z.number().min(-720).max(720);
-const AnimationName = () => z.string().min(1).max(80);
+const Degrees = () => {
+  return z.number().min(-720).max(720);
+};
+
+const AnimationName = () => {
+  return z.string().min(1).max(80);
+};
+
 const Model = z.object({
   type: z.literal('model'), ...Span(),
-  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of a 3D model uploaded for this footage (list_footage, under models)'),
+  asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)
+    .describe('Name of a 3D model uploaded for this footage (list_footage, under models)'),
   node: z.string().min(1).max(64).optional()
-    .describe('Draw only this node of the model and its children (list_footage, under nodes) — e.g. the fox out of a workshop. The rest still animates; size and pin measure the chosen part'),
-  animation: AnimationName().optional().describe('Which of the model\'s animations plays from the layer\'s start (names from list_footage); leave out to hold its rest pose'),
+    .describe('Draw only this node of the model and its children (list_footage, under nodes) — e.g. the fox out of a '
+      + 'workshop. The rest still animates; size and pin measure the chosen part'),
+  animation: AnimationName().optional()
+    .describe('Which of the model\'s animations plays from the layer\'s start (names from list_footage); leave '
+      + 'out to hold its rest pose'),
   speed: z.number().min(0.1).max(4).default(1).describe('Animation speed; 1 is as made'),
   loop: z.boolean().default(true).describe('Repeat the animation, or stop on its last pose'),
   actions: z.array(z.object({
     frame: Frame().describe('OUTPUT frame this animation takes over'),
     animation: AnimationName(),
-    speed: z.number().min(0.1).max(4).optional(), loop: z.boolean().optional().describe('Default true; false plays once and holds the last pose (sitting down, landing)'),
-    stride: z.number().min(0.05).max(10).optional().describe('Like the layer\'s stride, for this animation (a run after a walk)'),
-  }).strict()).max(20).optional().describe('Switch animations during the layer, e.g. walk then sit: [{"frame":130,"animation":"Sit","loop":false}]'),
+    speed: z.number().min(0.1).max(4).optional(),
+    loop: z.boolean().optional()
+      .describe('Default true; false plays once and holds the last pose (sitting down, landing)'),
+    stride: z.number().min(0.05).max(10).optional()
+      .describe('Like the layer\'s stride, for this animation (a run after a walk)'),
+  }).strict()).max(20).optional().describe('Switch animations during the layer, e.g. walk then sit: '
+    + '[{"frame":130,"animation":"Sit","loop":false}]'),
   blend: z.number().int().min(0).max(30).default(8).describe('Frames to cross-fade between animations'),
-  at: Place().optional().describe('Where it stands (with pin feet, its feet are here)'), offset: Offset().optional(), path: Path(), follow: Follow(),
+  at: Place().optional().describe('Where it stands (with pin feet, its feet are here)'), offset: Offset().optional(),
+  path: Path(), follow: Follow(),
   world: z.string().regex(ANCHOR).optional()
-    .describe('A spot from the edit\'s world list: the model stands there in the ROOM and holds still while the camera moves, instead of being placed on the screen. Needs a camera track. Used instead of at, path and follow'),
-  worldPath: z.array(z.object({ frame: Frame().describe('OUTPUT frame'), world: z.string().regex(ANCHOR) }).strict()).min(2).max(200).optional()
+    .describe('A spot from the edit\'s world list: the model stands there in the ROOM and holds still while the camera '
+      + 'moves, instead of being placed on the screen. Needs a camera track. Used instead of at, path and follow'),
+  worldPath: z.array(z.object({
+    frame: Frame().describe('OUTPUT frame'), world: z.string().regex(ANCHOR),
+  }).strict()).min(2).max(200).optional()
     .describe('Moves between spots in the room, e.g. [{"frame":0,"world":"door"},{"frame":90,"world":"table"}]'),
   depth: z.union([Unit(), z.literal('auto')]).optional()
-    .describe('"auto" (best for something walking on a surface): each frame it takes the depth of the ground under its feet, so it is never cut off by the table it stands on but still goes behind nearer things. Or a fixed 0 far – 1 near. Needs depth on the edit'),
+    .describe('"auto" (best for something walking on a surface): each frame it takes the depth of the ground under its '
+      + 'feet, so it is never cut off by the table it stands on but still goes behind nearer things. Or a fixed 0 far '
+      + '– 1 near. Needs depth on the edit'),
   stride: z.number().min(0.05).max(10).optional()
-    .describe('Distance one loop of the animation covers, in multiples of the model height (~1 walk, 2–3 run), so feet stay planted. get_edit_guide has the fix-up rule'),
+    .describe('Distance one loop of the animation covers, in multiples of the model height (~1 walk, 2–3 run), so feet '
+      + 'stay planted. get_edit_guide has the fix-up rule'),
   front: z.enum(['camera', 'away', 'right', 'left']).default('camera')
-    .describe('Which way the model faces as made, before any turn. glTF models normally face the camera; if a preview with turn 0 shows it facing another way, say which, and facing path will then walk it forwards'),
-  facing: z.enum(['as-made', 'path']).default('as-made').describe('path: turns to walk or fly the way it moves along `path`, turning round through facing the camera'),
-  angle: z.number().min(0).max(90).default(65).describe('With facing path: 90 is a side view, less turns it towards the camera'),
-  pin: z.enum(['feet', 'center']).default('feet').describe('Which point of the model sits on `at`: its feet (standing on something) or its middle (flying)'),
-  size: z.number().min(0.02).max(1.5).default(0.2).describe('Height of the model as a fraction of the finished frame\'s height. list_footage gives each model\'s bounds, so for a wide flat one (a book, a sign) work it out from the width you want: size = wantedWidthPx * bounds.height / (bounds.width * frameHeightPx)'),
-  turn: Degrees().default(0).describe('Turn around its vertical axis: 0 faces the camera, 90 faces right, -90 faces left, 180 away'),
-  tilt: z.number().min(-60).max(80).default(15).describe('How far we look down on it: 0 level, 30 from above like a phone over a table. Match the footage'),
+    .describe('Which way the model faces as made, before any turn. glTF models normally face the camera; if a preview '
+      + 'with turn 0 shows it facing another way, say which, and facing path will then walk it forwards'),
+  facing: z.enum([
+    'as-made', 'path',
+  ]).default('as-made').describe('path: turns to walk or fly the way it moves along `path`, turning round '
+    + 'through facing the camera'),
+  angle: z.number().min(0).max(90).default(65)
+    .describe('With facing path: 90 is a side view, less turns it towards the camera'),
+  pin: z.enum([
+    'feet', 'center',
+  ]).default('feet').describe('Which point of the model sits on `at`: its feet (standing on '
+    + 'something) or its middle (flying)'),
+  size: z.number().min(0.02).max(1.5).default(0.2)
+    .describe('Height of the model as a fraction of the finished frame\'s height. list_footage gives each model\'s '
+      + 'bounds, so for a wide flat one (a book, a sign) work it out from the width you want: size = wantedWidthPx * '
+      + 'bounds.height / (bounds.width * frameHeightPx)'),
+  turn: Degrees().default(0)
+    .describe('Turn around its vertical axis: 0 faces the camera, 90 faces right, -90 faces left, 180 away'),
+  tilt: z.number().min(-60).max(80).default(15)
+    .describe('How far we look down on it: 0 level, 30 from above like a phone over a table. Match the footage'),
   keys: z.object({
     turn: Track().optional().describe('Degrees, replaces turn over time'), tilt: Track().optional(),
-    spin: Track().optional().describe('Degrees added to turn, e.g. a turntable 0→360'), roll: Track().optional().describe('Degrees of sideways lean'),
+    spin: Track().optional().describe('Degrees added to turn, e.g. a turntable 0→360'),
+    roll: Track().optional().describe('Degrees of sideways lean'),
     scale: Track().optional().describe('Multiplies size'),
   }).strict().optional().describe('Keyframed turns, tilts and scale; frames count from the layer\'s start'),
-  light: z.enum(['left', 'right', 'front', 'top', 'back']).default('left').describe('Where the main light comes from; match the light in the footage so it sits in the shot'),
+  light: z.enum([
+    'left', 'right', 'front', 'top', 'back',
+  ]).default('left').describe('Where the main light comes from; match the light in the footage so it sits in the shot'),
   brightness: z.number().min(0.2).max(3).default(1),
   shadow: Unit().default(0.35).describe('Darkness of the shadow it casts on the ground under it; 0 for none (flying)'),
   color: Color().optional().describe('Tints the whole model; for a plain model without colours of its own'),
   soften: z.number().min(0).max(1).default(0)
-    .describe('Blurs and grains the model a touch so it matches phone footage instead of looking sharper than the shot it sits in. 0.3–0.5 for handheld video, 0 for clean footage'),
-  look: z.enum(['as-made', 'toon']).default('as-made').describe('toon: flat cartoon shading with an ink outline, to match illustrated moments'),
+    .describe('Blurs and grains the model a touch so it matches phone footage instead of looking sharper than the shot '
+      + 'it sits in. 0.3–0.5 for handheld video, 0 for clean footage'),
+  look: z.enum([
+    'as-made', 'toon',
+  ]).default('as-made').describe('toon: flat cartoon shading with an ink outline, to match illustrated moments'),
   boil: z.boolean().default(false).describe('Hand-drawn wobble, with look toon'),
   opacity: Unit().default(1),
   enter: z.enum(['pop', 'fade', 'none']).default('fade'),
@@ -278,17 +421,34 @@ const Model = z.object({
 }).strict();
 
 // What a graphic needs beyond its schema: each shape has the fields it draws from.
-const NEEDS = { path: ['d'], circle: ['r'], ellipse: ['rx', 'ry'], rect: ['width', 'height'], line: ['x2', 'y2'], text: ['text'] };
+const NEEDS = {
+  path: ['d'],
+  circle: ['r'],
+  ellipse: ['rx', 'ry'],
+  rect: ['width', 'height'],
+  line: ['x2', 'y2'],
+  text: ['text'],
+};
+
 export function graphicErrors(def, where) {
   const errors = [];
+
   for (const [i, el] of def.elements.entries()) {
     const missing = NEEDS[el.shape].filter(k => el[k] == null);
-    if (missing.length) errors.push(`${where}: elements.${i} (${el.shape}) needs ${missing.join(' and ')}`);
+
+    if (missing.length) {
+      errors.push(`${where}: elements.${i} (${el.shape}) needs ${missing.join(' and ')}`);
+    }
+
     for (const [prop, track] of Object.entries(el.keys || {})) {
       track.sort((a, b) => a.frame - b.frame);
-      if (track.some((k, n) => n && k.frame === track[n - 1].frame)) errors.push(`${where}: elements.${i}.keys.${prop} has two keys on one frame`);
+
+      if (track.some((k, n) => n && k.frame === track[n - 1].frame)) {
+        errors.push(`${where}: elements.${i}.keys.${prop} has two keys on one frame`);
+      }
     }
   }
+
   return errors;
 }
 
@@ -305,10 +465,15 @@ const Fog = z.object({
   color: Color().default('paper'), strength: Unit().default(0.6).describe('Opacity of the fog at the farthest point'),
   start: Unit().default(0.6).describe('Depth where fog begins; farther parts get more'),
 }).strict();
+
 const Parallax = z.object({
   type: z.literal('parallax'), ...Span(),
-  move: z.enum(['pan', 'tilt', 'orbit']).default('pan').describe('pan: near things slide sideways more than far ones; tilt: up and down; orbit: a slow circle'),
-  amount: z.number().min(0.005).max(0.15).default(0.04).describe('How far the nearest things move, as a fraction of the frame width'),
+  move: z.enum([
+    'pan', 'tilt', 'orbit',
+  ]).default('pan').describe('pan: near things slide sideways more than far ones; tilt: up and '
+    + 'down; orbit: a slow circle'),
+  amount: z.number().min(0.005).max(0.15).default(0.04)
+    .describe('How far the nearest things move, as a fraction of the frame width'),
 }).strict();
 
 // Colour grading over the pictures: a named film look, anything the edit wants to change itself, and
@@ -317,9 +482,13 @@ const Parallax = z.object({
 // works: you grade the picture, not the titles.
 const Grade = z.object({
   type: z.literal('grade'), ...Span(),
-  look: z.enum(LOOK_NAMES).optional().describe('A named film look (list_looks shows them with the colours each pulls towards, and get_colors says which suit a clip)'),
+  look: z.enum(LOOK_NAMES).optional()
+    .describe('A named film look (list_looks shows them with the colours each pulls towards, and '
+      + 'get_colors says which suit a clip)'),
   clip: z.string().regex(ANCHOR).optional()
-    .describe('Grade only the parts that play this clip, named in `clips`. That is how several cameras are matched to each other: one grade per clip, each pulling it towards the same place. Without it, the grade covers everything on screen'),
+    .describe('Grade only the parts that play this clip, named in `clips`. That is how several cameras are matched to '
+      + 'each other: one grade per clip, each pulling it towards the same place. Without it, the grade '
+      + 'covers everything on screen'),
   strength: Unit().default(1).describe('How far towards the look, 0 none, 1 all of it'),
   exposure: z.number().min(-2).max(2).optional().describe('Stops brighter or darker'),
   contrast: z.number().min(-1).max(1).optional(),
@@ -331,11 +500,17 @@ const Grade = z.object({
   fade: Unit().optional().describe('Milky lifted blacks, like an old print'),
   vignette: Unit().optional().describe('Darkening towards the corners'),
   grain: Unit().optional().describe('Film grain'),
-  halation: Unit().optional().describe('Warm bloom bleeding out of the bright parts, the way film glows around a highlight. 0.2-0.4 is plenty'),
-  aberration: Unit().optional().describe('Colour fringing at the edges of things, as a cheap lens gives. Keep it small, 0.1-0.3'),
-  rolloff: Unit().optional().describe('Highlight roll-off: how far the brightest parts bend over instead of clipping to flat white, the way film does and a sensor does not. 0.3-0.5 on a blown sky or a headlight. Most looks bring their own'),
+  halation: Unit().optional()
+    .describe('Warm bloom bleeding out of the bright parts, the way film glows around a highlight. 0.2-0.4 is plenty'),
+  aberration: Unit().optional()
+    .describe('Colour fringing at the edges of things, as a cheap lens gives. Keep it small, 0.1-0.3'),
+  rolloff: Unit().optional()
+    .describe('Highlight roll-off: how far the brightest parts bend over instead of clipping to flat white, the way '
+      + 'film does and a sensor does not. 0.3-0.5 on a blown sky or a headlight. Most looks bring their own'),
   bars: z.union([z.enum(['none', '2.39', '2.00', '1.85']), z.number().min(0).max(0.3)]).default('none')
-    .describe('Letterbox bars over everything. A ratio ("2.39") crops to that shape, which suits a landscape or square edit; on a tall Reel it leaves a narrow strip, so give a fraction of the height instead (0.08 is a thin cinematic band top and bottom)'),
+    .describe('Letterbox bars over everything. A ratio ("2.39") crops to that shape, which suits a landscape or square '
+      + 'edit; on a tall Reel it leaves a narrow strip, so give a fraction of the height instead (0.08 is a thin '
+      + 'cinematic band top and bottom)'),
   // Worked out from the look when the edit is saved and kept with it, so the renderer needs no copy of
   // the board. Declared here because a saved edit is read back through this same schema.
   knobs: z.object({
@@ -355,12 +530,20 @@ const Finish = z.object({
   type: z.literal('finish'), ...Span(),
   // A grain that fades up over the first eight frames would be a fault, not an effect, so a finish is
   // simply on unless it is asked to ramp.
-  in: z.number().int().min(0).max(90).default(0).describe('Frames it takes to come on; 0 means it is there from the first frame'),
+  in: z.number().int().min(0).max(90).default(0)
+    .describe('Frames it takes to come on; 0 means it is there from the first frame'),
   out: z.number().int().min(0).max(90).default(0).describe('Frames it takes to go away at the end'),
-  rolloff: Unit().default(0.35).describe('Highlight roll-off over everything: the brightest parts bend over instead of clipping flat. The one knob that most stops mismatched sources looking mismatched'),
-  grain: Unit().default(0.15).describe('One grain over the whole frame, so a phone clip and stock footage carry the same texture. It lands on the titles too, as it would on a print'),
-  bloom: Unit().default(0.12).describe('A soft white glow out of the highlights, like a diffusion filter on the lens: everything sits in the same air'),
-  halation: Unit().default(0).describe('The same, but warm, the way film glows red around a highlight. Use this or bloom, rarely both'),
+  rolloff: Unit().default(0.35)
+    .describe('Highlight roll-off over everything: the brightest parts bend over instead of clipping flat. The one '
+      + 'knob that most stops mismatched sources looking mismatched'),
+  grain: Unit().default(0.15)
+    .describe('One grain over the whole frame, so a phone clip and stock footage carry the same texture. It lands on '
+      + 'the titles too, as it would on a print'),
+  bloom: Unit().default(0.12)
+    .describe('A soft white glow out of the highlights, like a diffusion filter on the lens: '
+      + 'everything sits in the same air'),
+  halation: Unit().default(0)
+    .describe('The same, but warm, the way film glows red around a highlight. Use this or bloom, rarely both'),
   aberration: Unit().default(0).describe('Colour fringing at the edges, as a lens leaves. 0.1-0.2'),
   vignette: Unit().default(0).describe('Darkening towards the corners, over the titles as well as the picture'),
 }).strict();
@@ -374,47 +557,87 @@ const Zoom = z.object({
 const Shake = z.object({ type: z.literal('shake'), ...Span(), strength: Unit().default(0.4) }).strict();
 const Flash = z.object({ type: z.literal('flash'), ...Span(), color: Color().default('white') }).strict();
 
-export const Layer = z.discriminatedUnion('type', [Text, Sticker, Illustrate, Image, Sequence, Particles, Graphic, Model, Blur, Fog, Parallax, Zoom, Shake, Flash, Grade, Finish]);
+export const Layer = z.discriminatedUnion('type', [
+  Text,
+  Sticker,
+  Illustrate,
+  Image,
+  Sequence,
+  Particles,
+  Graphic,
+  Model,
+  Blur,
+  Fog,
+  Parallax,
+  Zoom,
+  Shake,
+  Flash,
+  Grade,
+  Finish,
+]);
 
 // Framing this one shot: how far into the picture it is cropped and which part of it is centred. It is
 // per SHOT, unlike the zoom layer, which is one move over the finished edit - so a twelve-shot trailer
 // can punch in on each cut without twelve zoom layers fighting over the same frames. It is also how two
 // shots are made to match across a cut: put the subject in the same place on the screen in both.
 const Reframe = () => z.object({
-  scale: z.number().min(1).max(4).default(1).describe('How far in at the START of the shot: 1 is the whole picture, 1.6 fills the frame with the middle of it'),
+  scale: z.number().min(1).max(4).default(1)
+    .describe('How far in at the START of the shot: 1 is the whole picture, 1.6 fills the frame with the middle of it'),
   x: Unit().default(0.5).describe('The point of the CLIP that sits at the centre of the frame, 0-1 across'),
   y: Unit().default(0.5).describe('The same, 0-1 down'),
-  scaleTo: z.number().min(1).max(4).optional().describe('Scale at the END of the shot, eased from `scale`: a punch-in, or an ease back out'),
-  xTo: Unit().optional().describe('Where the centred point has drifted to by the end: a slow pan across a still-ish shot'),
+  scaleTo: z.number().min(1).max(4).optional()
+    .describe('Scale at the END of the shot, eased from `scale`: a punch-in, or an ease back out'),
+  xTo: Unit().optional()
+    .describe('Where the centred point has drifted to by the end: a slow pan across a still-ish shot'),
   yTo: Unit().optional(),
-  blur: Unit().default(0).describe('Motion blur while the framing is moving, and none while it is still. 0.3 is the mild smear a fast punch-in leaves. It is an even blur, not a true radial one, so keep it small'),
+  blur: Unit().default(0)
+    .describe('Motion blur while the framing is moving, and none while it is still. 0.3 is the mild smear a fast '
+      + 'punch-in leaves. It is an even blur, not a true radial one, so keep it small'),
 }).strict().describe('The framing of this one shot. Defaults are the whole picture, centred, which changes nothing');
 
 const Play = z.object({
   from: Frame().describe('First SOURCE frame'), to: Frame().describe('SOURCE frame to stop before'),
-  speed: z.number().min(0.1).max(4).default(1).describe('0.5 is half-speed slow motion, 0.2 is five times slower; sound is muted when not 1. Below 1, add "smooth": true or the shot judders'),
-  smooth: z.boolean().default(false).describe('Blends each pair of source frames during slow motion instead of showing each one several times over. Only does anything below speed 1, and costs about twice as much to render'),
+  speed: z.number().min(0.1).max(4).default(1)
+    .describe('0.5 is half-speed slow motion, 0.2 is five times slower; sound is muted when not 1. Below 1, add '
+      + '"smooth": true or the shot judders'),
+  smooth: z.boolean().default(false)
+    .describe('Blends each pair of source frames during slow motion instead of showing each one several times over. '
+      + 'Only does anything below speed 1, and costs about twice as much to render'),
   reframe: Reframe().optional(),
-  mirror: z.boolean().default(false).describe('Flips this shot left-to-right, so a car driving out of frame one way matches one driving the same way in the next shot. Not for a clip with anchors or world spots on it - they are read unflipped'),
-  clip: z.string().regex(ANCHOR).optional().describe('Which clip this bit comes from, named in `clips`. Left out, it is the edit\'s own clip'),
+  mirror: z.boolean().default(false)
+    .describe('Flips this shot left-to-right, so a car driving out of frame one way matches one driving the same way '
+      + 'in the next shot. Not for a clip with anchors or world spots on it - they are read unflipped'),
+  clip: z.string().regex(ANCHOR).optional()
+    .describe('Which clip this bit comes from, named in `clips`. Left out, it is the edit\'s own clip'),
   dissolve: z.number().int().min(0).max(90).default(0)
-    .describe('Frames this shot takes to fade up over the one before it, instead of cutting. The two overlap, so the edit is that much shorter. For a wipe or a push, use `transition` instead'),
+    .describe('Frames this shot takes to fade up over the one before it, instead of cutting. The two overlap, so the '
+      + 'edit is that much shorter. For a wipe or a push, use `transition` instead'),
   transition: z.object({
     kind: z.enum(['dissolve', 'wipe', 'slide', 'push']).default('dissolve')
-      .describe('dissolve fades through; wipe uncovers this shot across the old one; slide brings it in over the top; push shoves the old one out as it comes'),
+      .describe('dissolve fades through; wipe uncovers this shot across the old one; slide brings it in over the top; '
+        + 'push shoves the old one out as it comes'),
     frames: z.number().int().min(1).max(90).describe('How long it takes; the two shots overlap for this long'),
-    from: z.enum(['left', 'right', 'up', 'down']).default('left').describe('The side it comes in from, for wipe, slide and push'),
-  }).strict().optional().describe('How this shot arrives. Instead of `dissolve`, which is the same as {"kind":"dissolve"}'),
+    from: z.enum([
+      'left', 'right', 'up', 'down',
+    ]).default('left').describe('The side it comes in from, for wipe, slide and push'),
+  }).strict().optional().describe('How this shot arrives. Instead of `dissolve`, which is the '
+    + 'same as {"kind":"dissolve"}'),
   ramp: z.number().min(0.25).max(4).optional()
-    .describe('Speed at the END of this shot, eased from `speed` at its start: a slow-down into a hit, or a ramp up out of one. Sound is muted across a ramp'),
+    .describe('Speed at the END of this shot, eased from `speed` at its start: a slow-down into a hit, or a ramp up '
+      + 'out of one. Sound is muted across a ramp'),
 }).strict();
+
 const Hold = z.object({
   hold: Frame().describe('SOURCE frame to freeze on'),
   frames: z.number().int().min(1).max(30 * FPS).describe('How many OUTPUT frames the freeze lasts (silent)'),
-  reframe: Reframe().optional().describe('Framing of the freeze; scaleTo and xTo/yTo make a still picture drift, which is what keeps a held frame alive'),
+  reframe: Reframe().optional()
+    .describe('Framing of the freeze; scaleTo and xTo/yTo make a still picture drift, which is '
+      + 'what keeps a held frame alive'),
   mirror: z.boolean().default(false).describe('Flips the freeze left-to-right'),
-  clip: z.string().regex(ANCHOR).optional().describe('Which clip to freeze a frame of, named in `clips`. Left out, it is the edit\'s own clip'),
-  dissolve: z.number().int().min(0).max(90).default(0).describe('Frames this freeze takes to come up over the shot before it'),
+  clip: z.string().regex(ANCHOR).optional()
+    .describe('Which clip to freeze a frame of, named in `clips`. Left out, it is the edit\'s own clip'),
+  dissolve: z.number().int().min(0).max(90).default(0)
+    .describe('Frames this freeze takes to come up over the shot before it'),
   transition: z.object({
     kind: z.enum(['dissolve', 'wipe', 'slide', 'push']).default('dissolve'),
     frames: z.number().int().min(1).max(90),
@@ -424,76 +647,124 @@ const Hold = z.object({
 
 // Sound effects and music on the timeline, in OUTPUT frames, from sound files uploaded for the clip.
 const Cue = () => z.object({
-  sound: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/).describe('Name of a sound uploaded for this footage (list_footage, under sounds)'),
+  sound: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)
+    .describe('Name of a sound uploaded for this footage (list_footage, under sounds)'),
   at: Frame().describe('OUTPUT frame it starts on, e.g. the frame a cat lands'),
   volume: z.number().min(0).max(2).default(1).describe('1 as recorded; 0.3 for quiet background steps'),
-  from: z.number().min(0).max(600).default(0).describe('Seconds into the file to start from, to skip silence or pick one hit from a longer recording'),
-  length: z.number().int().min(1).max(100000).optional().describe('OUTPUT frames to play before it is cut (default: to the end of the file); with loop, how long the loop runs'),
+  from: z.number().min(0).max(600).default(0)
+    .describe('Seconds into the file to start from, to skip silence or pick one hit from a longer recording'),
+  length: z.number().int().min(1).max(100000).optional()
+    .describe('OUTPUT frames to play before it is cut (default: to the end of the file); with '
+      + 'loop, how long the loop runs'),
   loop: z.boolean().default(false).describe('Repeat the sound for its whole length, e.g. footsteps under a walk'),
   fadeIn: z.number().int().min(0).max(300).default(0).describe('Frames to fade in'),
   fadeOut: z.number().int().min(0).max(300).default(3).describe('Frames to fade out at the end, so a cut never clicks'),
   speed: z.number().min(0.5).max(2).default(1).describe('Playback speed; changes pitch too'),
-  volumeKeys: z.array(z.object({ frame: z.number().int().min(0).max(100000).describe('Frames from the cue\'s start'), value: z.number().min(0).max(4) }).strict()).min(1).max(100).optional()
+  volumeKeys: z.array(z.object({
+    frame: z.number().int().min(0).max(100000).describe('Frames from the cue\'s start'),
+    value: z.number().min(0).max(4),
+  }).strict()).min(1).max(100).optional()
     .describe('Volume over time (multiplies volume), eased between keys: swells, dips, a sound that builds'),
-  duck: z.number().min(0).max(1).optional().describe('While this plays, the clip\'s own sound drops to this level (0.3 = 30%), easing down and back up'),
+  duck: z.number().min(0).max(1).optional()
+    .describe('While this plays, the clip\'s own sound drops to this level (0.3 = 30%), easing down and back up'),
   // Effects are applied to the file first (on the server, with ffmpeg); from, length and loop then apply to the result.
-  pan: z.number().min(-1).max(1).default(0).describe('Stereo position: -1 left, 0 centre, 1 right, e.g. following something across the screen'),
-  pitch: z.number().min(-12).max(12).default(0).describe('Pitch shift in semitones without changing speed (-12 an octave down, 12 up)'),
+  pan: z.number().min(-1).max(1).default(0)
+    .describe('Stereo position: -1 left, 0 centre, 1 right, e.g. following something across the screen'),
+  pitch: z.number().min(-12).max(12).default(0)
+    .describe('Pitch shift in semitones without changing speed (-12 an octave down, 12 up)'),
   reverse: z.boolean().default(false).describe('Play it backwards'),
-  lowpass: z.number().int().min(100).max(20000).optional().describe('Cut frequencies above this many Hz: muffled, through a wall, underwater (e.g. 800)'),
-  highpass: z.number().int().min(20).max(10000).optional().describe('Cut frequencies below this many Hz: thin, like a phone or radio (e.g. 1500)'),
+  lowpass: z.number().int().min(100).max(20000).optional()
+    .describe('Cut frequencies above this many Hz: muffled, through a wall, underwater (e.g. 800)'),
+  highpass: z.number().int().min(20).max(10000).optional()
+    .describe('Cut frequencies below this many Hz: thin, like a phone or radio (e.g. 1500)'),
   bass: z.number().min(-20).max(20).default(0).describe('Bass boost or cut in dB'),
   treble: z.number().min(-20).max(20).default(0).describe('Treble boost or cut in dB'),
-  echo: z.object({ delay: z.number().int().min(20).max(2000).default(250).describe('Milliseconds between repeats'), decay: z.number().min(0.05).max(0.9).default(0.4).describe('How loud each repeat is') }).strict().optional(),
+  echo: z.object({
+    delay: z.number().int().min(20).max(2000).default(250).describe('Milliseconds between repeats'),
+    decay: z.number().min(0.05).max(0.9).default(0.4).describe('How loud each repeat is'),
+  }).strict().optional(),
   reverb: z.number().min(0).max(1).default(0).describe('Room sound: 0.2 a small room, 0.6 a hall, 1 a cathedral'),
-  normalize: z.boolean().default(false).describe('Even out the loudness first, for sounds recorded too quiet or too loud'),
+  normalize: z.boolean().default(false)
+    .describe('Even out the loudness first, for sounds recorded too quiet or too loud'),
 }).strict();
 
 // Echo and reverb ring on after a sound ends: the processed file gets this much silence added so the
 // tail is heard, and the cue's natural length includes it.
-export const tailSeconds = cue => Math.min(4, (cue.echo ? (cue.echo.delay / 1000) * 4 : 0) + (cue.reverb ? 0.4 + cue.reverb * 2 : 0));
-export const soundEffects = cue => !!(cue.pan || cue.pitch || cue.reverse || cue.lowpass || cue.highpass || cue.bass || cue.treble || cue.echo || cue.reverb || cue.normalize);
+export const tailSeconds = cue =>
+  Math.min(4, (cue.echo ? (cue.echo.delay / 1000) * 4 : 0) + (cue.reverb ? 0.4 + cue.reverb * 2 : 0));
+
+export const soundEffects = cue => !!(cue.pan || cue.pitch || cue.reverse || cue.lowpass || cue.highpass || cue.bass
+  || cue.treble || cue.echo || cue.reverb || cue.normalize);
 
 // A spot in the room, rather than on the screen: marked on two or more frames the camera has moved
 // between, and turned into a 3D position with the clip's camera track. Layers placed on one stay where
 // they are in the room, so they hold still when the camera looks away and comes back.
 const WorldPoint = () => z.object({
   name: z.string().regex(ANCHOR).describe('Name for this spot; shares the namespace with anchors'),
-  sightings: z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(12)
-    .describe('The same spot marked in 0-1 of the footage, on two or more frames the camera has moved between. One sighting works only when the track has scene points'),
+  sightings: z.array(z.object({
+    frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit(),
+  }).strict()).min(1).max(12)
+    .describe('The same spot marked in 0-1 of the footage, on two or more frames the camera has moved between. One '
+      + 'sighting works only when the track has scene points'),
 }).strict();
 
-const AnchorKeys = () => z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(900);
+const AnchorKeys = () => z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict())
+  .min(1).max(900);
 
 export const EditSpec = z.object({
-  format: z.enum(Object.keys(FORMATS)).default('vertical').describe('vertical 1080×1920 (Reels, Stories), portrait 1080×1350, square 1080×1080, landscape 1920×1080'),
-  fit: z.enum(['cover', 'contain']).default('cover').describe('cover fills the frame and crops; contain shows the whole clip on the background'),
+  format: z.enum(Object.keys(FORMATS)).default('vertical')
+    .describe('vertical 1080×1920 (Reels, Stories), portrait 1080×1350, square 1080×1080, landscape 1920×1080'),
+  fit: z.enum([
+    'cover', 'contain',
+  ]).default('cover').describe('cover fills the frame and crops; contain shows the whole clip on the background'),
   background: Color().default('ink'),
-  audio: z.enum(['source', 'mute']).default('source').describe('The clip\'s own sound; sound effects in sounds play either way'),
-  sourceVolume: z.number().min(0).max(2).default(1).describe('Volume of the clip\'s own sound, e.g. 0.4 to keep the café ambience under the effects'),
-  sourceKeys: z.array(z.object({ frame: Frame().describe('OUTPUT frame'), value: z.number().min(0).max(4) }).strict()).min(1).max(200).optional()
-    .describe('The clip\'s own sound over time (multiplies sourceVolume), eased between keys: fade it out at the end, swell it on a reveal'),
-  sounds: z.array(Cue()).max(60).default([]).describe('Sound effects and music placed on OUTPUT frames: steps, a whoosh on a jump, a poof, a music bed'),
+  audio: z.enum([
+    'source', 'mute',
+  ]).default('source').describe('The clip\'s own sound; sound effects in sounds play either way'),
+  sourceVolume: z.number().min(0).max(2).default(1)
+    .describe('Volume of the clip\'s own sound, e.g. 0.4 to keep the café ambience under the effects'),
+  sourceKeys: z.array(z.object({
+    frame: Frame().describe('OUTPUT frame'), value: z.number().min(0).max(4),
+  }).strict()).min(1).max(200).optional()
+    .describe('The clip\'s own sound over time (multiplies sourceVolume), eased between keys: fade it out at the '
+      + 'end, swell it on a reveal'),
+  sounds: z.array(Cue()).max(60).default([])
+    .describe('Sound effects and music placed on OUTPUT frames: steps, a whoosh on a jump, a poof, a music bed'),
   timeline: z.array(z.union([Play, Hold])).min(1).max(40).optional()
-    .describe('The cut, in order: {from,to[,speed]} plays source frames, {hold,frames} freezes one. Leave out to play the whole clip once'),
+    .describe('The cut, in order: {from,to[,speed]} plays source frames, {hold,frames} freezes one. Leave out '
+      + 'to play the whole clip once'),
   // Anchor names are checked in planEdit: a key pattern in the schema becomes propertyNames, which
   // ChatGPT's tool-schema check rejects.
   clips: z.array(z.object({
     name: z.string().regex(ANCHOR).describe('Short name for this clip, used by timeline entries'),
     footage: z.string().regex(FOOTAGE).describe('Id of another clip already uploaded here (list_footage)'),
   }).strict()).max(12).default([])
-    .describe('Other clips this edit cuts between, for a trailer. Name them here, then a timeline entry says which one it plays: {"clip":"wide","from":0,"to":40}. Anchors, depth and world spots belong to the edit\'s own clip only'),
+    .describe('Other clips this edit cuts between, for a trailer. Name them here, then a timeline entry says which one '
+      + 'it plays: {"clip":"wide","from":0,"to":40}. Anchors, depth and world spots belong to '
+      + 'the edit\'s own clip only'),
   world: z.array(WorldPoint()).max(40).default([])
-    .describe('Spots in the room, for layers that should stay put as the camera moves. Needs a camera track on the clip (make_track, or an AR track uploaded with create_upload_link kind track); get_track checks one'),
-  anchors: z.record(z.array(z.object({ frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit() }).strict()).min(1).max(900))
-    .refine(a => Object.keys(a).length <= 40, 'At most 40 anchors').default({}).describe('Named points on things in the footage, keyframed on SOURCE frames in 0–1 of the footage; positions between keyframes are interpolated, and held before the first and after the last'),
+    .describe('Spots in the room, for layers that should stay put as the camera moves. Needs a camera track on the '
+      + 'clip (make_track, or an AR track uploaded with create_upload_link kind track); get_track checks one'),
+  anchors: z.record(z.array(z.object({
+    frame: Frame().describe('SOURCE frame'), x: Unit(), y: Unit(),
+  }).strict()).min(1).max(900))
+    .refine(a => Object.keys(a).length <= 40, 'At most 40 anchors').default({}).describe('Named points on things in '
+      + 'the footage, keyframed on SOURCE frames in 0–1 of the footage; positions between keyframes are interpolated, '
+      + 'and held before the first and after the last'),
   depth: z.object({
-    video: z.boolean().default(false).describe('Use this clip\'s per-frame depth (see create_download_link and create_upload_link kind depth); it follows the timeline like the footage'),
-    stills: z.array(z.object({ from: Frame(), to: Frame(), asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/) }).strict()).max(20).optional()
-      .describe('A depth picture (uploaded asset, same shape as the footage) for OUTPUT frames from..to, e.g. during a freeze; takes over from the video there'),
+    video: z.boolean().default(false)
+      .describe('Use this clip\'s per-frame depth (see create_download_link and create_upload_link kind depth); it '
+        + 'follows the timeline like the footage'),
+    stills: z.array(z.object({
+      from: Frame(), to: Frame(), asset: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/),
+    }).strict()).max(20).optional()
+      .describe('A depth picture (uploaded asset, same shape as the footage) for OUTPUT frames from..to, e.g. during a '
+        + 'freeze; takes over from the video there'),
     near: z.enum(['white', 'black']).default('white').describe('Which end of the greyscale is near'),
   }).strict().optional().describe('Where depth comes from, for layers with depth and for blur, fog and parallax'),
-  layers: z.array(Layer).max(80).default([]).describe('Drawn in order, later layers on top; illustrate layers always sit right over the footage, under every other layer'),
+  layers: z.array(Layer).max(80).default([])
+    .describe('Drawn in order, later layers on top; illustrate layers always sit right over the '
+      + 'footage, under every other layer'),
 }).strict();
 
 // MCP tool importers do not consistently accept open-ended object keys. Keep the stored edit format
@@ -504,18 +775,34 @@ export const McpEditSpec = EditSpec.omit({ anchors: true }).extend({
     keys: AnchorKeys().describe('Positions on SOURCE frames, in 0–1 of the footage'),
   }).strict()).max(40).superRefine((anchors, ctx) => {
     const seen = new Set();
+
     for (const [i, anchor] of anchors.entries()) {
-      if (seen.has(anchor.name)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'name'], message: `Duplicate anchor '${anchor.name}'` });
+      if (seen.has(anchor.name)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'name'], message: `Duplicate anchor '${anchor.name}'` });
+      }
+
       seen.add(anchor.name);
     }
   }).default([]).describe('Named points on things in the footage; use an empty list when no anchors are needed'),
 }).strict();
 
-export const fromMcpEdit = edit => ({ ...edit, anchors: Object.fromEntries(edit.anchors.map(({ name, keys }) => [name, keys])) });
-export const toMcpEdit = edit => ({ ...edit, anchors: Object.entries(edit.anchors).map(([name, keys]) => ({ name, keys })) });
+export const fromMcpEdit = edit => ({
+  ...edit,
+  anchors: Object.fromEntries(edit.anchors.map(({ name, keys }) => [name, keys])),
+});
 
-const fail = message => Object.assign(new Error(message), { httpStatus: 400 });
-const pos = s => typeof s === 'string' ? `anchor '${s}'` : null;
+export const toMcpEdit = edit => ({
+  ...edit,
+  anchors: Object.entries(edit.anchors).map(([name, keys]) => ({ name, keys })),
+});
+
+const fail = message => {
+  return Object.assign(new Error(message), { httpStatus: 400 });
+};
+
+const pos = s => {
+  return typeof s === 'string' ? `anchor '${s}'` : null;
+};
 
 // Checks an edit against the clip it animates and works out its timeline. `footage` is the working
 // copy's info ({frames, width, height}); `assets` maps asset names to {width, height}; `models` maps model
@@ -524,40 +811,100 @@ const pos = s => typeof s === 'string' ? `anchor '${s}'` : null;
 // renderer follows and the output↔source mapping to show back.
 export function planEdit(input, footage, assets = {}, graphics = {}, models = {}, sounds = {}, clips = {}) {
   const spec = EditSpec.parse(input);
-  const errors = [], warnings = [];
+  const errors = [];
+  const warnings = [];
   const last = footage.frames - 1;
+
   // A blank canvas has no clip behind it, so everything that reads one has nothing to read. Saying so
   // here keeps the failure at save time, with the reason, instead of in the middle of a render.
   if (footage.blank) {
-    const cannot = { illustrate: 'redraws the clip', blur: 'needs the clip\'s depth', fog: 'needs the clip\'s depth', parallax: 'needs the clip\'s depth', zoom: 'moves the clip' };
+    const cannot = {
+      illustrate: 'redraws the clip',
+      blur: "needs the clip's depth",
+      fog: "needs the clip's depth",
+      parallax: "needs the clip's depth",
+      zoom: 'moves the clip',
+    };
+
     for (const [i, layer] of spec.layers.entries()) {
-      if (cannot[layer.type]) errors.push(`layers.${i} (${layer.type}): ${cannot[layer.type]}, and this animation has no clip behind it`);
-      if (layer.type === 'image' && layer.place === 'footage') errors.push(`layers.${i} (image): place "footage" covers the clip, and this animation has no clip behind it`);
+      if (cannot[layer.type]) {
+        errors.push(`layers.${i} (${layer.type}): ${cannot[layer.type]}, and this animation has no clip behind it`);
+      }
+
+      if (layer.type === 'image' && layer.place === 'footage') {
+        errors.push(`layers.${i} (image): place "footage" covers the clip, and this animation has no clip behind it`);
+      }
     }
-    if (Object.keys(spec.anchors).length) errors.push('anchors: there is no clip to stick to in this animation; place layers with at or path in 0-1 of the frame');
-    if (spec.world.length) errors.push('world: spots in the room need a clip with a camera track; this animation has no clip behind it');
-    if (spec.depth) errors.push('depth: there is no clip to measure, so an animation with no clip cannot use depth');
-    if (spec.audio === 'source' && (spec.sourceVolume !== 1 || spec.sourceKeys)) warnings.push('this animation has no clip, so it has no sound of its own; sounds in "sounds" still play');
-    if (spec.timeline?.some(x => !('hold' in x) && !x.clip)) errors.push('timeline: this animation has no clip of its own, so every entry has to say which clip it plays with "clip"');
+
+    if (Object.keys(spec.anchors).length) {
+      errors.push(
+        'anchors: there is no clip to stick to in this animation; place layers with at or path in 0-1 of the frame',
+      );
+    }
+
+    if (spec.world.length) {
+      errors.push('world: spots in the room need a clip with a camera track; this animation has no clip behind it');
+    }
+
+    if (spec.depth) {
+      errors.push('depth: there is no clip to measure, so an animation with no clip cannot use depth');
+    }
+
+    if (spec.audio === 'source' && (spec.sourceVolume !== 1 || spec.sourceKeys)) {
+      warnings.push('this animation has no clip, so it has no sound of its own; sounds in "sounds" still play');
+    }
+
+    if (spec.timeline?.some(x => !('hold' in x) && !x.clip)) {
+      errors.push(
+        'timeline: this animation has no clip of its own, so every entry has to say which clip it plays with "clip"',
+      );
+    }
   }
+
   // The clips a timeline entry may name, each with its own length: a cut between two videos is bounded
   // by whichever one it comes from, not by the edit's own.
   const named = new Map();
+
   for (const [i, c] of spec.clips.entries()) {
-    if (named.has(c.name)) { errors.push(`clips.${i}: there are two clips called '${c.name}'`); continue; }
+    if (named.has(c.name)) {
+      errors.push(`clips.${i}: there are two clips called '${c.name}'`);
+      continue;
+    }
+
     const about = clips[c.footage];
-    if (!about) errors.push(`clips.${i} ('${c.name}'): there is no clip ${c.footage} here, or it is not ready yet (list_footage)`);
-    else if (about.blank) errors.push(`clips.${i} ('${c.name}'): ${c.footage} is an animation with no video of its own, so there is nothing to cut in`);
+
+    if (!about) {
+      errors.push(`clips.${i} ('${c.name}'): there is no clip ${c.footage} here, or it is `
+        + `not ready yet (list_footage)`);
+    } else if (about.blank) {
+      errors.push(`clips.${i} ('${c.name}'): ${c.footage} is an animation with no video of its `
+        + `own, so there is nothing to cut in`);
+    }
+
     named.set(c.name, about ?? null);
   }
+
   const usedClips = new Set();
-  for (const [i, entry] of (spec.timeline ?? []).entries())
-    if (!('hold' in entry) && entry.dissolve && entry.transition) errors.push(`timeline.${i}: give either dissolve or transition, not both`);
+
+  for (const [i, entry] of (spec.timeline ?? []).entries()) {
+    if (!('hold' in entry) && entry.dissolve && entry.transition) {
+      errors.push(`timeline.${i}: give either `
+        + `dissolve or transition, not both`);
+    }
+  }
+
   // How long the clip a timeline entry plays is, and what to call it when something is wrong.
   const lengthOf = (s) => {
-    if (!s.clip) return { frames: footage.frames, what: footage.blank ? 'this animation' : 'the clip', missing: !!footage.blank };
+    if (!s.clip) {
+      return { frames: footage.frames, what: footage.blank ? 'this animation' : 'the clip', missing: !!footage.blank };
+    }
+
     usedClips.add(s.clip);
-    if (!named.has(s.clip)) return { frames: 0, what: `'${s.clip}'`, unknown: true };
+
+    if (!named.has(s.clip)) {
+      return { frames: 0, what: `'${s.clip}'`, unknown: true };
+    }
+
     const about = named.get(s.clip);
     return { frames: about?.frames ?? 0, what: `clip '${s.clip}'`, missing: !about };
   };
@@ -566,290 +913,778 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
   // punch-in has to ease across all ten of them rather than start again on each. So every segment a shot
   // becomes carries the same `shot` span, and the renderer reads its progress from that.
   const anchored = Object.keys(spec.anchors).length || spec.world.length;
-  const shotStyle = (s) => (s.reframe || s.mirror ? { ...(s.reframe ? { reframe: s.reframe } : {}), ...(s.mirror ? { mirror: true } : {}) } : null);
-  const spanShot = (first, from, to) => { for (let j = first; j < segments.length; j++) if (segments[j].reframe) segments[j].shot = [from, to]; };
+
+  const shotStyle = s =>
+    s.reframe || s.mirror
+      ? { ...(s.reframe ? { reframe: s.reframe } : {}), ...(s.mirror ? { mirror: true } : {}) }
+      : null;
+
+  const spanShot = (first, from, to) => {
+    for (let j = first; j < segments.length; j++) {
+      if (segments[j].reframe) {
+        segments[j].shot = [from, to];
+      }
+    }
+  };
 
   const segments = [];
   let t = 0;
+
   for (const [i, s] of (spec.timeline ?? [{ from: 0, to: footage.frames, speed: 1 }]).entries()) {
     const of = lengthOf(s);
-    if (of.unknown) { errors.push(`timeline.${i}: there is no clip called '${s.clip}'; name it under clips`); continue; }
-    if (of.missing) { errors.push(`timeline.${i}: ${of.what} has no video to play`); continue; }
+
+    if (of.unknown) {
+      errors.push(`timeline.${i}: there is no clip called '${s.clip}'; name it under clips`);
+      continue;
+    }
+
+    if (of.missing) {
+      errors.push(`timeline.${i}: ${of.what} has no video to play`);
+      continue;
+    }
+
     // Anchors and world spots are read in the unflipped picture, so a mirrored shot would leave every
     // layer stuck to them on the wrong side of the frame.
-    if (s.mirror && !s.clip && anchored) warnings.push(`timeline.${i}: this shot plays the edit's own clip mirrored, but anchors and world spots are read unflipped, so layers stuck to them land on the wrong side`);
+    if (s.mirror && !s.clip && anchored) {
+      warnings.push(
+        `timeline.${i}: this shot plays the edit's own clip mirrored, but anchors and world spots are read unflipped, `
+          + `so layers stuck to them land on the wrong side`,
+      );
+    }
+
     const end = of.frames - 1;
+
     if ('hold' in s) {
-      if (s.hold > end) errors.push(`timeline.${i}: frame ${s.hold} is past the end of ${of.what} (its last frame is ${end})`);
+      if (s.hold > end) {
+        errors.push(`timeline.${i}: frame ${s.hold} is past the end of ${of.what} (its last frame is ${end})`);
+      }
+
       const asked = s.transition ?? (s.dissolve ? { kind: 'dissolve', frames: s.dissolve, from: 'left' } : null);
       const held = Math.min(asked?.frames ?? 0, segments.length ? segments.at(-1).to - segments.at(-1).from : 0, t);
       t -= held;
-      segments.push({ from: t, to: t + s.frames, source: Math.min(s.hold, end), hold: true, ...(s.clip ? { clip: s.clip } : {}), ...shotStyle(s), ...(held ? { enter: { kind: asked.kind, frames: held, from: asked.from } } : {}) });
+
+      segments.push({
+        from: t,
+        to: t + s.frames,
+        source: Math.min(s.hold, end),
+        hold: true,
+        ...(s.clip ? { clip: s.clip } : {}),
+        ...shotStyle(s),
+        ...(held ? { enter: { kind: asked.kind, frames: held, from: asked.from } } : {}),
+      });
+
       spanShot(segments.length - 1, t, t + s.frames);
       t += s.frames;
       continue;
     }
+
     const to = Math.min(s.to, of.frames);
-    if (s.from > end) { errors.push(`timeline.${i}: frame ${s.from} is past the end of ${of.what} (its last frame is ${end})`); continue; }
-    if (s.to > of.frames) warnings.push(`timeline.${i}: ${of.what} ends at frame ${of.frames}, so this part stops there`);
-    if (to <= s.from) { errors.push(`timeline.${i}: 'to' must be after 'from'`); continue; }
+
+    if (s.from > end) {
+      errors.push(`timeline.${i}: frame ${s.from} is past the end of ${of.what} (its last frame is ${end})`);
+      continue;
+    }
+
+    if (s.to > of.frames) {
+      warnings.push(`timeline.${i}: ${of.what} ends at frame ${of.frames}, so this part stops there`);
+    }
+
+    if (to <= s.from) {
+      errors.push(`timeline.${i}: 'to' must be after 'from'`);
+      continue;
+    }
+
     // A dissolve overlaps this shot with the one before it, so the edit gets shorter by that much. The
     // first shot has nothing to dissolve from.
     // Blending pairs of frames only means anything when a source frame is being held over several
     // output ones. At or above speed 1 it would cost a second video for nothing.
     const slowest = s.ramp != null ? Math.min(s.speed, s.ramp) : s.speed;
     const smoothed = s.smooth && slowest < 0.9;
-    if (s.smooth && !smoothed) warnings.push(`timeline.${i}: "smooth" only does something below speed 0.9, and this shot never goes that slow`);
-    else if (!s.smooth && slowest <= 0.5) warnings.push(`timeline.${i}: at speed ${slowest} each source frame is held for ${(1 / slowest).toFixed(1)} output frames, which judders; add "smooth": true`);
+
+    if (s.smooth && !smoothed) {
+      warnings.push(`timeline.${i}: "smooth" only does something below speed 0.9, and this `
+        + `shot never goes that slow`);
+    } else if (!s.smooth && slowest <= 0.5) {
+      warnings.push(`timeline.${i}: at speed ${slowest} each source frame is held `
+        + `for ${(1 / slowest).toFixed(1)} output frames, which judders; add "smooth": true`);
+    }
+
     const asked = s.transition ?? (s.dissolve ? { kind: 'dissolve', frames: s.dissolve, from: 'left' } : null);
     const overlap = Math.min(asked?.frames ?? 0, segments.length ? segments.at(-1).to - segments.at(-1).from : 0, t);
     const enter = overlap ? { kind: asked.kind, frames: overlap, from: asked.from } : null;
     t -= overlap;
-    const ease = k => k * k * (3 - 2 * k);
+
+    const ease = k => {
+      return k * k * (3 - 2 * k);
+    };
+
     if (s.ramp != null && s.ramp !== s.speed) {
       // Speed ramps are a staircase: one video element plays at one rate, so a smooth ramp is several
       // short pieces at stepped rates. Split by SOURCE frames, so the shot still ends exactly where it
       // was asked to, whatever the rounding does to each step's length.
-      const STEPS = 10, span = to - s.from, first = segments.length, started = t;
+      const STEPS = 10;
+      const span = to - s.from;
+      const first = segments.length;
+      const started = t;
+
       for (let k = 0; k < STEPS; k++) {
-        const a = s.from + Math.round((span * k) / STEPS), b = s.from + Math.round((span * (k + 1)) / STEPS);
-        if (b <= a) continue;
+        const a = s.from + Math.round((span * k) / STEPS);
+        const b = s.from + Math.round((span * (k + 1)) / STEPS);
+
+        if (b <= a) {
+          continue;
+        }
+
         const rate = s.speed + (s.ramp - s.speed) * ease((k + 0.5) / STEPS);
         const piece = Math.max(1, Math.ceil((b - a) / rate));
-        segments.push({ from: t, to: t + piece, source: a, sourceTo: b, speed: rate, ...(s.clip ? { clip: s.clip } : {}), ...(smoothed && rate < 0.9 ? { smooth: true } : {}), ...shotStyle(s), ...(k === 0 && enter ? { enter } : {}) });
+
+        segments.push({
+          from: t,
+          to: t + piece,
+          source: a,
+          sourceTo: b,
+          speed: rate,
+          ...(s.clip ? { clip: s.clip } : {}),
+          ...(smoothed && rate < 0.9 ? { smooth: true } : {}),
+          ...shotStyle(s),
+          ...(k === 0 && enter ? { enter } : {}),
+        });
+
         t += piece;
       }
+
       spanShot(first, started, t);
       continue;
     }
+
     const length = Math.ceil((to - s.from) / s.speed);
-    segments.push({ from: t, to: t + length, source: s.from, sourceTo: to, speed: s.speed, ...(s.clip ? { clip: s.clip } : {}), ...(smoothed ? { smooth: true } : {}), ...shotStyle(s), ...(enter ? { enter } : {}) });
+
+    segments.push({
+      from: t,
+      to: t + length,
+      source: s.from,
+      sourceTo: to,
+      speed: s.speed,
+      ...(s.clip ? { clip: s.clip } : {}),
+      ...(smoothed ? { smooth: true } : {}),
+      ...shotStyle(s),
+      ...(enter ? { enter } : {}),
+    });
+
     spanShot(segments.length - 1, t, t + length);
     t += length;
   }
+
   const duration = t;
-  if (duration > MAX_OUTPUT_FRAMES) errors.push(`The edit runs ${(duration / FPS).toFixed(1)} s; keep it under ${MAX_OUTPUT_FRAMES / FPS} s`);
+
+  if (duration > MAX_OUTPUT_FRAMES) {
+    errors.push(`The edit runs ${(duration / FPS).toFixed(1)} s; keep it under ${MAX_OUTPUT_FRAMES / FPS} s`);
+  }
+
   // A zoom layer moves the camera over the finished edit; a reframe sets the framing of one shot. Where
   // they cover the same frames the reframe wins, which is not obvious from looking at either of them.
   const reframes = segments.filter(s => s.reframe).map(s => s.shot ?? [s.from, s.to]);
-  for (const [i, l] of spec.layers.entries())
-    if (l.type === 'zoom' && reframes.some(([a, b]) => l.from < b && l.to > a))
-      warnings.push(`layers.${i} (zoom): some of these frames belong to a shot that sets its own framing with "reframe", and the reframe wins there; move the zoom off those frames or drop it`);
+
+  for (const [i, l] of spec.layers.entries()) {
+    if (l.type === 'zoom' && reframes.some(([a, b]) => l.from < b && l.to > a)) {
+      warnings.push(`layers.${i} (zoom): some of these frames belong to a shot that sets its own framing with `
+        + `"reframe", and the reframe wins there; move the zoom off those frames or drop it`);
+    }
+  }
 
   for (const [name, keys] of Object.entries(spec.anchors)) {
-    if (!ANCHOR.test(name)) { errors.push(`anchors.${name}: use lowercase letters, digits, - and _ (up to 24), starting with a letter`); continue; }
+    if (!ANCHOR.test(name)) {
+      errors.push(`anchors.${name}: use lowercase letters, digits, - and _ (up to 24), starting with a letter`);
+      continue;
+    }
+
     keys.sort((a, b) => a.frame - b.frame);
-    if (keys.some((k, i) => i && k.frame === keys[i - 1].frame)) errors.push(`anchors.${name}: two keyframes on frame ${keys.find((k, i) => i && k.frame === keys[i - 1].frame).frame}`);
-    if (keys.at(-1).frame > last) errors.push(`anchors.${name}: frame ${keys.at(-1).frame} is past the end of the clip (its last frame is ${last})`);
+
+    if (keys.some((k, i) => i && k.frame === keys[i - 1].frame)) {
+      errors.push(
+        `anchors.${name}: two keyframes on frame ${keys.find((k, i) => i && k.frame === keys[i - 1].frame).frame}`,
+      );
+    }
+
+    if (keys.at(-1).frame > last) {
+      errors.push(
+        `anchors.${name}: frame ${keys.at(-1).frame} is past the end of the clip (its last frame is ${last})`,
+      );
+    }
   }
+
   // World spots: one name each, not clashing with an anchor, and every sighting on a real frame.
   const worldPoints = new Map();
+
   for (const [i, point] of spec.world.entries()) {
-    if (worldPoints.has(point.name)) { errors.push(`world.${i}: there are two spots called '${point.name}'`); continue; }
-    if (spec.anchors[point.name]) errors.push(`world.${i}: '${point.name}' is already an anchor; world spots and anchors share their names`);
+    if (worldPoints.has(point.name)) {
+      errors.push(`world.${i}: there are two spots called '${point.name}'`);
+      continue;
+    }
+
+    if (spec.anchors[point.name]) {
+      errors.push(`world.${i}: '${point.name}' is already an anchor; world spots and anchors share their names`);
+    }
+
     point.sightings.sort((a, b) => a.frame - b.frame);
     const past = point.sightings.find(k => k.frame > last);
-    if (past) errors.push(`world.${i} ('${point.name}'): frame ${past.frame} is past the end of the clip (its last frame is ${last})`);
-    if (point.sightings.length >= 2 && new Set(point.sightings.map(k => k.frame)).size < 2) errors.push(`world.${i} ('${point.name}'): mark it on frames the camera has moved between, not twice on one frame`);
+
+    if (past) {
+      errors.push(
+        `world.${i} ('${point.name}'): frame ${past.frame} is past the end of the clip (its last frame is ${last})`,
+      );
+    }
+
+    if (point.sightings.length >= 2 && new Set(point.sightings.map(k => k.frame)).size < 2) {
+      errors.push(
+        `world.${i} ('${point.name}'): mark it on frames the camera has moved between, not twice on one frame`,
+      );
+    }
+
     worldPoints.set(point.name, point);
   }
-  const used = new Set(), usedWorld = new Set();
+
+  const used = new Set();
+  const usedWorld = new Set();
+
   const needAnchor = (where, value) => {
-    if (typeof value !== 'string') return;
+    if (typeof value !== 'string') {
+      return;
+    }
+
     used.add(value);
-    if (!spec.anchors[value]) errors.push(`${where}: there is no ${pos(value)}; define it under anchors`);
+
+    if (!spec.anchors[value]) {
+      errors.push(`${where}: there is no ${pos(value)}; define it under anchors`);
+    }
   };
+
   const needWorld = (where, value) => {
-    if (typeof value !== 'string') return;
+    if (typeof value !== 'string') {
+      return;
+    }
+
     usedWorld.add(value);
-    if (!worldPoints.has(value)) errors.push(`${where}: there is no world spot '${value}'; define it under world`);
+
+    if (!worldPoints.has(value)) {
+      errors.push(`${where}: there is no world spot '${value}'; define it under world`);
+    }
   };
+
   // `at` on a flat layer may name a spot in the room instead of an anchor: it is then drawn where that
   // spot appears, and left out of frames where it is behind the camera. follow and a zoom focus stay
   // anchors only - they follow something in the picture, which is a different idea.
   const needPlace = (where, value) => {
-    if (typeof value !== 'string') return;
-    if (worldPoints.has(value)) {
-      usedWorld.add(value);
-      if (!footage.track) errors.push(`${where}: '${value}' is a spot in the room, which needs a camera track for this clip`);
+    if (typeof value !== 'string') {
       return;
     }
+
+    if (worldPoints.has(value)) {
+      usedWorld.add(value);
+
+      if (!footage.track) {
+        errors.push(`${where}: '${value}' is a spot in the room, which needs a camera track for this clip`);
+      }
+
+      return;
+    }
+
     needAnchor(where, value);
   };
+
   const zooms = [];
+
   for (const [i, layer] of spec.layers.entries()) {
     const where = `layers.${i} (${layer.type})`;
-    if (layer.to <= layer.from) { errors.push(`${where}: 'to' must be after 'from'`); continue; }
-    if (layer.from >= duration) { errors.push(`${where}: starts at frame ${layer.from}, but the edit is only ${duration} frames long`); continue; }
-    if (layer.to > duration) { warnings.push(`${where}: runs past the end of the edit, so it is cut at frame ${duration}`); layer.to = duration; }
+
+    if (layer.to <= layer.from) {
+      errors.push(`${where}: 'to' must be after 'from'`);
+      continue;
+    }
+
+    if (layer.from >= duration) {
+      errors.push(`${where}: starts at frame ${layer.from}, but the edit is only ${duration} frames long`);
+      continue;
+    }
+
+    if (layer.to > duration) {
+      warnings.push(`${where}: runs past the end of the edit, so it is cut at frame ${duration}`);
+      layer.to = duration;
+    }
+
     const length = layer.to - layer.from;
+
     if (layer.type !== 'flash' && layer.in + layer.out > length) {
       const k = length / Math.max(1, layer.in + layer.out);
-      layer.in = Math.floor(layer.in * k); layer.out = Math.floor(layer.out * k);
+      layer.in = Math.floor(layer.in * k);
+      layer.out = Math.floor(layer.out * k);
       warnings.push(`${where}: entrance and exit were longer than the layer, so they were shortened`);
     }
+
     needPlace(where, layer.at);
     needAnchor(`${where}: follow`, layer.follow);
+
     if (layer.world || layer.worldPath) {
       // Placing something in the room only means anything if we know where the camera was.
-      if (!footage.track) errors.push(`${where}: world needs a camera track for this clip - make_track solves one, or send one recorded while filming with create_upload_link kind track`);
-      if (layer.at != null || layer.path || layer.follow) errors.push(`${where}: world places it in the room, so it cannot also have at, path or follow`);
-      if (layer.world && layer.worldPath) errors.push(`${where}: give either world or worldPath, not both`);
+      if (!footage.track) {
+        errors.push(
+          `${where}: world needs a camera track for this clip - make_track solves one, or send one recorded while `
+            + `filming with create_upload_link kind track`,
+        );
+      }
+
+      if (layer.at != null || layer.path || layer.follow) {
+        errors.push(`${where}: world places it in the room, so it cannot also have at, path or follow`);
+      }
+
+      if (layer.world && layer.worldPath) {
+        errors.push(`${where}: give either world or worldPath, not both`);
+      }
+
       needWorld(`${where}: world`, layer.world);
-      for (const [k, key] of (layer.worldPath ?? []).entries()) needWorld(`${where}: worldPath.${k}`, key.world);
+
+      for (const [k, key] of (layer.worldPath ?? []).entries()) {
+        needWorld(`${where}: worldPath.${k}`, key.world);
+      }
+
       if (layer.worldPath) {
         layer.worldPath.sort((a, b) => a.frame - b.frame);
-        if (layer.worldPath.some((k, n) => n && k.frame === layer.worldPath[n - 1].frame)) errors.push(`${where}: worldPath has two keys on one frame`);
+
+        if (layer.worldPath.some((k, n) => n && k.frame === layer.worldPath[n - 1].frame)) {
+          errors.push(`${where}: worldPath has two keys on one frame`);
+        }
       }
     }
-    if (layer.type === 'zoom') { needAnchor(where, layer.focus); zooms.push({ ...layer, i }); }
-    if (layer.type === 'text' && layer.pointer && (typeof layer.at !== 'string' || !layer.offset)) warnings.push(`${where}: a pointer needs an anchor in 'at' and an 'offset' to point from`);
+
+    if (layer.type === 'zoom') {
+      needAnchor(where, layer.focus);
+      zooms.push({ ...layer, i });
+    }
+
+    if (layer.type === 'text' && layer.pointer && (typeof layer.at !== 'string' || !layer.offset)) {
+      warnings.push(`${where}: a pointer needs an anchor in 'at' and an 'offset' to point from`);
+    }
+
     if (layer.path) {
       layer.path.sort((a, b) => a.frame - b.frame);
+
       for (const [k, key] of layer.path.entries()) {
         const here = `${where}: path.${k}`;
-        if (key.at != null ? key.x != null || key.y != null : key.x == null || key.y == null) errors.push(`${here}: give either x and y, or at`);
+
+        if (key.at != null ? key.x != null || key.y != null : key.x == null || key.y == null) {
+          errors.push(`${here}: give either x and y, or at`);
+        }
+
         needPlace(here, key.at);
-        if (k && key.frame === layer.path[k - 1].frame) errors.push(`${here}: two keys on frame ${key.frame}`);
+
+        if (k && key.frame === layer.path[k - 1].frame) {
+          errors.push(`${here}: two keys on frame ${key.frame}`);
+        }
       }
-      if (layer.path[0].frame > layer.from || layer.path.at(-1).frame < layer.to - 1) warnings.push(`${where}: the path does not cover the whole layer, so it waits at its first or last point`);
-      if (layer.at != null) warnings.push(`${where}: has both a path and 'at'; the path is used`);
+
+      if (layer.path[0].frame > layer.from || layer.path.at(-1).frame < layer.to - 1) {
+        warnings.push(`${where}: the path does not cover the whole layer, so it waits at its first or last point`);
+      }
+
+      if (layer.at != null) {
+        warnings.push(`${where}: has both a path and 'at'; the path is used`);
+      }
     }
-    if ((layer.type === 'image' && layer.place === 'screen' || ['sequence', 'sticker', 'graphic', 'model', 'particles'].includes(layer.type)) && layer.at == null && !layer.path) layer.at = { x: 0.5, y: 0.5 };
+
+    if ((layer.type === 'image' && layer.place === 'screen'
+      || ['sequence', 'sticker', 'graphic', 'model', 'particles'].includes(layer.type))
+      && layer.at == null && !layer.path) {
+      layer.at = { x: 0.5, y: 0.5 };
+    }
+
     if (layer.type === 'model') {
       const model = models[layer.asset];
-      if (!model) { errors.push(`${where}: no 3D model called '${layer.asset}' has been uploaded for this footage (create_upload_link kind model)`); continue; }
+
+      if (!model) {
+        errors.push(
+          `${where}: no 3D model called '${layer.asset}' has been uploaded for this footage `
+            + `(create_upload_link kind model)`,
+        );
+
+        continue;
+      }
+
       const names = model.animations || [];
+
       const known = (name, here) => {
-        if (!names.includes(name)) errors.push(`${here}: '${layer.asset}' has no animation called '${name}' (${names.length ? `it has ${names.map(n => `'${n}'`).join(', ')}` : 'it has none'})`);
+        if (!names.includes(name)) {
+          errors.push(
+            `${here}: '${layer.asset}' has no animation called '${name}' `
+              + `(${names.length ? `it has ${names.map(n => `'${n}'`).join(', ')}` : 'it has none'})`,
+          );
+        }
       };
-      if (layer.animation) known(layer.animation, `${where}: animation`);
+
+      if (layer.animation) {
+        known(layer.animation, `${where}: animation`);
+      }
+
       layer.actions?.sort((a, b) => a.frame - b.frame);
+
       for (const [k, a] of (layer.actions || []).entries()) {
         known(a.animation, `${where}: actions.${k}`);
-        if (a.frame < layer.from || a.frame >= layer.to) warnings.push(`${where}: actions.${k} at frame ${a.frame} is outside the layer (${layer.from}–${layer.to - 1})`);
+
+        if (a.frame < layer.from || a.frame >= layer.to) {
+          warnings.push(
+            `${where}: actions.${k} at frame ${a.frame} is outside the layer (${layer.from}–${layer.to - 1})`,
+          );
+        }
       }
-      if (!layer.animation && !layer.actions?.length && names.length) warnings.push(`${where}: no animation is chosen, so '${layer.asset}' holds still; it has ${names.map(n => `'${n}'`).join(', ')}`);
-      if (layer.facing === 'path' && !layer.path) warnings.push(`${where}: facing path needs a path`);
+
+      if (!layer.animation && !layer.actions?.length && names.length) {
+        warnings.push(
+          `${where}: no animation is chosen, so '${layer.asset}' holds still; it has `
+            + `${names.map(n => `'${n}'`).join(', ')}`,
+        );
+      }
+
+      if (layer.facing === 'path' && !layer.path) {
+        warnings.push(`${where}: facing path needs a path`);
+      }
     }
+
     if (layer.type === 'graphic') {
       // A saved graphic is copied in, so this version keeps rendering the same even if the library changes.
-      if (layer.use && layer.elements) { errors.push(`${where}: give either use or elements, not both`); continue; }
+      if (layer.use && layer.elements) {
+        errors.push(`${where}: give either use or elements, not both`);
+        continue;
+      }
+
       if (layer.use) {
         const def = graphics[layer.use];
-        if (!def) { errors.push(`${where}: no saved graphic called '${layer.use}' (see list_graphics)`); continue; }
-        Object.assign(layer, { viewBox: layer.viewBox ?? def.viewBox, loop: layer.loop ?? def.loop, elements: structuredClone(def.elements) });
+
+        if (!def) {
+          errors.push(`${where}: no saved graphic called '${layer.use}' (see list_graphics)`);
+          continue;
+        }
+
+        Object.assign(layer, {
+          viewBox: layer.viewBox ?? def.viewBox,
+          loop: layer.loop ?? def.loop,
+          elements: structuredClone(def.elements),
+        });
       }
-      if (!layer.elements) { errors.push(`${where}: needs elements, or use with a saved graphic's name`); continue; }
+
+      if (!layer.elements) {
+        errors.push(`${where}: needs elements, or use with a saved graphic's name`);
+        continue;
+      }
+
       errors.push(...graphicErrors(layer, where));
     }
+
     if (layer.type === 'particles') {
-      if (layer.shape && layer.asset) { errors.push(`${where}: give either shape or asset, not both`); continue; }
-      if (!layer.shape && !layer.asset) layer.shape = 'dot';
-      if (layer.asset && !assets[layer.asset]) { errors.push(`${where}: no picture called '${layer.asset}' has been uploaded for this footage`); continue; }
+      if (layer.shape && layer.asset) {
+        errors.push(`${where}: give either shape or asset, not both`);
+        continue;
+      }
+
+      if (!layer.shape && !layer.asset) {
+        layer.shape = 'dot';
+      }
+
+      if (layer.asset && !assets[layer.asset]) {
+        errors.push(`${where}: no picture called '${layer.asset}' has been uploaded for this footage`);
+        continue;
+      }
+
       const alive = layer.burst + (layer.rate * layer.life) / FPS;
-      if (alive > 600) errors.push(`${where}: up to ${Math.round(alive)} particles would be on screen at once; keep it under 600 (lower rate, life or burst)`);
-      if (!layer.rate && !layer.burst) warnings.push(`${where}: rate and burst are both 0, so nothing is emitted`);
+
+      if (alive > 600) {
+        errors.push(
+          `${where}: up to ${Math.round(alive)} particles would be on screen at once; keep it under 600 `
+            + `(lower rate, life or burst)`,
+        );
+      }
+
+      if (!layer.rate && !layer.burst) {
+        warnings.push(`${where}: rate and burst are both 0, so nothing is emitted`);
+      }
     }
-    if (layer.type === 'text' && layer.count && !layer.text.includes('{n}') && !/^[\d.,\s-]+$/.test(layer.text)) warnings.push(`${where}: count is set but the text has no {n}, so the number replaces the whole text`);
+
+    if (layer.type === 'text' && layer.count && !layer.text.includes('{n}') && !/^[\d.,\s-]+$/.test(layer.text)) {
+      warnings.push(`${where}: count is set but the text has no {n}, so the number replaces the whole text`);
+    }
+
     if (layer.type === 'sequence') {
       const sheet = assets[layer.asset];
-      if (!sheet) { errors.push(`${where}: no sprite sheet called '${layer.asset}' has been uploaded for this footage`); continue; }
-      const columns = layer.columns ?? layer.count, rows = Math.ceil(layer.count / columns);
-      if (sheet.width % columns) warnings.push(layer.columns ? `${where}: '${layer.asset}' is ${sheet.width} px wide, which does not split evenly into ${columns} columns; check count and columns` : `${where}: '${layer.asset}' is ${sheet.width} px wide, which does not split evenly into ${layer.count} frames; check the count`);
-      if (sheet.height % rows) warnings.push(`${where}: '${layer.asset}' is ${sheet.height} px tall, which does not split evenly into ${rows} rows; check count and columns`);
-      if (layer.range && (layer.range.to < layer.range.from || layer.range.to >= layer.count)) errors.push(`${where}: range must run from..to within the sheet's ${layer.count} frames (0–${layer.count - 1})`);
+
+      if (!sheet) {
+        errors.push(`${where}: no sprite sheet called '${layer.asset}' has been uploaded for this footage`);
+        continue;
+      }
+
+      const columns = layer.columns ?? layer.count;
+      const rows = Math.ceil(layer.count / columns);
+
+      if (sheet.width % columns) {
+        warnings.push(
+          layer.columns
+            ? `${where}: '${layer.asset}' is ${sheet.width} px wide, which does not split evenly into ${columns} `
+              + `columns; check count and columns`
+            : `${where}: '${layer.asset}' is ${sheet.width} px wide, which does not split evenly into `
+              + `${layer.count} frames; check the count`,
+        );
+      }
+
+      if (sheet.height % rows) {
+        warnings.push(
+          `${where}: '${layer.asset}' is ${sheet.height} px tall, which does not split evenly into ${rows} `
+            + `rows; check count and columns`,
+        );
+      }
+
+      if (layer.range && (layer.range.to < layer.range.from || layer.range.to >= layer.count)) {
+        errors.push(
+          `${where}: range must run from..to within the sheet's ${layer.count} frames (0–${layer.count - 1})`,
+        );
+      }
     }
+
     if (layer.type === 'image') {
       const asset = assets[layer.asset];
-      if (!asset) { errors.push(`${where}: no image called '${layer.asset}' has been uploaded for this footage`); continue; }
+
+      if (!asset) {
+        errors.push(`${where}: no image called '${layer.asset}' has been uploaded for this footage`);
+        continue;
+      }
+
       const ratio = (asset.width / asset.height) / (footage.width / footage.height);
-      if (layer.place === 'footage' && Math.abs(ratio - 1) > 0.03) warnings.push(`${where}: '${layer.asset}' is not the shape of the footage (${asset.width}×${asset.height} against ${footage.width}×${footage.height}), so it is cropped to cover it`);
+
+      if (layer.place === 'footage' && Math.abs(ratio - 1) > 0.03) {
+        warnings.push(
+          `${where}: '${layer.asset}' is not the shape of the footage (${asset.width}×${asset.height} against `
+            + `${footage.width}×${footage.height}), so it is cropped to cover it`,
+        );
+      }
     }
   }
+
   // A grade's look is turned into plain numbers here and kept with the edit, so the renderer needs no
   // copy of the board and an edit saved today still grades the same if a look is tuned tomorrow.
   const grades = [];
+
   for (const [i, layer] of spec.layers.entries()) {
-    if (layer.type !== 'grade') continue;
+    if (layer.type !== 'grade') {
+      continue;
+    }
+
     layer.knobs = gradeKnobs(layer);
+
     if (typeof layer.bars === 'string' && layer.bars !== 'none') {
       const [width, height] = FORMATS[spec.format];
       const strip = width / Number(layer.bars);
-      if (strip < height * 0.6) warnings.push(`layers.${i} (grade): bars ${layer.bars} on a ${width}x${height} frame leave a strip only ${Math.round(strip)}px tall, so most of the picture is black. On a tall video give bars as a fraction of the height instead, e.g. 0.08`);
+
+      if (strip < height * 0.6) {
+        warnings.push(
+          `layers.${i} (grade): bars ${layer.bars} on a ${width}x${height} frame leave a strip only `
+            + `${Math.round(strip)}px tall, so most of the picture is black. On a tall video give bars as a fraction `
+            + `of the height instead, e.g. 0.08`,
+        );
+      }
     }
+
     if (layer.clip) {
       usedClips.add(layer.clip);
-      if (!named.has(layer.clip)) errors.push(`layers.${i} (grade): there is no clip called '${layer.clip}'; name it under clips`);
+
+      if (!named.has(layer.clip)) {
+        errors.push(`layers.${i} (grade): there is no clip called '${layer.clip}'; name it under clips`);
+      }
     }
+
     grades.push({ ...layer, i });
   }
+
   // Two grades may only be on at once if they cannot both apply to the same picture: one per clip is
   // the point of clip grades, but two that both cover everything would be arguing over the same frame.
   grades.sort((a, b) => a.from - b.from);
+
   for (let k = 1; k < grades.length; k++) {
-    const now = grades[k], before = grades[k - 1];
-    if (now.from >= before.to) continue;
-    if (now.clip && before.clip && now.clip !== before.clip) continue;
+    const now = grades[k];
+    const before = grades[k - 1];
+
+    if (now.from >= before.to) {
+      continue;
+    }
+
+    if (now.clip && before.clip && now.clip !== before.clip) {
+      continue;
+    }
+
     const which = now.clip ? `for clip '${now.clip}'` : 'covering everything';
-    errors.push(`layers.${now.i} (grade): overlaps the grade in layers.${before.i} ${which}; one grade at a time over the same pictures`);
+
+    errors.push(
+      `layers.${now.i} (grade): overlaps the grade in layers.${before.i} ${which}; one grade at a `
+        + `time over the same pictures`,
+    );
   }
+
   zooms.sort((a, b) => a.from - b.from);
-  for (let k = 1; k < zooms.length; k++)
-    if (zooms[k].from < zooms[k - 1].to) errors.push(`layers.${zooms[k].i} (zoom): overlaps the zoom in layers.${zooms[k - 1].i}; one zoom at a time`);
-  for (const name of Object.keys(spec.anchors)) if (!used.has(name)) warnings.push(`anchors.${name}: defined but not used by any layer`);
-  for (const point of spec.world) if (!usedWorld.has(point.name)) warnings.push(`world '${point.name}': defined but not used by any layer`);
-  for (const c of spec.clips) if (!usedClips.has(c.name)) warnings.push(`clips '${c.name}': named but not played by any part of the timeline`);
+
+  for (let k = 1; k < zooms.length; k++) {
+    if (zooms[k].from < zooms[k - 1].to) {
+      errors.push(`layers.${zooms[k].i} (zoom): overlaps the zoom in `
+        + `layers.${zooms[k - 1].i}; one zoom at a time`);
+    }
+  }
+
+  for (const name of Object.keys(spec.anchors)) {
+    if (!used.has(name)) {
+      warnings.push(`anchors.${name}: defined but not used by any layer`);
+    }
+  }
+
+  for (const point of spec.world) {
+    if (!usedWorld.has(point.name)) {
+      warnings.push(`world '${point.name}': defined but not used by any layer`);
+    }
+  }
+
+  for (const c of spec.clips) {
+    if (!usedClips.has(c.name)) {
+      warnings.push(`clips '${c.name}': named but not played by any part of the timeline`);
+    }
+  }
+
   // Each cue gets its length worked out (to the end of the file unless cut), so the renderer and the
   // answer to ChatGPT agree on when every sound starts and stops.
   const cues = [];
   spec.sounds.sort((a, b) => a.at - b.at);
+
   for (const [i, cue] of spec.sounds.entries()) {
-    const where = `sounds.${i} (${cue.sound})`, file = sounds[cue.sound];
-    if (!file) { errors.push(`${where}: no sound called '${cue.sound}' has been uploaded for this footage (create_upload_link kind sound, or add_sound)`); continue; }
-    if (cue.at >= duration) { errors.push(`${where}: starts at frame ${cue.at}, but the edit is only ${duration} frames long`); continue; }
-    if (cue.from >= file.seconds) { errors.push(`${where}: from ${cue.from} s is past the end of the sound (${file.seconds} s)`); continue; }
+    const where = `sounds.${i} (${cue.sound})`;
+    const file = sounds[cue.sound];
+
+    if (!file) {
+      errors.push(
+        `${where}: no sound called '${cue.sound}' has been uploaded for this footage (create_upload_link `
+          + `kind sound, or add_sound)`,
+      );
+
+      continue;
+    }
+
+    if (cue.at >= duration) {
+      errors.push(`${where}: starts at frame ${cue.at}, but the edit is only ${duration} frames long`);
+      continue;
+    }
+
+    if (cue.from >= file.seconds) {
+      errors.push(`${where}: from ${cue.from} s is past the end of the sound (${file.seconds} s)`);
+      continue;
+    }
+
     const natural = Math.max(1, Math.floor(((file.seconds + tailSeconds(cue) - cue.from) / cue.speed) * FPS));
+
     if (cue.volumeKeys) {
       cue.volumeKeys.sort((a, b) => a.frame - b.frame);
-      if (cue.volumeKeys.some((k, n) => n && k.frame === cue.volumeKeys[n - 1].frame)) { errors.push(`${where}: volumeKeys has two keys on one frame`); continue; }
+
+      if (cue.volumeKeys.some((k, n) => n && k.frame === cue.volumeKeys[n - 1].frame)) {
+        errors.push(`${where}: volumeKeys has two keys on one frame`);
+        continue;
+      }
     }
-    if (cue.loop && cue.length == null) { errors.push(`${where}: a looping sound needs a length in frames`); continue; }
+
+    if (cue.loop && cue.length == null) {
+      errors.push(`${where}: a looping sound needs a length in frames`);
+      continue;
+    }
+
     let length = cue.length ?? natural;
-    if (!cue.loop && length > natural) { warnings.push(`${where}: the sound ends after ${natural} frames, before its length of ${length}`); length = natural; }
-    if (cue.at + length > duration) { warnings.push(`${where}: runs past the end of the edit, so it is cut at frame ${duration}`); length = duration - cue.at; }
+
+    if (!cue.loop && length > natural) {
+      warnings.push(`${where}: the sound ends after ${natural} frames, before its length of ${length}`);
+      length = natural;
+    }
+
+    if (cue.at + length > duration) {
+      warnings.push(`${where}: runs past the end of the edit, so it is cut at frame ${duration}`);
+      length = duration - cue.at;
+    }
+
     cue.length = length;
-    cue.fadeIn = Math.min(cue.fadeIn, length); cue.fadeOut = Math.min(cue.fadeOut, length - cue.fadeIn);
-    cues.push({ sound: cue.sound, output: [cue.at, cue.at + length], seconds: [Math.round((cue.at / FPS) * 100) / 100, Math.round(((cue.at + length) / FPS) * 100) / 100], ...(cue.loop ? { loop: true } : {}) });
+    cue.fadeIn = Math.min(cue.fadeIn, length);
+    cue.fadeOut = Math.min(cue.fadeOut, length - cue.fadeIn);
+
+    cues.push({
+      sound: cue.sound,
+      output: [cue.at, cue.at + length],
+      seconds: [Math.round((cue.at / FPS) * 100) / 100, Math.round(((cue.at + length) / FPS) * 100) / 100],
+      ...(cue.loop ? { loop: true } : {}),
+    });
   }
+
   if (spec.sourceKeys) {
     spec.sourceKeys.sort((a, b) => a.frame - b.frame);
-    if (spec.sourceKeys.some((k, n) => n && k.frame === spec.sourceKeys[n - 1].frame)) errors.push('sourceKeys: two keys on one frame');
-  }
-  if (spec.audio === 'mute' && (spec.sourceVolume !== 1 || spec.sourceKeys || spec.sounds.some(c => c.duck != null))) warnings.push('sourceVolume, sourceKeys and duck have no effect while audio is mute');
 
-  const needsDepth = spec.layers.some(l => ['blur', 'fog', 'parallax'].includes(l.type) || l.depth != null || l.path?.some(k => k.depth != null));
-  if (spec.depth) {
-    if (spec.depth.video && !footage.depth) errors.push('depth.video: this clip has no per-frame depth yet; compute it from create_download_link and upload it with create_upload_link kind depth');
-    for (const [i, st] of (spec.depth.stills || []).entries()) {
-      if (st.to <= st.from) errors.push(`depth.stills.${i}: 'to' must be after 'from'`);
-      const a = assets[st.asset];
-      if (!a) errors.push(`depth.stills.${i}: no picture called '${st.asset}' has been uploaded for this footage`);
-      else if (Math.abs((a.width / a.height) / (footage.width / footage.height) - 1) > 0.03) warnings.push(`depth.stills.${i}: '${st.asset}' is not the shape of the footage, so it will not line up`);
+    if (spec.sourceKeys.some((k, n) => n && k.frame === spec.sourceKeys[n - 1].frame)) {
+      errors.push('sourceKeys: two keys on one frame');
     }
-    if (!spec.depth.video && !spec.depth.stills?.length) errors.push('depth: give video: true or at least one still');
-  } else if (needsDepth) errors.push('Some layers use depth (depth values, blur, fog or parallax), but the edit has no depth source; add "depth": {"video": true} or depth stills');
-  if (errors.length) throw fail(errors.join('; '));
+  }
+
+  if (spec.audio === 'mute' && (spec.sourceVolume !== 1 || spec.sourceKeys || spec.sounds.some(c => c.duck != null))) {
+    warnings.push('sourceVolume, sourceKeys and duck have no effect while audio is mute');
+  }
+
+  const needsDepth = spec.layers.some(
+    l => ['blur', 'fog', 'parallax'].includes(l.type) || l.depth != null || l.path?.some(k => k.depth != null),
+  );
+
+  if (spec.depth) {
+    if (spec.depth.video && !footage.depth) {
+      errors.push(
+        'depth.video: this clip has no per-frame depth yet; compute it from create_download_link and upload it with '
+          + 'create_upload_link kind depth',
+      );
+    }
+
+    for (const [i, st] of (spec.depth.stills || []).entries()) {
+      if (st.to <= st.from) {
+        errors.push(`depth.stills.${i}: 'to' must be after 'from'`);
+      }
+
+      const a = assets[st.asset];
+
+      if (!a) {
+        errors.push(`depth.stills.${i}: no picture called '${st.asset}' has been uploaded for this footage`);
+      } else if (Math.abs((a.width / a.height) / (footage.width / footage.height) - 1) > 0.03) {
+        warnings.push(`depth.stills.${i}: '${st.asset}' is not the shape of the footage, so it will not line up`);
+      }
+    }
+
+    if (!spec.depth.video && !spec.depth.stills?.length) {
+      errors.push('depth: give video: true or at least one still');
+    }
+  } else if (needsDepth) {
+    errors.push('Some layers use depth (depth values, blur, fog or parallax), but the edit has no '
+      + 'depth source; add "depth": {"video": true} or depth stills');
+  }
+
+  if (errors.length) {
+    throw fail(errors.join('; '));
+  }
 
   const [width, height] = FORMATS[spec.format];
+
   return {
     spec,
     plan: { width, height, fps: FPS, durationInFrames: duration, segments },
     timeline: segments.map(s => ({
       ...(s.hold
         ? { output: [s.from, s.to], hold: s.source }
-        : { output: [s.from, s.to], source: [s.source, s.sourceTo], ...(s.speed !== 1 ? { speed: s.speed } : {}), ...(s.smooth ? { smooth: true } : {}) }),
-      ...(s.clip ? { clip: s.clip } : {}), ...(s.mirror ? { mirror: true } : {}), ...(s.reframe ? { reframe: s.reframe.scaleTo != null || s.reframe.xTo != null || s.reframe.yTo != null ? 'moving' : 'fixed' } : {}),
+        : {
+          output: [s.from, s.to], source: [s.source, s.sourceTo], ...(s.speed !== 1 ? { speed: s.speed } : {}),
+          ...(s.smooth ? { smooth: true } : {}),
+        }),
+      ...(s.clip ? { clip: s.clip } : {}), ...(s.mirror ? { mirror: true } : {}),
+      ...(s.reframe ? {
+        reframe: s.reframe.scaleTo != null || s.reframe.xTo != null || s.reframe.yTo != null ? 'moving' : 'fixed',
+      } : {}),
     })),
     cues,
     warnings,
@@ -859,8 +1694,15 @@ export function planEdit(input, footage, assets = {}, graphics = {}, models = {}
 // The source frame on screen at an output frame, for labelling previews.
 export function sourceFrameAt(segments, frame) {
   const s = segments.find(x => frame >= x.from && frame < x.to) || segments.at(-1);
-  if (!s) return 0;
-  if (s.hold) return s.source;
+
+  if (!s) {
+    return 0;
+  }
+
+  if (s.hold) {
+    return s.source;
+  }
+
   return Math.min(s.sourceTo - 1, s.source + Math.floor((frame - s.from) * s.speed));
 }
 
@@ -868,18 +1710,53 @@ export function sourceFrameAt(segments, frame) {
 // each layer once it is fully on, kept apart so no two show nearly the same moment, then filled out to
 // `count` with the frames furthest from any already chosen.
 export function previewFrames(plan, layers, count = 8) {
-  const d = plan.durationInFrames, gap = Math.max(1, Math.floor(d / (count * 2)));
-  const marks = [0, d - 1, ...layers.map(l => Math.min(d - 1, Math.max(l.from, Math.min(l.to - 1, l.from + l.in + Math.floor((l.to - l.from - l.in - l.out) / 2)))))];
+  const d = plan.durationInFrames;
+  const gap = Math.max(1, Math.floor(d / (count * 2)));
+
+  const marks = [
+    0,
+    d - 1,
+    ...layers.map(l =>
+      Math.min(
+        d - 1,
+        Math.max(l.from, Math.min(l.to - 1, l.from + l.in + Math.floor((l.to - l.from - l.in - l.out) / 2))),
+      ),
+    ),
+  ];
+
   const kept = [];
-  for (const m of [...new Set(marks)].sort((a, b) => a - b)) if (!kept.some(k => Math.abs(k - m) < gap)) kept.push(m);
-  let frames = kept.length > count ? Array.from({ length: count }, (_, i) => kept[Math.round((i * (kept.length - 1)) / (count - 1))]) : kept;
-  const distance = f => Math.min(...frames.map(k => Math.abs(k - f)));
+
+  for (const m of [...new Set(marks)].sort((a, b) => a - b)) {
+    if (!kept.some(k => Math.abs(k - m) < gap)) {
+      kept.push(m);
+    }
+  }
+
+  let frames =
+    kept.length > count
+      ? Array.from({ length: count }, (_, i) => kept[Math.round((i * (kept.length - 1)) / (count - 1))])
+      : kept;
+
+  const distance = f => {
+    return Math.min(...frames.map(k => Math.abs(k - f)));
+  };
+
   while (frames.length < Math.min(count, d)) {
     let best = -1;
-    for (let f = 0; f < d; f++) if (best < 0 || distance(f) > distance(best)) best = f;
-    if (distance(best) === 0) break;
+
+    for (let f = 0; f < d; f++) {
+      if (best < 0 || distance(f) > distance(best)) {
+        best = f;
+      }
+    }
+
+    if (distance(best) === 0) {
+      break;
+    }
+
     frames = [...frames, best];
   }
+
   return [...new Set(frames)].sort((a, b) => a - b);
 }
 

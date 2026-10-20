@@ -31,6 +31,8 @@ workspace, dashboard and ChatGPT plugin alike, with `scripts/remote.sh user add 
 - `src/providers.js` — Postiz: carousels `schedule`, stories `draft`; 429 → requeue in 10 min. WhatsApp: upcoming events only.
 - `src/app.js`, `src/oauth.js`, `src/cli.js`, `public/app.js`, `public/style.css`, `test/system.test.js` (42 tests pass).
 - Docs: `docs/chatgpt-task.md` (ChatGPT prompt), `docs/go-live.md`, `README.md`.
+- ChatGPT↔Claude relay (docs/claude-relay.md): `src/relay.js` (threads with turns, payload diffs, the five `relay_*` MCP
+  tools, `/api/relay` for the dashboard tab), `test/relay.test.js`. Who is calling comes from the OAuth client name.
 - Animated edits over your own footage (docs/chatgpt-video.md): `src/footage.js` (upload streaming, ffprobe, 30 fps
   working copy, contact sheets, gridded frames), `src/edits.js` (edit JSON schema, output↔source timeline, the guide
   ChatGPT reads), `src/animate.js` (dashboard routes, serial processing and render queues, the footage MCP tools),

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
@@ -671,4 +671,53 @@ test('Sprite sheets are built from single frames, and sprites, particles and tex
   await refuse({ type: 'particles', from: 0, to: 60, shape: 'dot', asset: 'spark' }, /either shape or asset/);
   const uneven = dataOf(await save([{ type: 'sequence', from: 0, to: 30, asset: 'spark', count: 5, columns: 7 }]));
   assert.match(uneven.warnings.join(), /does not split evenly into 7 columns/);
+});
+
+test('A finished film kept as a master downloads byte for byte, beside its working copy', async t => {
+  const { createHash } = await import('node:crypto');
+  const { dir, store, base, mcp } = await setup(t);
+  const film = '0123456789abcdef01234567', plain = '89abcdef0123456789abcdef';
+  for (const id of [film, plain]) {
+    store.addFootage(id, `Film ${id.slice(0, 4)}`);
+    store.updateFootage(id, { status: 'ready', info: { work: { width: 64, height: 96, fps: 30, frames: 60, duration: 2, audio: true } } });
+    await mkdir(footageFiles(dir, id).dir, { recursive: true });
+    await writeFile(footageFiles(dir, id).work, Buffer.from(`working copy of ${id}`));
+  }
+  const master = Buffer.from(Array.from({ length: 70000 }, (_, i) => (i * 37) % 256));
+  await writeFile(footageFiles(dir, film).master, master);
+  const client = await mcp();
+  const listed = dataOf(await client.callTool({ name: 'list_footage', arguments: {} }));
+  assert.deepEqual(listed.find(c => c.id === film).master, { bytes: master.length });
+  assert.equal(listed.find(c => c.id === plain).master, null);
+  const link = dataOf(await client.callTool({ name: 'create_download_link', arguments: { footage: film, file: 'master' } }));
+  assert.equal(link.bytes, master.length);
+  assert.equal(link.sha256, createHash('sha256').update(master).digest('hex'));
+  assert.deepEqual(Buffer.from(await (await fetch(base + new URL(link.url).pathname)).arrayBuffer()), master, 'the master, exactly as kept');
+  const work = dataOf(await client.callTool({ name: 'create_download_link', arguments: { footage: film } }));
+  assert.equal(work.file, 'work');
+  assert.equal(Buffer.from(await (await fetch(base + new URL(work.url).pathname)).arrayBuffer()).toString(), `working copy of ${film}`, 'old-style links still serve the working copy');
+  const none = await client.callTool({ name: 'create_download_link', arguments: { footage: plain, file: 'master' } });
+  assert.ok(none.isError); assert.match(none.content[0].text, /keeps no master/);
+  const picture = await client.callTool({ name: 'create_upload_link', arguments: { footage: plain, kind: 'picture', name: 'poster', keep: true } });
+  assert.ok(picture.isError); assert.match(picture.content[0].text, /Only a video upload can be kept/);
+});
+
+test('A video uploaded with keep stays as sent as the clip master, and only an MP4 can be kept', needsFfmpeg, async t => {
+  const { dir, store, base, settle, mcp } = await setup(t);
+  const client = await mcp();
+  const source = await rampClip(dir), sent = await readFile(source);
+  const link = dataOf(await client.callTool({ name: 'create_upload_link', arguments: { kind: 'video', title: 'Finished film', keep: true } }));
+  assert.equal(link.keep, true);
+  assert.equal((await fetch(base + new URL(link.url).pathname, { method: 'PUT', body: sent })).status, 201);
+  await settle();
+  assert.equal(store.footage(link.footage).status, 'ready');
+  assert.deepEqual(await readFile(footageFiles(dir, link.footage).master), sent, 'kept byte for byte');
+  assert.ok(!existsSync(footageFiles(dir, link.footage).source), 'moved, not copied');
+  const mkv = join(dir, 'film.mkv'); ffmpeg(['-i', source, '-c', 'copy', mkv]);
+  const other = dataOf(await client.callTool({ name: 'create_upload_link', arguments: { kind: 'video', title: 'Not an MP4', keep: true } }));
+  const refused = await fetch(base + new URL(other.url).pathname, { method: 'PUT', body: await readFile(mkv) });
+  assert.equal(refused.status, 400); assert.match((await refused.json()).error, /needs an MP4/);
+  const plain = dataOf(await client.callTool({ name: 'create_upload_link', arguments: { kind: 'video', title: 'Ordinary clip' } }));
+  await fetch(base + new URL(plain.url).pathname, { method: 'PUT', body: sent }); await settle();
+  assert.ok(!existsSync(footageFiles(dir, plain.footage).master), 'without keep the original is still dropped');
 });

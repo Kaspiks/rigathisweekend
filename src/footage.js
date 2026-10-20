@@ -20,7 +20,7 @@ export const footageDir = (dir, id) => {
 };
 export const footageFiles = (dir, id) => {
   const base = footageDir(dir, id);
-  return { dir: base, source: join(base, 'source'), work: join(base, 'work.mp4'), poster: join(base, 'poster.jpg'), assets: join(base, 'assets'), renders: join(base, 'renders'), depth: join(base, 'depth'), models: join(base, 'models'), sounds: join(base, 'sounds') };
+  return { dir: base, source: join(base, 'source'), work: join(base, 'work.mp4'), master: join(base, 'master.mp4'), poster: join(base, 'poster.jpg'), assets: join(base, 'assets'), renders: join(base, 'renders'), depth: join(base, 'depth'), models: join(base, 'models'), sounds: join(base, 'sounds') };
 };
 // Limits can be raised in .env; the defaults suit phone clips on a 4 vCPU server without a GPU.
 export const limits = (env = process.env) => ({
