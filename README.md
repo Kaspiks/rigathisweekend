@@ -109,7 +109,7 @@ WAHA's image is pinned to an immutable digest and is configurable with `WAHA_IMA
 
 ## Research: choose one owner
 
-**Existing ChatGPT task:** follow [the MCP instructions](docs/chatgpt-task.md). The custom server exposes `submit_weekend_events`, `list_weekend_editions`, and `approve_weekend_edition` over Streamable HTTP. It is also a single-user OAuth 2.1 authorization server (dynamic registration, PKCE, login with `ADMIN_TOKEN`), which is what ChatGPT's custom apps require; direct bearer use of `ADMIN_TOKEN` also works. Whether ChatGPT scheduled tasks can call custom apps unattended still needs testing in your account.
+**Existing ChatGPT task:** follow [the MCP instructions](docs/chatgpt-task.md). The custom server exposes `submit_weekend_events`, `list_weekend_editions`, and `approve_weekend_edition` over Streamable HTTP, plus the footage tools described in [docs/chatgpt-video.md](docs/chatgpt-video.md). It is also an OAuth 2.1 authorization server (dynamic registration, PKCE, login with `ADMIN_TOKEN` or a user's own name and password), which is what ChatGPT's custom apps require; direct bearer use of `ADMIN_TOKEN` also works. Whether ChatGPT scheduled tasks can call custom apps unattended still needs testing in your account.
 
 **VPS scheduler:** set `OPENAI_API_KEY`, an available web-search-capable `OPENAI_MODEL`, and `RESEARCH_SCHEDULE_ENABLED=true`. Research runs Thursday at 18:00 Riga time, with Friday-before-09:00 catch-up. This incurs separate OpenAI API charges. It stores consulted source URLs and the response ID. Returned event sources must occur in the web-search evidence; this is a provenance check, not a guarantee of factual correctness. Review actual listings before publication.
 
@@ -124,6 +124,18 @@ docker compose run --rm app node src/cli.js research 2026-09-18
 ```
 
 Research failures are visible in the dashboard and worker logs. Failed scheduled runs do not retry automatically, avoiding an unexpected loop of paid calls. Use the dashboard's research button or CLI to rerun. Choose either ChatGPT or the API scheduler to avoid duplicate research. Incoming submissions are deduplicated by content. Approval claims each of the edition's weekend days, so two editions can never publish the same day twice, while a later edition can still cover a day nothing has claimed yet.
+
+## Other people
+
+Everyone works in the same workspace: the same editions, footage, edits and house rules. Give someone their own login instead of your `ADMIN_TOKEN`:
+
+```sh
+scripts/remote.sh user add anna     # prints her password once; only a hash is kept
+scripts/remote.sh user list
+scripts/remote.sh user remove anna  # ends her dashboard login and her ChatGPT connection
+```
+
+Locally the same commands are `docker compose run --rm --no-deps app node src/cli.js user …`. The name and password open the dashboard (in place of `admin` and the token) and the sign-in page ChatGPT shows when she adds the plugin with the same MCP URL. Passwords are generated, never chosen; to replace one, remove the user and add them again. A user can do everything you can in the dashboard and through ChatGPT, including approving an edition, so add only people you would hand the token to. What a login adds is that it can be taken away from one person without changing anything for the others. The server's `.env` and the user list stay with whoever has SSH access.
 
 ## Review and enable delivery
 
@@ -142,6 +154,14 @@ Each edition has a **Story grids** section with one block per day. Tick up to si
 Once a video is rendered, **Send as Reel draft** and **Send as Story draft** hand it to Postiz through the same delivery ledger as the carousels: the file is uploaded and a **draft** is created (a single-video Instagram post is a Reel; the Story button sets the story type instead). Drafts never publish by themselves, so you watch it in Postiz and schedule it there. The Reel draft carries a caption listing that day's events with their short links; a Story carries none. Each kind can be sent once per day unless you ask for it again, and `LIVE_PUBLISH=false` keeps the job queued without contacting Postiz.
 
 To work on the animation itself: `cd remotion && npm install && npm run studio`.
+
+## Animated edits over your own footage
+
+The dashboard's **Your footage** section takes your own clips (a restaurant visit, an event, a walk through town) for ChatGPT to animate through the same MCP plugin. Uploads stream to disk, are checked with ffprobe and become a 30 fps working copy (upright, at most 1080×1920, HDR converted), so a frame number means the same frame on a contact sheet, in an edit and in the render. ChatGPT, for example GPT-6 Astra in Work mode, looks at contact sheets and gridded frames, writes the edit as JSON (cuts, freezes, slow motion, anchors that follow things in the shot, text, animated stickers, zooms, moments where the footage is redrawn as a drawing, and animated 3D models placed in the shot), checks real rendered stills, and asks for a draft or final MP4. The render service draws it with the `FootageEdit` Remotion composition, one job at a time, without internet access. An edit is data checked against a schema, never code. Finished videos wait on the dashboard to be watched and downloaded; nothing is published from this section, and the server makes no model or API calls for it. Setup, first checks and a suggested prompt are in [docs/chatgpt-video.md](docs/chatgpt-video.md).
+
+## ChatGPT and Claude together
+
+Connect Claude to the same MCP URL as ChatGPT (a custom connector on claude.ai, or `claude mcp add` in Claude Code). The two can then hand work to each other through the app. One opens a thread asking for a review, reasoning, guidance or an edit, with the thing itself attached (an edit spec, a submission, a caption). The other answers and sends back its changes, and each revision shows exactly what changed. The **ChatGPT ↔ Claude** tab on the dashboard shows every thread and lets you answer, hand a thread to either assistant, or close it. Neither assistant can be started by the server: each acts while its own chat runs, and `relay_wait` lets one wait for the other's answer. Nothing in the relay publishes anything. Setup and prompts are in [docs/claude-relay.md](docs/claude-relay.md).
 
 ## Import schema
 
@@ -185,7 +205,7 @@ The repository is local and independent. No GitHub remote, VPS provisioning, pai
 
 ## Verification
 
-Automated tests cover Riga weekend boundaries, daylight saving changes, source provenance rejection, real image dimensions, organiser photo lookup and its address guards, photo uploads with metadata stripping, cover counts, card hierarchy, caption degradation, the language tag, caption link degradation, duplicate approvals, per-day post grouping, per-event selection and opt-in stories at approval, the Postiz hand-over, on-demand WhatsApp sends, short links and their redirects, ej.uz creation with fallback, day tags and the cover note, automatic retry after a Postiz rate limit, splitting a busy day across carousels, the largest submission the schema allows, atomic job claims, interrupted-send handling, Postiz/WAHA payloads, preview-mode behavior, authentication, real MCP protocol discovery/submission, and the full OAuth flow (registration, login, PKCE, refresh rotation, revocation, MCP-only token scope).
+Automated tests cover Riga weekend boundaries, daylight saving changes, source provenance rejection, real image dimensions, organiser photo lookup and its address guards, photo uploads with metadata stripping, cover counts, card hierarchy, caption degradation, the language tag, caption link degradation, duplicate approvals, per-day post grouping, per-event selection and opt-in stories at approval, the Postiz hand-over, on-demand WhatsApp sends, short links and their redirects, ej.uz creation with fallback, day tags and the cover note, automatic retry after a Postiz rate limit, splitting a busy day across carousels, the largest submission the schema allows, atomic job claims, interrupted-send handling, Postiz/WAHA payloads, preview-mode behavior, authentication, real MCP protocol discovery/submission, the ChatGPT↔Claude relay (turns, waiting, revisions and their changes, who may write as whom, the owner stepping in), and the full OAuth flow (registration, login, PKCE, refresh rotation, revocation, MCP-only token scope). For footage they cover upload checks and clean-up, the 30 fps working copy being frame-exact, edit validation and the output-to-source timeline, pictures, and every footage MCP tool against a stand-in render service, including a busy renderer, failures and restarts.
 
 Live OAuth, OpenAI research, WhatsApp pairing and successful Instagram publication require your accounts and credentials and are not covered by the mocked provider tests.
 

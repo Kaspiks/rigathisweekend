@@ -7,6 +7,7 @@
 #   scripts/remote.sh registration close
 #   scripts/remote.sh integrations        print Postiz integration IDs (needs POSTIZ_API_KEY)
 #   scripts/remote.sh groups              print WhatsApp group IDs (needs a paired WAHA session)
+#   scripts/remote.sh user add NAME       give someone their own login to the dashboard and ChatGPT plugin (also: user remove NAME, user list)
 #   scripts/remote.sh tunnel              open localhost:3011 (server WAHA) through SSH; 3011 avoids clashing with a local stack
 #   scripts/remote.sh ps | logs | backup  status, tail logs, download a backup archive
 set -eu
@@ -35,6 +36,7 @@ case "${1:-}" in
     esac;;
   integrations) cli integrations;;
   groups) cli groups;;
+  user) cli "user ${2:-} ${3:-}";;
   tunnel) echo 'Server WAHA: http://localhost:3011  (Ctrl+C to close)'; ssh -N -L 3011:127.0.0.1:3001 "$VPS";;
   ps) compose ps;;
   logs) compose "logs --tail=${2:-100} -f app worker";;

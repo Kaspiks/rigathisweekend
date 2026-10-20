@@ -12,6 +12,8 @@
 .photo-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px 34px}
 .photo-row img{width:54px;height:auto;border-radius:4px;display:block}
 .photo-row.needs{background:#fbf3e6;border-radius:8px;padding:8px}
+.photo-note{flex-basis:100%;font-size:13px;line-height:1.5;color:var(--muted)}
+.photo-note.error{color:#a13c2e;font-weight:600}
 button.small{padding:7px 11px;font-size:12px}
 .tag{font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:4px 8px;border-radius:20px}
 .tag.ok{background:#e8efdf;color:var(--ink)}
@@ -54,6 +56,39 @@ button.small{padding:7px 11px;font-size:12px}
 .older>summary{font-size:15px}
 .older .edition{border:0;padding:0;margin:0}
 .past-note{display:flex;flex-wrap:wrap;gap:12px;align-items:center;font-size:13px;color:var(--muted);border:1px dashed var(--line);padding:16px 20px}
+.footage{margin-top:10px}
+.clip{background:#fff;border:1px solid var(--line);border-radius:12px;padding:22px;margin-bottom:18px;display:grid;grid-template-columns:150px 1fr;gap:22px}
+.clip-poster img,.clip-poster .blank{width:150px;border-radius:6px;display:block;background:var(--ink)}
+.clip-poster .blank{height:200px}
+.clip h3{font-size:19px;margin:0 0 6px;overflow-wrap:anywhere}
+.clip .meta{font-size:13px;color:var(--muted);margin:0 0 10px}
+.clip .id{font-family:monospace;font-size:12px;color:var(--muted);user-select:all}
+.clip .toolbar{margin-top:12px}
+.clip h4{font-size:14px;margin:18px 0 8px}
+.pictures{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+.pictures figure{margin:0;font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:4px;align-items:flex-start}
+.models{list-style:none;padding:0;margin:0 0 8px;font-size:13px;color:var(--muted)}
+.models li{margin:4px 0}
+.sounds li{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sounds audio{height:32px;max-width:260px}
+.models strong{color:var(--ink,inherit)}
+.pictures img{height:90px;border-radius:4px;background:repeating-conic-gradient(#eee 0 25%,#fff 0 50%) 0 0/16px 16px}
+.renders{list-style:none;padding:0;margin:0}
+.renders li{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}
+.renders video{width:220px;border-radius:6px;background:#000}
+.renders img{width:320px;border-radius:6px}
+.clip pre{max-height:320px;overflow:auto}
+@media(max-width:700px){.clip{grid-template-columns:1fr}.clip-poster img,.clip-poster .blank{width:120px}.renders img{width:100%}}
+
+/* A canvas has no poster frame: show its shape instead. */
+.blank.canvas{display:flex;align-items:center;justify-content:center;background:repeating-linear-gradient(45deg,#17352d,#17352d 8px,#1d4036 8px,#1d4036 16px);color:#d4ed86;font-size:.8rem;letter-spacing:.08em}
+.versions{margin:.4rem 0 .6rem}
+.versions ol{margin:.4rem 0 0;padding-left:1.4rem;font-size:.85rem;line-height:1.5}
+.history-table{width:100%;border-collapse:collapse;font-size:.88rem}
+.history-table th{text-align:left;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:#7b8f88;border-bottom:1px solid #24413a;padding:.4rem .6rem}
+.history-table td{padding:.5rem .6rem;border-bottom:1px solid #1b332d;vertical-align:top}
+.history-table tr:hover td{background:#152b26}
+.history-table a{margin-right:.6rem}
 
 /* Animations tab */
 .tabs{display:flex;gap:.5rem;margin:0 0 1.5rem;border-bottom:1px solid var(--rule,#d7d1c4)}
@@ -87,3 +122,15 @@ button.small{padding:7px 11px;font-size:12px}
 .grid-pick.used{opacity:.45;filter:grayscale(.7);cursor:not-allowed}
 .grid-pick.used img{filter:contrast(.8)}
 .grid-pick .why{display:block;margin-top:4px;color:#8a3a1c;font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.relay-thread summary{line-height:2}
+.relay-thread summary .tag{margin:0 6px}
+.relay-msgs{list-style:none;padding:0;margin:14px 0}
+.relay-msg{border-left:3px solid var(--line);padding:4px 0 4px 16px;margin:16px 0}
+.relay-msg.from-chatgpt{border-left-color:#10a37f}
+.relay-msg.from-claude{border-left-color:#d97757}
+.relay-msg.from-gemini{border-left-color:#4f7df0}
+.relay-msg.from-owner{border-left-color:var(--ink)}
+.relay-meta{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;font-size:13px}
+.relay-text{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink);margin:8px 0;max-width:none}
+.relay-changes{font-family:monospace;font-size:12px;color:var(--muted);margin:6px 0;padding-left:18px;overflow-wrap:anywhere}
+.relay-answer{border-top:1px solid var(--line);padding-top:12px}

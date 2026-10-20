@@ -2,6 +2,7 @@ import { MuseumComposition } from './MuseumComposition';
 import { Composition } from 'remotion';
 import { EnvelopeStory, FPS, durationFor, type EnvelopeStoryProps } from './EnvelopeStory';
 import { TicketStory, TICKET_FPS, ticketDuration, type TicketStoryProps } from './TicketStory';
+import { FootageEdit, emptyEdit } from './FootageEdit';
 import { RyeStory, RYE_FPS, ryeDuration, type RyeStoryProps } from './RyeStory';
 import { PressStory, ClothPlate, PRESS_FPS, pressDuration, type PressStoryProps } from './PressStory';
 import { BURSTS } from './bursts';
@@ -134,6 +135,17 @@ export const Root = () => (
       durationInFrames={durationFor(envelope.holdSeconds)}
       defaultProps={envelope}
       calculateMetadata={({ props }) => ({ durationInFrames: durationFor(props.holdSeconds) })}
+    />
+    {/* Animated edits over uploaded footage: size, frame rate and length come with each edit. */}
+    <Composition
+      id="FootageEdit"
+      component={FootageEdit}
+      width={1080}
+      height={1920}
+      fps={30}
+      durationInFrames={90}
+      defaultProps={emptyEdit}
+      calculateMetadata={({ props }) => ({ width: props.plan.width, height: props.plan.height, fps: props.plan.fps, durationInFrames: props.plan.durationInFrames })}
     />
     <Composition
       id="EcgStory"

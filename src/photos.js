@@ -28,12 +28,12 @@ async function assertPublic(url) {
   for (const { address, family } of addresses) if (privateAddress(address, family)) throw new Error('Non-public address');
 }
 // Redirects are followed by hand so each hop is re-validated instead of trusting the first check.
-async function get(url, accept, maxBytes, fetcher) {
+async function get(url, accept, maxBytes, fetcher, timeout = TIMEOUT) {
   let current = new URL(url);
   for (let hop = 0; hop <= MAX_HOPS; hop++) {
     await assertPublic(current);
     const res = await fetcher(current.href, {
-      redirect: 'manual', signal: AbortSignal.timeout(TIMEOUT),
+      redirect: 'manual', signal: AbortSignal.timeout(timeout),
       headers: { Accept: accept, 'User-Agent': 'RigaWeekend/0.1 (+event listing preview)' },
     });
     if ([301, 302, 303, 307, 308].includes(res.status)) {
@@ -50,6 +50,8 @@ async function get(url, accept, maxBytes, fetcher) {
   }
   throw new Error('Too many redirects');
 }
+// The same guarded download serves pictures and 3D models handed over for animated edits (src/animate.js).
+export { get as fetchPublic };
 export function pictureUrl(html, pageUrl) {
   const patterns = [
     /<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i,

@@ -60,4 +60,21 @@ if(command==='demo') {
   for(const r of report){if(!r.ok)missing++;console.log(`${r.ok?'ok     ':'MISSING'} ${r.area.padEnd(9)} ${r.key.padEnd(28)} ${r.hint}`);}
   console.log(missing?`\n${missing} item(s) still need configuration.`:'\nConfiguration complete.');
   process.exitCode=missing?1:0;
-} else {store.close();throw new Error('Usage: cli.js demo | research [Friday YYYY-MM-DD] | worker | check | render [id] | links [id] | integrations | groups');}
+} else if(command==='user') {
+  // Logins for other people, who share this workspace with the owner. The password is printed once, here,
+  // and only its hash is kept; to replace one, remove the user and add them again.
+  try {
+    const [action,name]=process.argv.slice(3);
+    if(action==='add') {
+      const u=store.addUser(name);
+      console.log(`Name:     ${u.name}\nPassword: ${u.password}\n\nThis password is not shown again. It opens the dashboard, and the sign-in page ChatGPT shows when the plugin is connected.`);
+    } else if(action==='remove') {
+      if(!store.removeUser(name)) throw new Error(`No user called '${name||''}'`);
+      console.log(`Removed ${name}. Their dashboard login and their ChatGPT connection no longer work.`);
+    } else if(action==='list') {
+      const list=store.users();
+      for(const u of list) console.log(`${u.name}\tadded ${u.created.slice(0,10)}`);
+      if(!list.length) console.log('No users besides admin.');
+    } else throw new Error('Usage: cli.js user add <name> | remove <name> | list');
+  } catch(err){console.error(err.message);process.exitCode=1;} finally{store.close();}
+} else {store.close();throw new Error('Usage: cli.js demo | research [Friday YYYY-MM-DD] | worker | check | render [id] | links [id] | integrations | groups | user add|remove|list [name]');}
